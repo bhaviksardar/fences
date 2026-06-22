@@ -5,9 +5,11 @@ from sqlalchemy import select, update
 from pydantic import BaseModel, Field
 from typing import Optional
 from contextlib import asynccontextmanager
+import os
 import time
+import secrets
 
-from db import init_db, get_session, Run, ApiKey, hash_api_key
+from db import init_db, get_session, Run, ApiKey, hash_api_key, generate_api_key
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
@@ -185,6 +187,117 @@ async def get_run(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── Admin endpoints ───────────────────────────────────────────────────────────
+# Protected by ADMIN_PASSWORD env var set in Railway.
+# Never exposed in code — if ADMIN_PASSWORD is not set, these endpoints
+# are completely disabled so a misconfigured deploy can't be exploited.
+
+def verify_admin(x_admin_password: str = Header(...)) -> str:
+    """
+    Checks the X-Admin-Password header against the ADMIN_PASSWORD env var.
+    Three protections:
+    1. Uses secrets.compare_digest — prevents timing attacks where an
+       attacker could guess the password one character at a time by
+       measuring how long the comparison takes.
+    2. Returns 404 (not 401) if ADMIN_PASSWORD isn't set in the environment
+       — the endpoint appears to not exist rather than advertising itself
+       as a real but locked door.
+    3. Always compares both strings fully even if the first char differs
+       — again, timing attack prevention.
+    """
+    expected = os.environ.get("ADMIN_PASSWORD")
+    if not expected:
+        # Env var not set — act like the endpoint doesn't exist
+        raise HTTPException(status_code=404, detail="Not found")
+    if not secrets.compare_digest(x_admin_password, expected):
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    return x_admin_password
+
+
+class CreateKeyPayload(BaseModel):
+    label: str = Field(min_length=1, max_length=64)
+
+
+class RevokeKeyPayload(BaseModel):
+    prefix: str = Field(min_length=4, max_length=16)
+
+
+@app.post("/admin/keys/create")
+async def admin_create_key(
+    payload: CreateKeyPayload,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(verify_admin),
+):
+    """
+    Generate a new API key. The raw key is returned exactly once —
+    only its hash is stored, so it cannot be retrieved again.
+    """
+    raw_key = generate_api_key()
+    key_hash = hash_api_key(raw_key)
+    prefix = raw_key[:12]
+
+    existing = await session.get(ApiKey, key_hash)
+    if existing:
+        raise HTTPException(status_code=409, detail="Key collision — try again")
+
+    session.add(ApiKey(
+        key_hash=key_hash,
+        label=payload.label,
+        prefix=prefix,
+        created_at=time.time(),
+        revoked=False,
+    ))
+    await session.commit()
+
+    return {
+        "key": raw_key,
+        "prefix": prefix,
+        "label": payload.label,
+        "warning": "Save this now — it will not be shown again"
+    }
+
+
+@app.get("/admin/keys")
+async def admin_list_keys(
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(verify_admin),
+):
+    """List all keys — shows prefix and metadata only, never the raw key."""
+    result = await session.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
+    keys = result.scalars().all()
+    return {"keys": [
+        {
+            "prefix": k.prefix,
+            "label": k.label,
+            "revoked": k.revoked,
+            "created_at": k.created_at,
+            "last_used_at": k.last_used_at,
+        }
+        for k in keys
+    ]}
+
+
+@app.post("/admin/keys/revoke")
+async def admin_revoke_key(
+    payload: RevokeKeyPayload,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(verify_admin),
+):
+    """Revoke a key by its prefix. Takes effect immediately."""
+    result = await session.execute(
+        select(ApiKey).where(ApiKey.prefix == payload.prefix)
+    )
+    key = result.scalar_one_or_none()
+    if not key:
+        raise HTTPException(status_code=404, detail="Key not found")
+    if key.revoked:
+        raise HTTPException(status_code=409, detail="Key already revoked")
+
+    key.revoked = True
+    await session.commit()
+    return {"ok": True, "revoked": payload.prefix}
 
 
 if __name__ == "__main__":
