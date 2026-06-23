@@ -18,20 +18,24 @@ class GovClient:
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
 
-    def start_run(self, run_id: str, agent_name: str, budget_usd: float) -> dict:
+    def start_run(self, run_id: str, agent_name: str, budget_usd: float, max_iterations: int, max_duration_ms: int) -> dict:
         return self._post("/api/runs/start", {
             "run_id": run_id,
             "agent_name": agent_name,
             "budget_usd": budget_usd,
+            "max_iterations": max_iterations,
+            "max_duration_ms": max_duration_ms,
         })
 
-    def checkpoint(self, run_id: str, cost_delta_usd: float) -> dict:
+    def checkpoint(self, run_id: str, cost_delta_usd: float, iterations: int, duration_ms: int) -> dict:
         """
-        Reports a cost delta and asks the server whether the run is still
-        within budget. Returns {"ok": bool, "spent_usd": float, "budget_usd": float}.
+        Reports cost, iteration count, and elapsed time. Server checks all
+        three limits and returns which one was breached, if any.
         """
         return self._post(f"/api/runs/{run_id}/checkpoint", {
             "cost_delta_usd": cost_delta_usd,
+            "iterations": iterations,
+            "duration_ms": duration_ms,
         })
 
     def end_run(self, run_id: str, status: str, error: Optional[str] = None) -> dict:
