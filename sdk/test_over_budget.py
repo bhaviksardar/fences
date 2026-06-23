@@ -2,7 +2,7 @@ import asyncio
 import fences
 from fences import governed, checkpoint, BudgetExceeded
 
-fences.init(api_key="ag-dev-key", endpoint="http://localhost:8000")
+fences.init(api_key="fc_s2Swpy73aNBdpZtQinO6gY6BaEugHFEBdVO2y9y44VY", endpoint="https://fences-api-production.up.railway.app")
 
 
 @governed(budget_usd=0.10)

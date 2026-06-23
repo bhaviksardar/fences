@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
-from .exceptions import BudgetExceeded
+from .exceptions import BudgetExceeded, IterationLimitReached, TimeLimitReached
 from .client import GovClient
 
 _local = threading.local()
@@ -17,7 +17,15 @@ class RunState:
     run_id: str
     agent_name: str
     budget_usd: float
+    max_iterations: int
+    max_duration_ms: int
     cost_usd: float = 0.0
+    iterations: int = 0
+    started_at: float = field(default_factory=time.time)
+
+    @property
+    def duration_ms(self) -> int:
+        return int((time.time() - self.started_at) * 1000)
 
 
 def get_active_run() -> Optional[RunState]:
@@ -43,12 +51,16 @@ def _require_client() -> GovClient:
     return _client
 
 
-def governed(budget_usd: float):
+def governed(
+    budget_usd: float,
+    max_iterations: int = 100,
+    max_duration_ms: int = 300_000,  # 5 minutes default
+):
     """
-    Decorate an agent entrypoint with a budget limit.
+    Decorate an agent entrypoint with governance policy.
 
     Usage:
-        @fences.governed(budget_usd=0.50)
+        @fences.governed(budget_usd=0.50, max_iterations=20, max_duration_ms=60000)
         async def run_agent(query: str):
             ...
             await fences.checkpoint(cost_delta_usd=0.02)
@@ -59,13 +71,13 @@ def governed(budget_usd: float):
 
         @functools.wraps(func)
         async def async_wrapper(*args, **kwargs):
-            run = _start_run(func.__name__, budget_usd)
+            run = _start_run(func.__name__, budget_usd, max_iterations, max_duration_ms)
             _set_active_run(run)
             try:
                 result = await func(*args, **kwargs)
                 _end_run(run, status="success")
                 return result
-            except BudgetExceeded:
+            except (BudgetExceeded, IterationLimitReached, TimeLimitReached):
                 _end_run(run, status="breached")
                 raise
             except Exception as e:
@@ -76,13 +88,13 @@ def governed(budget_usd: float):
 
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):
-            run = _start_run(func.__name__, budget_usd)
+            run = _start_run(func.__name__, budget_usd, max_iterations, max_duration_ms)
             _set_active_run(run)
             try:
                 result = func(*args, **kwargs)
                 _end_run(run, status="success")
                 return result
-            except BudgetExceeded:
+            except (BudgetExceeded, IterationLimitReached, TimeLimitReached):
                 _end_run(run, status="breached")
                 raise
             except Exception as e:
@@ -96,10 +108,21 @@ def governed(budget_usd: float):
     return decorator
 
 
-def _start_run(agent_name: str, budget_usd: float) -> RunState:
+def _start_run(
+    agent_name: str,
+    budget_usd: float,
+    max_iterations: int,
+    max_duration_ms: int,
+) -> RunState:
     run_id = str(uuid.uuid4())
-    run = RunState(run_id=run_id, agent_name=agent_name, budget_usd=budget_usd)
-    _require_client().start_run(run_id, agent_name, budget_usd)
+    run = RunState(
+        run_id=run_id,
+        agent_name=agent_name,
+        budget_usd=budget_usd,
+        max_iterations=max_iterations,
+        max_duration_ms=max_duration_ms,
+    )
+    _require_client().start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms)
     return run
 
 
@@ -109,29 +132,42 @@ def _end_run(run: RunState, status: str, error: Optional[str] = None):
 
 async def checkpoint(cost_delta_usd: float = 0.0):
     """
-    Report spend since the last checkpoint and check the budget.
+    Call at each decision point in your agent loop. Enforces all three
+    limits — budget, iterations, and time — locally first (instant),
+    then confirms with the server (source of truth).
 
-    Checks LOCALLY first (instant) — if the local tally already shows
-    we're over budget, raise immediately without waiting on the network.
-    Otherwise, confirm with the server (the source of truth) before
-    continuing, since the server may know about spend this process isn't
-    aware of (e.g. a parallel run, or a manually-adjusted budget).
-
-    Raises BudgetExceeded if the run is over budget, by either account.
+    Raises BudgetExceeded, IterationLimitReached, or TimeLimitReached.
     """
     run = get_active_run()
     if run is None:
-        return  # Not inside a @governed function — no-op, don't break caller's code
+        return  # Not inside a @governed function — no-op
 
     run.cost_usd += cost_delta_usd
+    run.iterations += 1
 
-    # 1. Local check — instant, no network wait
+    # ── 1. Local checks — instant, no network ────────────────────────────────
     if run.cost_usd >= run.budget_usd:
         raise BudgetExceeded(run.cost_usd, run.budget_usd)
 
-    # 2. Server check — authoritative, source of truth
-    result = _require_client().checkpoint(run.run_id, cost_delta_usd)
-    if not result.get("ok", True):
-        server_spent = result.get("spent_usd", run.cost_usd)
-        server_budget = result.get("budget_usd", run.budget_usd)
-        raise BudgetExceeded(server_spent, server_budget)
+    if run.iterations >= run.max_iterations:
+        raise IterationLimitReached(run.iterations, run.max_iterations)
+
+    if run.duration_ms >= run.max_duration_ms:
+        raise TimeLimitReached(run.duration_ms, run.max_duration_ms)
+
+    # ── 2. Server check — authoritative source of truth ─────────────────────
+    result = _require_client().checkpoint(
+        run.run_id, cost_delta_usd, run.iterations, run.duration_ms
+    )
+
+    if result.get("ok", True):
+        return
+
+    # Server says we're over — figure out which limit was breached
+    breach = result.get("breach")
+    if breach == "budget_exceeded":
+        raise BudgetExceeded(result.get("spent_usd", run.cost_usd), result.get("budget_usd", run.budget_usd))
+    elif breach == "iteration_limit":
+        raise IterationLimitReached(run.iterations, run.max_iterations)
+    elif breach == "time_limit":
+        raise TimeLimitReached(run.duration_ms, run.max_duration_ms)
