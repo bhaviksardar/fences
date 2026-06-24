@@ -15,18 +15,18 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import declarative_base
 
 # ── Connection ────────────────────────────────────────────────────────────────
-# Local dev default: SQLite file in the backend folder.
-# Production: Render (and most managed Postgres providers) hand you a URL
-# starting with "postgres://" or "postgresql://" — neither works directly
-# with SQLAlchemy's async engine, which needs the asyncpg driver named
-# explicitly. We rewrite the scheme here so you can paste Render's URL
-# in as-is without manually editing it.
+import sys
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./fences.db")
+
+print(f"[fences] Raw DATABASE_URL prefix: {DATABASE_URL[:30]}...", file=sys.stderr)
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 elif DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in DATABASE_URL:
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+print(f"[fences] Using DATABASE_URL prefix: {DATABASE_URL[:30]}...", file=sys.stderr)
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
@@ -42,7 +42,10 @@ class Run(Base):
     run_id = Column(String, primary_key=True)
     agent_name = Column(String, nullable=False)
     budget_usd = Column(Float, nullable=False)
+    max_iterations = Column(Integer, nullable=False, default=100)
+    max_duration_ms = Column(Integer, nullable=False, default=300_000)
     spent_usd = Column(Float, nullable=False, default=0.0)
+    iterations = Column(Integer, nullable=False, default=0)
     status = Column(String, nullable=False, default="running")  # running | success | breached | error
     error = Column(String, nullable=True)
     started_at = Column(Float, nullable=False, default=time.time)
