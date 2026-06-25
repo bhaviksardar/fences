@@ -46,9 +46,40 @@ def add_column_if_missing(conn, table, column, col_type, default):
 
 def run():
     with engine.connect() as conn:
+        # Feature 2: iteration and time limits
         add_column_if_missing(conn, "runs", "max_iterations", "INTEGER", 100)
         add_column_if_missing(conn, "runs", "max_duration_ms", "INTEGER", 300000)
         add_column_if_missing(conn, "runs", "iterations", "INTEGER", 0)
+
+        # Feature 3: decision audit trail — create decisions table if missing
+        if is_sqlite:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    timestamp REAL NOT NULL,
+                    iteration INTEGER NOT NULL DEFAULT 0,
+                    reasoning TEXT NOT NULL,
+                    action TEXT
+                )
+            """))
+        else:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS decisions (
+                    id SERIAL PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    iteration INTEGER NOT NULL DEFAULT 0,
+                    reasoning TEXT NOT NULL,
+                    action TEXT
+                )
+            """))
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_decisions_run_id ON decisions (run_id)
+            """))
+        conn.commit()
+        print("OK: decisions table ready")
+
     print("\nMigration complete.")
 
 if __name__ == "__main__":
