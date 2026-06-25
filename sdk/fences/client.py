@@ -38,6 +38,17 @@ class GovClient:
             "duration_ms": duration_ms,
         })
 
+    def log_decision(self, run_id: str, iteration: int, reasoning: str, action: Optional[str]) -> dict:
+        """Fire-and-forget — we don't want a failed log call to crash the agent."""
+        try:
+            return self._post(f"/api/runs/{run_id}/decisions", {
+                "iteration": iteration,
+                "reasoning": reasoning,
+                "action": action,
+            })
+        except Exception:
+            return {}
+
     def end_run(self, run_id: str, status: str, error: Optional[str] = None) -> dict:
         return self._post(f"/api/runs/{run_id}/end", {
             "status": status,

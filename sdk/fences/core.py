@@ -171,3 +171,34 @@ async def checkpoint(cost_delta_usd: float = 0.0):
         raise IterationLimitReached(run.iterations, run.max_iterations)
     elif breach == "time_limit":
         raise TimeLimitReached(run.duration_ms, run.max_duration_ms)
+
+
+def log_decision(reasoning: str, action: Optional[str] = None):
+    """
+    Record WHY the agent is doing something at this step.
+
+    Call this before any significant action so the audit trail captures
+    the agent's reasoning, not just the outcome. Works both inside and
+    outside async functions — it's synchronous on purpose so it never
+    needs to be awaited and can't be forgotten with a missing await.
+
+    Usage:
+        fences.log_decision(
+            reasoning="API returned 503, retrying with backoff",
+            action="retry_tool_call"
+        )
+        fences.log_decision(
+            reasoning="All search results exhausted, summarising findings",
+            action="summarise"
+        )
+    """
+    run = get_active_run()
+    if run is None:
+        return  # No-op outside a @governed function
+
+    _require_client().log_decision(
+        run_id=run.run_id,
+        iteration=run.iterations,
+        reasoning=reasoning,
+        action=action,
+    )

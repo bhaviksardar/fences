@@ -52,6 +52,21 @@ class Run(Base):
     ended_at = Column(Float, nullable=True)
 
 
+class Decision(Base):
+    """
+    One row per log_decision() call. Builds the human-readable audit trail
+    of WHY the agent did what it did, not just what happened.
+    """
+    __tablename__ = "decisions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String, nullable=False, index=True)
+    timestamp = Column(Float, nullable=False, default=time.time)
+    iteration = Column(Integer, nullable=False, default=0)
+    reasoning = Column(String, nullable=False)
+    action = Column(String, nullable=True)
+
+
 class ApiKey(Base):
     """
     Stores only a HASH of each key, never the plaintext key itself.
@@ -60,9 +75,9 @@ class ApiKey(Base):
     """
     __tablename__ = "api_keys"
 
-    key_hash = Column(String, primary_key=True)   # sha256 hex digest, used for lookup
-    label = Column(String, nullable=True)          # human-friendly name, e.g. "Vik's laptop"
-    prefix = Column(String, nullable=False)         # first 8 chars of the real key, for display ("fc_a1b2c3...")
+    key_hash = Column(String, primary_key=True)
+    label = Column(String, nullable=True)
+    prefix = Column(String, nullable=False)
     created_at = Column(Float, nullable=False, default=time.time)
     revoked = Column(Boolean, nullable=False, default=False)
     last_used_at = Column(Float, nullable=True)
