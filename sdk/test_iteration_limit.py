@@ -2,7 +2,7 @@ import asyncio
 import fences
 from fences import governed, checkpoint, IterationLimitReached
 
-fences.init(api_key="fc_hIOpZmo0j7hnASlUCx7p4YAgIYhGUoXcCNYIW_GRfCo", endpoint="http://localhost:8000")
+fences.init(api_key="fc_s2Swpy73aNBdpZtQinO6gY6BaEugHFEBdVO2y9y44VY", endpoint="http://localhost:8000")
 
 
 @governed(budget_usd=99.0, max_iterations=5)
