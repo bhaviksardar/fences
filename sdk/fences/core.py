@@ -22,6 +22,7 @@ class RunState:
     cost_usd: float = 0.0
     iterations: int = 0
     started_at: float = field(default_factory=time.time)
+    decisions: list = field(default_factory=list)
 
     @property
     def duration_ms(self) -> int:
@@ -46,18 +47,13 @@ def init(
     local_only: bool = False,
 ):
     """
-    Initialize Fences.
+    Initialize Fences. Call once at startup before using @governed.
 
-    Free / self-hosted usage — no backend, no API key needed:
+    Local mode — no backend required:
         fences.init(local_only=True)
 
-    Fences Cloud (managed backend, audit trail, dashboard):
-        fences.init(api_key="fc_...", endpoint="https://your-fences-instance.com")
-
-    local_only mode enforces all three limits (budget, iterations, time)
-    entirely in-process. No data is sent anywhere. The tradeoff is that
-    enforcement isn't server-authoritative — a restarted process starts
-    fresh — but for most self-hosted use cases that's fine.
+    Cloud mode — connects to a Fences backend:
+        fences.init(api_key="fc_...", endpoint="https://...")
     """
     global _client, _local_only
     _local_only = local_only
@@ -69,23 +65,20 @@ def init(
     if not api_key:
         raise ValueError(
             "api_key is required unless local_only=True. "
-            "Use fences.init(local_only=True) for free self-hosted usage, "
-            "or fences.init(api_key='fc_...') for Fences Cloud."
+            "Use fences.init(local_only=True) for local usage."
         )
     _client = GovClient(api_key=api_key, endpoint=endpoint)
 
 
 def _get_client() -> Optional[GovClient]:
-    """Returns the client, or None in local_only mode. Never raises."""
     return _client
 
 
 def _require_init():
-    """Raises if fences.init() hasn't been called at all."""
     if not _local_only and _client is None:
         raise RuntimeError(
             "Call fences.init() before using Fences. "
-            "For free local usage: fences.init(local_only=True)"
+            "For local usage: fences.init(local_only=True)"
         )
 
 
@@ -95,19 +88,22 @@ def governed(
     max_duration_ms: int = 300_000,
 ):
     """
-    Decorate an agent entrypoint with governance policy.
+    Decorator that applies governance policy to an agent function.
 
-    Works in both local_only and cloud modes — no code change needed
-    when upgrading from free to paid.
+    Args:
+        budget_usd: Maximum spend allowed for this run in USD.
+        max_iterations: Maximum number of checkpoint() calls allowed.
+        max_duration_ms: Maximum wall-clock duration in milliseconds.
+
+    Raises BudgetExceeded, IterationLimitReached, or TimeLimitReached
+    when limits are crossed.
 
     Usage:
-        fences.init(local_only=True)  # free tier
-
-        @fences.governed(budget_usd=0.50, max_iterations=20, max_duration_ms=60000)
+        @fences.governed(budget_usd=0.50, max_iterations=20)
         async def run_agent(query: str):
-            ...
+            response = call_llm(query)
             await fences.checkpoint(cost_delta_usd=0.02)
-            ...
+            return response
     """
     def decorator(func: Callable) -> Callable:
         is_async = asyncio.iscoroutinefunction(func)
@@ -153,12 +149,7 @@ def governed(
     return decorator
 
 
-def _start_run(
-    agent_name: str,
-    budget_usd: float,
-    max_iterations: int,
-    max_duration_ms: int,
-) -> RunState:
+def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms) -> RunState:
     run_id = str(uuid.uuid4())
     run = RunState(
         run_id=run_id,
@@ -181,16 +172,14 @@ def _end_run(run: RunState, status: str, error: Optional[str] = None):
 
 async def checkpoint(cost_delta_usd: float = 0.0):
     """
-    Call at each decision point in your agent loop.
+    Report spend and check governance limits at a decision point.
 
-    In local_only mode: enforces limits purely in-process, instant,
-    no network call.
+    Call this after each significant action in your agent loop.
+    Raises BudgetExceeded, IterationLimitReached, or TimeLimitReached
+    if any limit is crossed.
 
-    In cloud mode: enforces locally first (fast), then confirms with
-    the server (authoritative — catches spend from other processes or
-    manually-adjusted budgets).
-
-    Raises BudgetExceeded, IterationLimitReached, or TimeLimitReached.
+    Args:
+        cost_delta_usd: Amount spent since the last checkpoint call.
     """
     run = get_active_run()
     if run is None:
@@ -199,7 +188,6 @@ async def checkpoint(cost_delta_usd: float = 0.0):
     run.cost_usd += cost_delta_usd
     run.iterations += 1
 
-    # ── Local checks — always run, instant ───────────────────────────────────
     if run.cost_usd >= run.budget_usd:
         raise BudgetExceeded(run.cost_usd, run.budget_usd)
 
@@ -209,10 +197,9 @@ async def checkpoint(cost_delta_usd: float = 0.0):
     if run.duration_ms >= run.max_duration_ms:
         raise TimeLimitReached(run.duration_ms, run.max_duration_ms)
 
-    # ── Server check — cloud mode only ───────────────────────────────────────
     client = _get_client()
     if client is None:
-        return  # local_only mode — local checks above are the full enforcement
+        return
 
     result = client.checkpoint(
         run.run_id, cost_delta_usd, run.iterations, run.duration_ms
@@ -232,13 +219,14 @@ async def checkpoint(cost_delta_usd: float = 0.0):
 
 def log_decision(reasoning: str, action: Optional[str] = None):
     """
-    Record WHY the agent is doing something at this step.
+    Record the agent's reasoning at this step.
 
-    In local_only mode: stored in-memory on the RunState only (not
-    persisted anywhere, since there's no backend). Useful for debugging
-    locally — call fences.get_active_run().decisions to inspect.
+    Call this before any significant action to build an audit trail
+    of why the agent did what it did.
 
-    In cloud mode: sent to the backend and queryable via the dashboard.
+    Args:
+        reasoning: Why the agent is taking this action.
+        action: Short label for the action being taken (e.g. "web_search").
     """
     run = get_active_run()
     if run is None:
@@ -250,13 +238,8 @@ def log_decision(reasoning: str, action: Optional[str] = None):
         "reasoning": reasoning,
         "action": action,
     }
-
-    # Always store in-memory regardless of mode
-    if not hasattr(run, "decisions"):
-        run.decisions = []
     run.decisions.append(entry)
 
-    # Send to backend in cloud mode only
     client = _get_client()
     if client:
         client.log_decision(
