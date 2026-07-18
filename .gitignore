@@ -1,0 +1,31 @@
+# Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Tests — kept local only, not part of the public repo
+sdk/tests/
+sdk/pytest.ini
+sdk/requirements-dev.txt
+
+# Local database
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+*.egg
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
