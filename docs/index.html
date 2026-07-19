@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fences — Agent Governance</title>
+  <meta name="description" content="Runtime governance for AI agents. Budget limits, loop protection, and audit trails in three lines of code." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #ffffff;
+      --surface:  #f8f8f8;
+      --border:   #e5e5e5;
+      --text:     #0a0a0a;
+      --muted:    #6b7280;
+      --accent:   #0a0a0a;
+      --green:    #16a34a;
+      --red:      #dc2626;
+      --mono:     'JetBrains Mono', monospace;
+      --sans:     'Inter', sans-serif;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Nav ── */
+    nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 48px;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: rgba(255,255,255,0.92);
+      backdrop-filter: blur(12px);
+      z-index: 100;
+    }
+
+    .nav-logo {
+      font-family: var(--mono);
+      font-weight: 700;
+      font-size: 16px;
+      color: var(--text);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 0;
+      letter-spacing: -0.02em;
+    }
+
+    .logo-bracket {
+      color: var(--muted);
+      font-weight: 400;
+    }
+
+    .logo-bar {
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .logo-name {
+      color: var(--text);
+      font-weight: 700;
+      margin-left: 6px;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 32px;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      transition: color 0.15s;
+    }
+
+    .nav-links a:hover { color: var(--text); }
+
+    .nav-cta {
+      background: var(--text) !important;
+      color: #fff !important;
+      font-weight: 600 !important;
+      padding: 8px 18px;
+      border-radius: 6px;
+      font-size: 14px !important;
+      transition: opacity 0.15s !important;
+    }
+
+    .nav-cta:hover { opacity: 0.8 !important; }
+
+    /* ── Hero ── */
+    .hero {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 100px 48px 80px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      align-items: center;
+    }
+
+    .hero-eyebrow {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      margin-bottom: 20px;
+    }
+
+    .hero-headline {
+      font-family: var(--mono);
+      font-size: clamp(32px, 4vw, 52px);
+      font-weight: 700;
+      line-height: 1.1;
+      margin-bottom: 24px;
+      letter-spacing: -0.03em;
+      color: var(--text);
+    }
+
+    .hero-headline em {
+      font-style: normal;
+      text-decoration: underline;
+      text-decoration-thickness: 3px;
+      text-underline-offset: 6px;
+    }
+
+    .hero-sub {
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.7;
+      margin-bottom: 36px;
+      max-width: 440px;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .btn-primary {
+      background: var(--text);
+      color: #fff;
+      font-weight: 600;
+      font-size: 14px;
+      padding: 12px 24px;
+      border-radius: 6px;
+      text-decoration: none;
+      transition: opacity 0.15s;
+    }
+
+    .btn-primary:hover { opacity: 0.8; }
+
+    .btn-secondary {
+      color: var(--muted);
+      font-size: 14px;
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+
+    .btn-secondary:hover { color: var(--text); }
+
+    /* ── Terminal ── */
+    .terminal {
+      background: #0a0a0a;
+      border: 1px solid #1a1a1a;
+      border-radius: 10px;
+      overflow: hidden;
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+
+    .terminal-bar {
+      background: #161616;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid #1a1a1a;
+    }
+
+    .dot { width: 12px; height: 12px; border-radius: 50%; }
+    .dot-red    { background: #ff5f57; }
+    .dot-yellow { background: #ffbd2e; }
+    .dot-green  { background: #28c840; }
+
+    .terminal-title {
+      color: #555;
+      font-size: 12px;
+      margin-left: 8px;
+    }
+
+    .terminal-body { padding: 20px; min-height: 300px; }
+
+    .t-line {
+      display: flex;
+      margin-bottom: 4px;
+      opacity: 0;
+      transform: translateY(4px);
+      transition: opacity 0.2s, transform 0.2s;
+    }
+
+    .t-line.visible { opacity: 1; transform: translateY(0); }
+
+    .t-prompt { color: #555; margin-right: 8px; user-select: none; }
+    .t-cmd    { color: #f0f0f0; }
+    .t-out    { color: #555; margin-left: 16px; }
+    .t-step   { color: #60a5fa; margin-left: 16px; }
+    .t-ok     { color: #4ade80; margin-left: 16px; }
+    .t-err    { color: #f87171; margin-left: 16px; font-weight: 500; }
+    .t-blank  { height: 8px; }
+
+    .t-cursor {
+      display: inline-block;
+      width: 8px;
+      height: 14px;
+      background: #f0f0f0;
+      vertical-align: middle;
+      animation: blink 1s step-end infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0; }
+    }
+
+    /* ── Install strip ── */
+    .install-strip {
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      padding: 20px 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+    }
+
+    .install-label {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .install-cmd {
+      font-family: var(--mono);
+      font-size: 13px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 8px 16px;
+      border-radius: 6px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .copy-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 0;
+      transition: color 0.15s;
+      font-family: var(--sans);
+    }
+
+    .copy-btn:hover { color: var(--text); }
+
+    /* ── Features ── */
+    .features {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 96px 48px;
+    }
+
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      font-family: var(--mono);
+      font-size: clamp(24px, 3vw, 36px);
+      font-weight: 700;
+      margin-bottom: 16px;
+      letter-spacing: -0.02em;
+    }
+
+    .section-sub {
+      color: var(--muted);
+      font-size: 16px;
+      max-width: 520px;
+      margin-bottom: 56px;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--border);
+    }
+
+    .feature-card {
+      background: var(--bg);
+      padding: 32px;
+      transition: background 0.15s;
+    }
+
+    .feature-card:hover { background: var(--surface); }
+
+    .feature-icon {
+      font-size: 22px;
+      margin-bottom: 20px;
+      display: block;
+    }
+
+    .feature-title {
+      font-family: var(--mono);
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .feature-desc {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.65;
+      margin-bottom: 20px;
+    }
+
+    .feature-tag {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 4px 10px;
+      border-radius: 4px;
+      display: inline-block;
+    }
+
+    /* ── Code section ── */
+    .code-section {
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      padding: 96px 48px;
+    }
+
+    .code-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      align-items: start;
+    }
+
+    .code-block {
+      background: #0a0a0a;
+      border: 1px solid #1a1a1a;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .code-header {
+      background: #111;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid #1a1a1a;
+    }
+
+    .code-filename { font-family: var(--mono); font-size: 12px; color: #555; }
+    .code-lang {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: #888;
+      background: #1a1a1a;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    pre {
+      padding: 24px;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.7;
+      overflow-x: auto;
+      color: #d4d4d4;
+    }
+
+    .kw  { color: #c792ea; }
+    .fn  { color: #82aaff; }
+    .dec { color: #ffd580; }
+    .str { color: #c3e88d; }
+    .cm  { color: #546e7a; }
+    .num { color: #f78c6c; }
+
+    .modes { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
+
+    .mode-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      background: var(--bg);
+    }
+
+    .mode-card.active {
+      border-color: var(--text);
+      background: var(--bg);
+    }
+
+    .mode-title {
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .mode-badge {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 100px;
+      font-family: var(--sans);
+      font-weight: 500;
+    }
+
+    .badge-free {
+      background: #f0fdf4;
+      color: var(--green);
+      border: 1px solid #bbf7d0;
+    }
+
+    .badge-cloud {
+      background: var(--surface);
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+
+    .mode-desc {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    /* ── Exceptions table ── */
+    .exceptions {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 96px 48px;
+    }
+
+    .exception-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 40px;
+      font-size: 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .exception-table th {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      text-align: left;
+      padding: 12px 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .exception-table td {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    .exception-table tr:last-child td { border-bottom: none; }
+    .exception-table tr:hover td { background: var(--surface); }
+
+    .ex-name  { font-family: var(--mono); font-size: 13px; color: var(--red); }
+    .ex-param { font-family: var(--mono); font-size: 13px; color: var(--text); }
+    .ex-desc  { color: var(--muted); font-size: 13px; }
+
+    /* ── CTA ── */
+    .cta-section {
+      border-top: 1px solid var(--border);
+      background: var(--text);
+      color: #fff;
+      padding: 96px 48px;
+      text-align: center;
+    }
+
+    .cta-section h2 {
+      font-family: var(--mono);
+      font-size: clamp(28px, 4vw, 44px);
+      font-weight: 700;
+      margin-bottom: 16px;
+      letter-spacing: -0.02em;
+      color: #fff;
+    }
+
+    .cta-section p {
+      color: rgba(255,255,255,0.5);
+      font-size: 16px;
+      margin-bottom: 36px;
+    }
+
+    .cta-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn-primary-inv {
+      background: #fff;
+      color: #000;
+      font-weight: 600;
+      font-size: 14px;
+      padding: 12px 24px;
+      border-radius: 6px;
+      text-decoration: none;
+      transition: opacity 0.15s;
+    }
+
+    .btn-primary-inv:hover { opacity: 0.85; }
+
+    .btn-secondary-inv {
+      color: rgba(255,255,255,0.5);
+      font-size: 14px;
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+
+    .btn-secondary-inv:hover { color: #fff; }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 32px 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .footer-logo {
+      font-family: var(--mono);
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .footer-links { display: flex; gap: 24px; }
+
+    .footer-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+      transition: color 0.15s;
+    }
+
+    .footer-links a:hover { color: var(--text); }
+    .footer-copy { color: var(--muted); font-size: 12px; }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      nav { padding: 16px 24px; }
+      .nav-links { display: none; }
+      .hero { grid-template-columns: 1fr; padding: 60px 24px 48px; gap: 40px; }
+      .install-strip { padding: 20px 24px; flex-direction: column; gap: 12px; }
+      .features { padding: 60px 24px; }
+      .feature-grid { grid-template-columns: 1fr; }
+      .code-section { padding: 60px 24px; }
+      .code-inner { grid-template-columns: 1fr; gap: 40px; }
+      .exceptions { padding: 60px 24px; }
+      .cta-section { padding: 60px 24px; }
+      footer { padding: 24px; flex-direction: column; gap: 16px; text-align: center; }
+      .footer-links { justify-content: center; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .t-line { transition: none; }
+      .t-cursor { animation: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Nav -->
+<nav>
+  <a href="/" class="nav-logo">
+    <span class="logo-bracket">(</span><span class="logo-bar">|=|</span><span class="logo-bracket">)</span><span class="logo-name">Fences</span>
+  </a>
+  <div class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#quickstart">Quickstart</a>
+    <a href="https://github.com/bhaviksardar/fences">Docs</a>
+    <a href="https://github.com/bhaviksardar/fences" class="nav-cta">GitHub</a>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div>
+    <p class="hero-eyebrow">Agent governance SDK</p>
+    <h1 class="hero-headline">Stop agents<br/>before they<br/><em>go wrong.</em></h1>
+    <p class="hero-sub">
+      Budget limits, runaway loop protection, and a decision audit trail —
+      enforced at runtime, in three lines of code.
+    </p>
+    <div class="hero-actions">
+      <a href="#quickstart" class="btn-primary">Get started free</a>
+      <a href="https://github.com/bhaviksardar/fences" class="btn-secondary">View on GitHub →</a>
+    </div>
+  </div>
+
+  <div class="terminal">
+    <div class="terminal-bar">
+      <div class="dot dot-red"></div>
+      <div class="dot dot-yellow"></div>
+      <div class="dot dot-green"></div>
+      <span class="terminal-title">agent_run.py</span>
+    </div>
+    <div class="terminal-body" id="terminal-body"></div>
+  </div>
+</section>
+
+<!-- Install strip -->
+<div class="install-strip">
+  <span class="install-label">Install</span>
+  <div class="install-cmd">
+    <span>pip install fences</span>
+    <button class="copy-btn" onclick="copyInstall(this)">copy</button>
+  </div>
+  <span class="install-label">No account or backend required</span>
+</div>
+
+<!-- Features -->
+<section class="features" id="features">
+  <p class="section-label">What it does</p>
+  <h2 class="section-title">Three problems.<br/>One decorator.</h2>
+  <p class="section-sub">Agents fail in predictable ways. Fences catches all three before they become incidents.</p>
+
+  <div class="feature-grid">
+    <div class="feature-card">
+      <span class="feature-icon">💰</span>
+      <h3 class="feature-title">Budget enforcement</h3>
+      <p class="feature-desc">Set a spend limit per run. The moment cumulative cost crosses it, the agent stops with a clean exception — not after the fact.</p>
+      <span class="feature-tag">BudgetExceeded</span>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">🔁</span>
+      <h3 class="feature-title">Loop protection</h3>
+      <p class="feature-desc">An agent can stay within budget and still loop forever on a cheap model. Iteration and time limits catch what spend control misses.</p>
+      <span class="feature-tag">IterationLimitReached</span>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">📋</span>
+      <h3 class="feature-title">Decision audit trail</h3>
+      <p class="feature-desc">Agents record why they did something at each step. When a run breaches a limit, the full reasoning trail is preserved for debugging.</p>
+      <span class="feature-tag">log_decision()</span>
+    </div>
+  </div>
+</section>
+
+<!-- Code section -->
+<section class="code-section" id="quickstart">
+  <div class="code-inner">
+    <div>
+      <p class="section-label">Quickstart</p>
+      <h2 class="section-title">Works with any agent.</h2>
+      <p class="section-sub" style="margin-bottom: 32px;">No framework lock-in. Wrap any async function — the decorator handles the rest.</p>
+
+      <div class="modes">
+        <div class="mode-card active">
+          <div class="mode-title">
+            Local mode
+            <span class="mode-badge badge-free">Free</span>
+          </div>
+          <p class="mode-desc">No account, no backend, no API key. Governance runs entirely in-process. Perfect for getting started or self-hosted deployments.</p>
+        </div>
+        <div class="mode-card">
+          <div class="mode-title">
+            Cloud mode
+            <span class="mode-badge badge-cloud">Coming soon</span>
+          </div>
+          <p class="mode-desc">Connect to Fences Cloud for persistent audit trails, a live dashboard, and server-authoritative enforcement. Same code — one line changes.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-filename">agent.py</span>
+        <span class="code-lang">Python</span>
+      </div>
+      <pre><code><span class="kw">import</span> fences
+<span class="kw">from</span> fences <span class="kw">import</span> governed, checkpoint, log_decision
+<span class="kw">from</span> fences <span class="kw">import</span> BudgetExceeded, IterationLimitReached
+
+fences.<span class="fn">init</span>(<span class="str">local_only</span>=<span class="kw">True</span>)
+
+<span class="dec">@governed</span>(
+    budget_usd=<span class="num">0.50</span>,
+    max_iterations=<span class="num">20</span>,
+    max_duration_ms=<span class="num">60_000</span>
+)
+<span class="kw">async def</span> <span class="fn">run_agent</span>(query: str):
+    <span class="kw">for</span> step <span class="kw">in</span> <span class="fn">range</span>(<span class="num">100</span>):
+        <span class="fn">log_decision</span>(
+            reasoning=<span class="str">f"step {step}: searching"</span>,
+            action=<span class="str">"web_search"</span>
+        )
+        <span class="kw">await</span> <span class="fn">checkpoint</span>(cost_delta_usd=<span class="num">0.02</span>)
+
+<span class="kw">try</span>:
+    <span class="kw">await</span> <span class="fn">run_agent</span>(<span class="str">"research this topic"</span>)
+<span class="kw">except</span> BudgetExceeded <span class="kw">as</span> e:
+    <span class="fn">print</span>(<span class="str">f"Stopped: ${'{'}e.spent_usd:.4f{'}'} spent"</span>)
+<span class="kw">except</span> IterationLimitReached <span class="kw">as</span> e:
+    <span class="fn">print</span>(<span class="str">f"Stopped: {'{'}e.iterations{'}'} iterations"</span>)</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Exceptions table -->
+<section class="exceptions">
+  <p class="section-label">Reference</p>
+  <h2 class="section-title">Limits and exceptions</h2>
+
+  <table class="exception-table">
+    <thead>
+      <tr>
+        <th>Exception</th>
+        <th>Parameter</th>
+        <th>When it fires</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="ex-name">BudgetExceeded</span></td>
+        <td><span class="ex-param">budget_usd</span></td>
+        <td><span class="ex-desc">Cumulative spend across all checkpoint() calls exceeds the limit.</span></td>
+      </tr>
+      <tr>
+        <td><span class="ex-name">IterationLimitReached</span></td>
+        <td><span class="ex-param">max_iterations</span></td>
+        <td><span class="ex-desc">checkpoint() has been called more times than the iteration limit allows.</span></td>
+      </tr>
+      <tr>
+        <td><span class="ex-name">TimeLimitReached</span></td>
+        <td><span class="ex-param">max_duration_ms</span></td>
+        <td><span class="ex-desc">Wall-clock time since the run started exceeds the duration limit.</span></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- CTA -->
+<section class="cta-section">
+  <h2>Give your agents brakes.</h2>
+  <p>Free to use. No account required to get started.</p>
+  <div class="cta-actions">
+    <a href="https://github.com/bhaviksardar/fences" class="btn-primary-inv">View on GitHub</a>
+    <a href="https://github.com/bhaviksardar/fences" class="btn-secondary-inv">Read the docs →</a>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer>
+  <a href="/" class="footer-logo">
+    <span style="color:var(--muted)">(</span>|=|<span style="color:var(--muted)">)</span> Fences
+  </a>
+  <div class="footer-links">
+    <a href="https://github.com/bhaviksardar/fences">GitHub</a>
+    <a href="https://github.com/bhaviksardar/fences">Docs</a>
+    <a href="https://github.com/bhaviksardar/fences/blob/main/LICENSE">MIT License</a>
+  </div>
+  <p class="footer-copy">© 2025 Bhavik Sardar</p>
+</footer>
+
+<script>
+const lines = [
+  { type: 'cmd',  text: 'python agent.py' },
+  { type: 'step', text: 'iteration 0: calling gpt-4o...' },
+  { type: 'ok',   text: '✓  $0.031 — step 1 complete' },
+  { type: 'step', text: 'iteration 1: calling gpt-4o...' },
+  { type: 'ok',   text: '✓  $0.028 — step 2 complete' },
+  { type: 'step', text: 'iteration 2: calling gpt-4o...' },
+  { type: 'ok',   text: '✓  $0.033 — step 3 complete' },
+  { type: 'step', text: 'iteration 3: calling gpt-4o...' },
+  { type: 'ok',   text: '✓  $0.029 — step 4 complete' },
+  { type: 'blank' },
+  { type: 'err',  text: 'BudgetExceeded: spent $0.1210 of $0.1000 limit' },
+  { type: 'out',  text: 'Run stopped. Audit trail preserved.' },
+  { type: 'blank' },
+  { type: 'cursor' },
+];
+
+const body = document.getElementById('terminal-body');
+let idx = 0;
+
+function appendLine() {
+  if (idx >= lines.length) return;
+  const l = lines[idx++];
+
+  if (l.type === 'blank') {
+    const el = document.createElement('div');
+    el.className = 't-blank';
+    body.appendChild(el);
+    setTimeout(appendLine, 80);
+    return;
+  }
+
+  if (l.type === 'cursor') {
+    const el = document.createElement('div');
+    el.className = 't-line visible';
+    el.innerHTML = `<span class="t-prompt">$</span><span class="t-cursor"></span>`;
+    body.appendChild(el);
+    return;
+  }
+
+  const el = document.createElement('div');
+  el.className = 't-line';
+
+  if (l.type === 'cmd')  el.innerHTML = `<span class="t-prompt">$</span><span class="t-cmd">${l.text}</span>`;
+  if (l.type === 'step') el.innerHTML = `<span class="t-step">${l.text}</span>`;
+  if (l.type === 'ok')   el.innerHTML = `<span class="t-ok">${l.text}</span>`;
+  if (l.type === 'err')  el.innerHTML = `<span class="t-err">${l.text}</span>`;
+  if (l.type === 'out')  el.innerHTML = `<span class="t-out">${l.text}</span>`;
+
+  body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('visible'));
+
+  const delay = l.type === 'err' ? 700 : l.type === 'step' ? 500 : 200;
+  setTimeout(appendLine, delay);
+}
+
+setTimeout(appendLine, 600);
+
+setInterval(() => {
+  body.innerHTML = '';
+  idx = 0;
+  setTimeout(appendLine, 400);
+}, 13000);
+
+function copyInstall(btn) {
+  navigator.clipboard.writeText('pip install fences').then(() => {
+    btn.textContent = 'copied!';
+    setTimeout(() => btn.textContent = 'copy', 2000);
+  });
+}
+</script>
+</body>
+</html>
