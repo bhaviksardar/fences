@@ -8,20 +8,22 @@ class GovClient:
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
 
-    def start_run(self, run_id: str, agent_name: str, budget_usd: float, max_iterations: int, max_duration_ms: int) -> dict:
+    def start_run(self, run_id: str, agent_name: str, budget_usd: float, max_iterations: int, max_duration_ms: int, max_tokens: int) -> dict:
         return self._post("/api/runs/start", {
             "run_id": run_id,
             "agent_name": agent_name,
             "budget_usd": budget_usd,
             "max_iterations": max_iterations,
             "max_duration_ms": max_duration_ms,
+            "max_tokens": max_tokens,
         })
 
-    def checkpoint(self, run_id: str, cost_delta_usd: float, iterations: int, duration_ms: int) -> dict:
+    def checkpoint(self, run_id: str, cost_delta_usd: float, iterations: int, duration_ms: int, tokens_used: int) -> dict:
         return self._post(f"/api/runs/{run_id}/checkpoint", {
             "cost_delta_usd": cost_delta_usd,
             "iterations": iterations,
             "duration_ms": duration_ms,
+            "tokens_used": tokens_used,
         })
 
     def log_decision(self, run_id: str, iteration: int, reasoning: str, action: Optional[str]) -> dict:

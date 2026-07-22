@@ -46,12 +46,14 @@ class StartRunPayload(BaseModel):
     budget_usd: float = Field(gt=0)
     max_iterations: int = Field(default=100, gt=0)
     max_duration_ms: int = Field(default=300_000, gt=0)
+    max_tokens: int = Field(default=0, ge=0)
 
 
 class CheckpointPayload(BaseModel):
     cost_delta_usd: float = Field(ge=0)
     iterations: int = Field(ge=0)
     duration_ms: int = Field(ge=0)
+    tokens_used: int = Field(default=0, ge=0)
 
 
 class EndRunPayload(BaseModel):
@@ -80,8 +82,10 @@ def run_to_dict(run: Run) -> dict:
         "budget_usd": run.budget_usd,
         "max_iterations": run.max_iterations,
         "max_duration_ms": run.max_duration_ms,
+        "max_tokens": run.max_tokens,
         "spent_usd": run.spent_usd,
         "iterations": run.iterations,
+        "tokens_used": run.tokens_used,
         "status": run.status,
         "error": run.error,
         "started_at": run.started_at,
@@ -105,8 +109,10 @@ async def start_run(
         budget_usd=payload.budget_usd,
         max_iterations=payload.max_iterations,
         max_duration_ms=payload.max_duration_ms,
+        max_tokens=payload.max_tokens,
         spent_usd=0.0,
         iterations=0,
+        tokens_used=0,
         status="running",
         started_at=time.time(),
     )
@@ -135,6 +141,7 @@ async def checkpoint(
         .values(
             spent_usd=Run.spent_usd + payload.cost_delta_usd,
             iterations=payload.iterations,
+            tokens_used=Run.tokens_used + payload.tokens_used,
         )
     )
     await session.commit()
@@ -147,6 +154,8 @@ async def checkpoint(
         breach = "iteration_limit"
     elif payload.duration_ms >= run.max_duration_ms:
         breach = "time_limit"
+    elif run.max_tokens > 0 and run.tokens_used >= run.max_tokens:
+        breach = "token_limit"
 
     if breach:
         run.status = "breached"
@@ -158,9 +167,16 @@ async def checkpoint(
             "budget_usd": run.budget_usd,
             "iterations": run.iterations,
             "max_iterations": run.max_iterations,
+            "tokens_used": run.tokens_used,
+            "max_tokens": run.max_tokens,
         }
 
-    return {"ok": True, "spent_usd": run.spent_usd, "iterations": run.iterations}
+    return {
+        "ok": True,
+        "spent_usd": run.spent_usd,
+        "iterations": run.iterations,
+        "tokens_used": run.tokens_used,
+    }
 
 
 @app.post("/api/runs/{run_id}/end")

@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
-from .exceptions import BudgetExceeded, IterationLimitReached, TimeLimitReached
+from .exceptions import BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached
 from .client import GovClient
 
 _local = threading.local()
@@ -19,8 +19,10 @@ class RunState:
     budget_usd: float
     max_iterations: int
     max_duration_ms: int
+    max_tokens: int
     cost_usd: float = 0.0
     iterations: int = 0
+    tokens_used: int = 0
     started_at: float = field(default_factory=time.time)
     decisions: list = field(default_factory=list)
 
@@ -86,6 +88,7 @@ def governed(
     budget_usd: float,
     max_iterations: int = 100,
     max_duration_ms: int = 300_000,
+    max_tokens: int = 0,
 ):
     """
     Decorator that applies governance policy to an agent function.
@@ -94,15 +97,19 @@ def governed(
         budget_usd: Maximum spend allowed for this run in USD.
         max_iterations: Maximum number of checkpoint() calls allowed.
         max_duration_ms: Maximum wall-clock duration in milliseconds.
+        max_tokens: Maximum total tokens (input + output) allowed. 0 = no limit.
 
-    Raises BudgetExceeded, IterationLimitReached, or TimeLimitReached
-    when limits are crossed.
+    Raises BudgetExceeded, IterationLimitReached, TimeLimitReached, or
+    TokenLimitReached when limits are crossed.
 
     Usage:
-        @fences.governed(budget_usd=0.50, max_iterations=20)
+        @fences.governed(budget_usd=0.50, max_iterations=20, max_tokens=50000)
         async def run_agent(query: str):
             response = call_llm(query)
-            await fences.checkpoint(cost_delta_usd=0.02)
+            await fences.checkpoint(
+                cost_delta_usd=0.02,
+                tokens_used=response.usage.total_tokens,
+            )
             return response
     """
     def decorator(func: Callable) -> Callable:
@@ -111,13 +118,13 @@ def governed(
         @functools.wraps(func)
         async def async_wrapper(*args, **kwargs):
             _require_init()
-            run = _start_run(func.__name__, budget_usd, max_iterations, max_duration_ms)
+            run = _start_run(func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens)
             _set_active_run(run)
             try:
                 result = await func(*args, **kwargs)
                 _end_run(run, status="success")
                 return result
-            except (BudgetExceeded, IterationLimitReached, TimeLimitReached):
+            except (BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached):
                 _end_run(run, status="breached")
                 raise
             except Exception as e:
@@ -129,13 +136,13 @@ def governed(
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):
             _require_init()
-            run = _start_run(func.__name__, budget_usd, max_iterations, max_duration_ms)
+            run = _start_run(func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens)
             _set_active_run(run)
             try:
                 result = func(*args, **kwargs)
                 _end_run(run, status="success")
                 return result
-            except (BudgetExceeded, IterationLimitReached, TimeLimitReached):
+            except (BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached):
                 _end_run(run, status="breached")
                 raise
             except Exception as e:
@@ -149,7 +156,7 @@ def governed(
     return decorator
 
 
-def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms) -> RunState:
+def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens) -> RunState:
     run_id = str(uuid.uuid4())
     run = RunState(
         run_id=run_id,
@@ -157,10 +164,11 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms) -> RunSt
         budget_usd=budget_usd,
         max_iterations=max_iterations,
         max_duration_ms=max_duration_ms,
+        max_tokens=max_tokens,
     )
     client = _get_client()
     if client:
-        client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms)
+        client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens)
     return run
 
 
@@ -170,24 +178,27 @@ def _end_run(run: RunState, status: str, error: Optional[str] = None):
         client.end_run(run.run_id, status=status, error=error)
 
 
-async def checkpoint(cost_delta_usd: float = 0.0):
+async def checkpoint(cost_delta_usd: float = 0.0, tokens_used: int = 0):
     """
-    Report spend and check governance limits at a decision point.
+    Report spend and token usage, then check all governance limits.
 
-    Call this after each significant action in your agent loop.
-    Raises BudgetExceeded, IterationLimitReached, or TimeLimitReached
-    if any limit is crossed.
+    Call this after each LLM call in your agent loop.
+    Raises BudgetExceeded, IterationLimitReached, TimeLimitReached,
+    or TokenLimitReached if any limit is crossed.
 
     Args:
         cost_delta_usd: Amount spent since the last checkpoint call.
+        tokens_used: Total tokens (input + output) consumed by this step.
     """
     run = get_active_run()
     if run is None:
         return
 
-    run.cost_usd += cost_delta_usd
-    run.iterations += 1
+    run.cost_usd    += cost_delta_usd
+    run.tokens_used += tokens_used
+    run.iterations  += 1
 
+    # Local checks — instant, no network
     if run.cost_usd >= run.budget_usd:
         raise BudgetExceeded(run.cost_usd, run.budget_usd)
 
@@ -197,12 +208,16 @@ async def checkpoint(cost_delta_usd: float = 0.0):
     if run.duration_ms >= run.max_duration_ms:
         raise TimeLimitReached(run.duration_ms, run.max_duration_ms)
 
+    if run.max_tokens > 0 and run.tokens_used >= run.max_tokens:
+        raise TokenLimitReached(run.tokens_used, run.max_tokens)
+
+    # Server check — cloud mode only
     client = _get_client()
     if client is None:
         return
 
     result = client.checkpoint(
-        run.run_id, cost_delta_usd, run.iterations, run.duration_ms
+        run.run_id, cost_delta_usd, run.iterations, run.duration_ms, run.tokens_used
     )
 
     if result.get("ok", True):
@@ -215,6 +230,8 @@ async def checkpoint(cost_delta_usd: float = 0.0):
         raise IterationLimitReached(run.iterations, run.max_iterations)
     elif breach == "time_limit":
         raise TimeLimitReached(run.duration_ms, run.max_duration_ms)
+    elif breach == "token_limit":
+        raise TokenLimitReached(run.tokens_used, run.max_tokens)
 
 
 def log_decision(reasoning: str, action: Optional[str] = None):
