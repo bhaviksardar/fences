@@ -1,3 +1,10 @@
+"""
+Schema migration script. Run this against your database before deploying
+backend updates that add new columns or tables.
+
+Usage:
+    python3 migrate.py
+"""
 import os
 import sys
 
@@ -35,6 +42,8 @@ def run():
         add_column_if_missing(conn, "runs", "max_iterations", "INTEGER", 100)
         add_column_if_missing(conn, "runs", "max_duration_ms", "INTEGER", 300000)
         add_column_if_missing(conn, "runs", "iterations", "INTEGER", 0)
+        add_column_if_missing(conn, "runs", "max_tokens", "INTEGER", 0)
+        add_column_if_missing(conn, "runs", "tokens_used", "INTEGER", 0)
 
         if is_sqlite:
             conn.execute(text("""
