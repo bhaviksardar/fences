@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Fences — Agent Governance</title>
-  <meta name="description" content="Runtime governance for AI agents. Budget limits, loop protection, and audit trails in three lines of code." />
+  <meta name="description" content="Runtime governance for AI agents. Budget, iteration, time, and token limits — agents handle breaches gracefully, not with exceptions." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -226,6 +226,7 @@
     .t-out    { color: #555; margin-left: 16px; }
     .t-step   { color: #60a5fa; margin-left: 16px; }
     .t-ok     { color: #4ade80; margin-left: 16px; }
+    .t-warn   { color: #fbbf24; margin-left: 16px; font-weight: 500; }
     .t-err    { color: #f87171; margin-left: 16px; font-weight: 500; }
     .t-blank  { height: 8px; }
 
@@ -320,7 +321,7 @@
 
     .feature-grid {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(2, 1fr);
       gap: 1px;
       border: 1px solid var(--border);
       border-radius: 10px;
@@ -667,7 +668,7 @@
 <div class="install-strip">
   <span class="install-label">Install</span>
   <div class="install-cmd">
-    <span>pip install fences</span>
+    <span>pip install agentfences</span>
     <button class="copy-btn" onclick="copyInstall(this)">copy</button>
   </div>
   <span class="install-label">No account or backend required</span>
@@ -676,26 +677,32 @@
 <!-- Features -->
 <section class="features" id="features">
   <p class="section-label">What it does</p>
-  <h2 class="section-title">Three problems.<br/>One decorator.</h2>
-  <p class="section-sub">Agents fail in predictable ways. Fences catches all three before they become incidents.</p>
+  <h2 class="section-title">Four problems.<br/>One decorator.</h2>
+  <p class="section-sub">Agents fail in predictable ways. Fences catches all four — and lets the agent handle it gracefully instead of crashing.</p>
 
   <div class="feature-grid">
     <div class="feature-card">
       <span class="feature-icon">💰</span>
       <h3 class="feature-title">Budget enforcement</h3>
-      <p class="feature-desc">Set a spend limit per run. The moment cumulative cost crosses it, the agent stops with a clean exception — not after the fact.</p>
-      <span class="feature-tag">BudgetExceeded</span>
+      <p class="feature-desc">Set a spend limit per run. The moment cumulative cost crosses it, the agent stops with a clean result — not a crash.</p>
+      <span class="feature-tag">budget_usd</span>
     </div>
     <div class="feature-card">
       <span class="feature-icon">🔁</span>
       <h3 class="feature-title">Loop protection</h3>
       <p class="feature-desc">An agent can stay within budget and still loop forever on a cheap model. Iteration and time limits catch what spend control misses.</p>
-      <span class="feature-tag">IterationLimitReached</span>
+      <span class="feature-tag">max_iterations</span>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">🪙</span>
+      <h3 class="feature-title">Token governance</h3>
+      <p class="feature-desc">Cap total token usage (input + output) across an entire run — independent of cost. Useful when context window or throughput matters more than spend.</p>
+      <span class="feature-tag">max_tokens</span>
     </div>
     <div class="feature-card">
       <span class="feature-icon">📋</span>
       <h3 class="feature-title">Decision audit trail</h3>
-      <p class="feature-desc">Agents record why they did something at each step. When a run breaches a limit, the full reasoning trail is preserved for debugging.</p>
+      <p class="feature-desc">Agents record why they did something at each step. When a run hits a limit, the full reasoning trail is preserved — not lost in a traceback.</p>
       <span class="feature-tag">log_decision()</span>
     </div>
   </div>
@@ -706,8 +713,12 @@
   <div class="code-inner">
     <div>
       <p class="section-label">Quickstart</p>
-      <h2 class="section-title">Works with any agent.</h2>
-      <p class="section-sub" style="margin-bottom: 32px;">No framework lock-in. Wrap any async function — the decorator handles the rest.</p>
+      <h2 class="section-title">Agents handle limits.<br/>Not your code.</h2>
+      <p class="section-sub" style="margin-bottom: 32px;">
+        checkpoint() returns a result — not an exception. The agent reads it,
+        summarises what it found, and stops gracefully. No try/catch in your
+        orchestration layer.
+      </p>
 
       <div class="modes">
         <div class="mode-card active">
@@ -732,31 +743,34 @@
         <span class="code-filename">agent.py</span>
         <span class="code-lang">Python</span>
       </div>
-      <pre><code><span class="kw">import</span> fences
-<span class="kw">from</span> fences <span class="kw">import</span> governed, checkpoint, log_decision
-<span class="kw">from</span> fences <span class="kw">import</span> BudgetExceeded, IterationLimitReached
+      <pre><code><span class="kw">import</span> agentfences
+<span class="kw">from</span> agentfences <span class="kw">import</span> governed, checkpoint, log_decision
 
-fences.<span class="fn">init</span>(<span class="str">local_only</span>=<span class="kw">True</span>)
+agentfences.<span class="fn">init</span>(<span class="str">local_only</span>=<span class="kw">True</span>)
 
 <span class="dec">@governed</span>(
     budget_usd=<span class="num">0.50</span>,
     max_iterations=<span class="num">20</span>,
-    max_duration_ms=<span class="num">60_000</span>
+    max_tokens=<span class="num">50_000</span>,
 )
-<span class="kw">async def</span> <span class="fn">run_agent</span>(query: str):
-    <span class="kw">for</span> step <span class="kw">in</span> <span class="fn">range</span>(<span class="num">100</span>):
-        <span class="fn">log_decision</span>(
-            reasoning=<span class="str">f"step {step}: searching"</span>,
-            action=<span class="str">"web_search"</span>
-        )
-        <span class="kw">await</span> <span class="fn">checkpoint</span>(cost_delta_usd=<span class="num">0.02</span>)
+<span class="kw">async def</span> <span class="fn">run_agent</span>(query: str, messages: list):
+    <span class="kw">while True</span>:
+        <span class="fn">log_decision</span>(reasoning=<span class="str">"calling LLM"</span>, action=<span class="str">"llm_call"</span>)
+        response = <span class="fn">call_llm</span>(messages)
 
-<span class="kw">try</span>:
-    <span class="kw">await</span> <span class="fn">run_agent</span>(<span class="str">"research this topic"</span>)
-<span class="kw">except</span> BudgetExceeded <span class="kw">as</span> e:
-    <span class="fn">print</span>(<span class="str">f"Stopped: ${'{'}e.spent_usd:.4f{'}'} spent"</span>)
-<span class="kw">except</span> IterationLimitReached <span class="kw">as</span> e:
-    <span class="fn">print</span>(<span class="str">f"Stopped: {'{'}e.iterations{'}'} iterations"</span>)</code></pre>
+        result = <span class="kw">await</span> <span class="fn">checkpoint</span>(
+            cost_delta_usd=<span class="fn">compute_cost</span>(response.usage),
+            tokens_used=response.usage.total_tokens,
+        )
+
+        <span class="kw">if</span> result.breached:
+            <span class="cm"># Inject limit message — LLM summarises gracefully</span>
+            messages.<span class="fn">append</span>({<span class="str">"role"</span>: <span class="str">"system"</span>,
+                             <span class="str">"content"</span>: result.system_prompt})
+            <span class="kw">return</span> <span class="fn">call_llm</span>(messages)
+
+        <span class="kw">if</span> response.<span class="fn">is_done</span>():
+            <span class="kw">return</span> response</code></pre>
     </div>
   </div>
 </section>
@@ -769,29 +783,49 @@ fences.<span class="fn">init</span>(<span class="str">local_only</span>=<span cl
   <table class="exception-table">
     <thead>
       <tr>
-        <th>Exception</th>
+        <th>Limit</th>
         <th>Parameter</th>
         <th>When it fires</th>
+        <th>result.breach_type</th>
       </tr>
     </thead>
     <tbody>
       <tr>
-        <td><span class="ex-name">BudgetExceeded</span></td>
+        <td><span class="ex-name">Budget</span></td>
         <td><span class="ex-param">budget_usd</span></td>
         <td><span class="ex-desc">Cumulative spend across all checkpoint() calls exceeds the limit.</span></td>
+        <td><span class="ex-param">budget_exceeded</span></td>
       </tr>
       <tr>
-        <td><span class="ex-name">IterationLimitReached</span></td>
+        <td><span class="ex-name">Iterations</span></td>
         <td><span class="ex-param">max_iterations</span></td>
-        <td><span class="ex-desc">checkpoint() has been called more times than the iteration limit allows.</span></td>
+        <td><span class="ex-desc">checkpoint() has been called more times than the limit allows.</span></td>
+        <td><span class="ex-param">iteration_limit</span></td>
       </tr>
       <tr>
-        <td><span class="ex-name">TimeLimitReached</span></td>
+        <td><span class="ex-name">Duration</span></td>
         <td><span class="ex-param">max_duration_ms</span></td>
         <td><span class="ex-desc">Wall-clock time since the run started exceeds the duration limit.</span></td>
+        <td><span class="ex-param">time_limit</span></td>
+      </tr>
+      <tr>
+        <td><span class="ex-name">Tokens</span></td>
+        <td><span class="ex-param">max_tokens</span></td>
+        <td><span class="ex-desc">Total tokens (input + output) across all LLM calls exceeds the limit.</span></td>
+        <td><span class="ex-param">token_limit</span></td>
       </tr>
     </tbody>
   </table>
+
+  <div style="margin-top: 32px; padding: 20px 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);">
+    <p style="font-family: var(--mono); font-size: 13px; font-weight: 600; margin-bottom: 10px;">CheckpointResult</p>
+    <p style="color: var(--muted); font-size: 13px; line-height: 1.7;">
+      Every <code style="font-family: var(--mono); background: var(--bg); padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border);">checkpoint()</code> call returns a result object.
+      <code style="font-family: var(--mono); background: var(--bg); padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border);">result.breached</code> tells the agent whether to continue.
+      <code style="font-family: var(--mono); background: var(--bg); padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border);">result.system_prompt</code> is a ready-made message to inject into the LLM conversation so it summarises gracefully instead of stopping mid-thought.
+      Set <code style="font-family: var(--mono); background: var(--bg); padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border);">raise_on_breach=True</code> in <code style="font-family: var(--mono); background: var(--bg); padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border);">@governed</code> to get exceptions instead (legacy behaviour).
+    </p>
+  </div>
 </section>
 
 <!-- CTA -->
@@ -820,17 +854,21 @@ fences.<span class="fn">init</span>(<span class="str">local_only</span>=<span cl
 <script>
 const lines = [
   { type: 'cmd',  text: 'python agent.py' },
-  { type: 'step', text: 'iteration 0: calling gpt-4o...' },
+  { type: 'step', text: 'iteration 0: calling gpt-4o-mini...' },
   { type: 'ok',   text: '✓  $0.031 — step 1 complete' },
-  { type: 'step', text: 'iteration 1: calling gpt-4o...' },
+  { type: 'step', text: 'iteration 1: calling gpt-4o-mini...' },
   { type: 'ok',   text: '✓  $0.028 — step 2 complete' },
-  { type: 'step', text: 'iteration 2: calling gpt-4o...' },
+  { type: 'step', text: 'iteration 2: calling gpt-4o-mini...' },
   { type: 'ok',   text: '✓  $0.033 — step 3 complete' },
-  { type: 'step', text: 'iteration 3: calling gpt-4o...' },
-  { type: 'ok',   text: '✓  $0.029 — step 4 complete' },
+  { type: 'step', text: 'iteration 3: calling gpt-4o-mini...' },
   { type: 'blank' },
-  { type: 'err',  text: 'BudgetExceeded: spent $0.1210 of $0.1000 limit' },
-  { type: 'out',  text: 'Run stopped. Audit trail preserved.' },
+  { type: 'warn', text: '⚠  result.breached — budget_exceeded' },
+  { type: 'step', text: 'injecting system_prompt into conversation...' },
+  { type: 'step', text: 'asking agent to summarise...' },
+  { type: 'blank' },
+  { type: 'ok',   text: '✓  Agent: "Based on my research so far, the' },
+  { type: 'ok',   text: '   three biggest risks are: 1) lack of cost' },
+  { type: 'ok',   text: '   controls 2) runaway loops 3) no audit..."' },
   { type: 'blank' },
   { type: 'cursor' },
 ];
@@ -865,12 +903,13 @@ function appendLine() {
   if (l.type === 'step') el.innerHTML = `<span class="t-step">${l.text}</span>`;
   if (l.type === 'ok')   el.innerHTML = `<span class="t-ok">${l.text}</span>`;
   if (l.type === 'err')  el.innerHTML = `<span class="t-err">${l.text}</span>`;
+  if (l.type === 'warn') el.innerHTML = `<span class="t-warn">${l.text}</span>`;
   if (l.type === 'out')  el.innerHTML = `<span class="t-out">${l.text}</span>`;
 
   body.appendChild(el);
   requestAnimationFrame(() => el.classList.add('visible'));
 
-  const delay = l.type === 'err' ? 700 : l.type === 'step' ? 500 : 200;
+  const delay = l.type === 'warn' ? 800 : l.type === 'step' ? 500 : 200;
   setTimeout(appendLine, delay);
 }
 
@@ -883,7 +922,7 @@ setInterval(() => {
 }, 13000);
 
 function copyInstall(btn) {
-  navigator.clipboard.writeText('pip install fences').then(() => {
+  navigator.clipboard.writeText('pip install agentfences').then(() => {
     btn.textContent = 'copied!';
     setTimeout(() => btn.textContent = 'copy', 2000);
   });
