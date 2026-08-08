@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentfences"
+version = "0.1.4"
+description = "Runtime governance for AI agents — budget limits, loop protection, token limits, audit trail"
+readme = "README.md"
+authors = [{ name = "Bhavik Sardar" }]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = ["requests>=2.25.0"]
+keywords = ["ai", "agents", "governance", "llm", "budget", "safety"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/bhaviksardar/fences"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agentfences*"]
