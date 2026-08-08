@@ -1,4 +1,4 @@
-# Fences
+# (|=|) Fences
 
 Runtime governance for AI agents. Budget limits, loop protection, token governance, and a decision audit trail — in three lines of code.
 
