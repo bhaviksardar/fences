@@ -148,13 +148,13 @@ async def checkpoint(
     await session.refresh(run)
 
     breach = None
-    if run.spent_usd >= run.budget_usd:
+    if round(run.spent_usd, 9) > run.budget_usd:  # round away float drift (0.02*5 != 0.10)
         breach = "budget_exceeded"
-    elif run.iterations >= run.max_iterations:
+    elif run.iterations > run.max_iterations:
         breach = "iteration_limit"
-    elif payload.duration_ms >= run.max_duration_ms:
+    elif payload.duration_ms > run.max_duration_ms:
         breach = "time_limit"
-    elif run.max_tokens > 0 and run.tokens_used >= run.max_tokens:
+    elif run.max_tokens > 0 and run.tokens_used > run.max_tokens:
         breach = "token_limit"
 
     if breach:
