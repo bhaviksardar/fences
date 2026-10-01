@@ -304,23 +304,23 @@ async def checkpoint(cost_delta_usd: float = 0.0, tokens_used: int = 0) -> Check
 
     breach_result: Optional[CheckpointResult] = None
 
-    if run.cost_usd >= run.budget_usd:
+    if round(run.cost_usd, 9) > run.budget_usd:  # round away float drift (0.02*5 != 0.10)
         breach_result = _make_breach_result(
             "budget_exceeded",
             spent=run.cost_usd,
             limit=run.budget_usd,
         )
-    elif run.iterations >= run.max_iterations:
+    elif run.iterations > run.max_iterations:
         breach_result = _make_breach_result(
             "iteration_limit",
             iterations=run.iterations,
         )
-    elif run.duration_ms >= run.max_duration_ms:
+    elif run.duration_ms > run.max_duration_ms:
         breach_result = _make_breach_result(
             "time_limit",
             duration_ms=run.duration_ms,
         )
-    elif run.max_tokens > 0 and run.tokens_used >= run.max_tokens:
+    elif run.max_tokens > 0 and run.tokens_used > run.max_tokens:
         breach_result = _make_breach_result(
             "token_limit",
             tokens_used=run.tokens_used,
@@ -352,6 +352,10 @@ async def checkpoint(cost_delta_usd: float = 0.0, tokens_used: int = 0) -> Check
         return CheckpointResult()
 
     breach = result.get("breach")
+    # Server is authoritative: adopt its totals so messages and exceptions report them
+    run.cost_usd = result.get("spent_usd", run.cost_usd)
+    run.iterations = result.get("iterations", run.iterations)
+    run.tokens_used = result.get("tokens_used", run.tokens_used)
     server_result = _make_breach_result(
         breach,
         spent=result.get("spent_usd", run.cost_usd),
