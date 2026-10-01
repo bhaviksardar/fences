@@ -1,10 +1,10 @@
 import sys
 import os
 import time
-import secrets
-import hashlib
-from sqlalchemy import create_engine, text, Column, String, Float, Boolean
-from sqlalchemy.orm import declarative_base, Session
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from db import Base, ApiKey, generate_api_key, hash_api_key
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./fences.db")
 
@@ -16,25 +16,6 @@ if "+aiosqlite" in DATABASE_URL:
     DATABASE_URL = DATABASE_URL.replace("+aiosqlite", "", 1)
 
 engine = create_engine(DATABASE_URL)
-Base = declarative_base()
-
-
-class ApiKey(Base):
-    __tablename__ = "api_keys"
-    key_hash = Column(String, primary_key=True)
-    label = Column(String, nullable=True)
-    prefix = Column(String, nullable=False)
-    created_at = Column(Float, nullable=False, default=time.time)
-    revoked = Column(Boolean, nullable=False, default=False)
-    last_used_at = Column(Float, nullable=True)
-
-
-def generate_api_key() -> str:
-    return f"fc_{secrets.token_urlsafe(32)}"
-
-
-def hash_api_key(raw_key: str) -> str:
-    return hashlib.sha256(raw_key.encode()).hexdigest()
 
 
 def ensure_tables():
