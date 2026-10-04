@@ -77,6 +77,8 @@ async def my_agent(query: str):
 | Duration | `max_duration_ms` | `time_limit` |
 | Tokens | `max_tokens` | `token_limit` |
 
+A limit trips once it is exceeded, not when it is reached: a $0.10 budget allows exactly $0.10 of spend.
+
 ## Legacy exception mode
 
 If you prefer exceptions over result objects:
@@ -88,6 +90,24 @@ async def my_agent():
     await checkpoint(cost_delta_usd=0.02)  # raises BudgetExceeded, IterationLimitReached, etc.
 ```
 
+## Sync agents and streaming
+
+`@governed` works on sync functions, async functions and async generators. Sync agents use `checkpoint_sync()`, which takes the same arguments and returns the same `CheckpointResult`:
+
+```python
+from agentfences import governed, checkpoint_sync
+
+@governed(budget_usd=0.50)
+def my_agent(query: str):
+    while True:
+        response = call_llm(query)
+        result = checkpoint_sync(cost_delta_usd=0.02, tokens_used=response.usage.total_tokens)
+        if result.breached:
+            return result.message
+```
+
+A governed async generator (a streaming agent) stays governed until the stream is exhausted. Concurrent agents in one event loop and nested `@governed` calls each get their own run.
+
 ## Modes
 
 **Local (free)** — governance runs entirely in-process. No account, no backend, no API key.
@@ -98,6 +118,13 @@ agentfences.init(local_only=True)
 **Cloud (coming soon)** — persistent audit trails, live dashboard, server-authoritative enforcement. Same code, one line changes.
 ```python
 agentfences.init(api_key="fc_...", endpoint="https://your-fences-instance.com")
+```
+
+In cloud mode the backend is authoritative: it sees spend from every process sharing a run, and a limit raised from the dashboard lets the run's next `checkpoint()` pass, so a fenced agent can resume. Backend calls run off the event loop and `log_decision()` never blocks; decisions are sent in the background and flushed at exit (call `agentfences.flush()` yourself before a serverless handler returns).
+
+If the backend can't be reached, limits are enforced locally and a warning is logged once per run. To treat an unreachable backend as a breach instead:
+```python
+agentfences.init(api_key="fc_...", endpoint="https://...", fail_closed=True)
 ```
 
 ## License
