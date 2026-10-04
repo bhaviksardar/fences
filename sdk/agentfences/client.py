@@ -52,9 +52,11 @@ class GovClient:
             )
             if resp.status_code in (401, 403):
                 raise PermissionError(f"Fences API key rejected: {resp.text}")
+            if resp.status_code == 409:  # e.g. checkpoint on a run the server already fenced
+                return {"ok": False, "conflict": resp.json().get("detail", "")}
             resp.raise_for_status()
             return resp.json()
         except PermissionError:
             raise
-        except requests.RequestException as e:
-            return {"ok": True, "network_error": str(e)}
+        except (requests.RequestException, ValueError) as e:
+            return {"network_error": str(e)}

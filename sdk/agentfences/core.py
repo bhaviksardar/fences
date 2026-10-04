@@ -1,15 +1,24 @@
 import time
 import uuid
+import queue
+import atexit
 import asyncio
+import inspect
+import logging
 import functools
 import threading
+import contextvars
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
-from .exceptions import BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached
+from .exceptions import FencesError, BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached
 from .client import GovClient
 
-_local = threading.local()
+log = logging.getLogger("agentfences")
+
+# The active run is per task/context, not per thread: concurrent asyncio agents
+# share one thread, and nested @governed calls must restore the outer run.
+_active = contextvars.ContextVar("agentfences_run", default=None)
 
 
 # ── CheckpointResult ──────────────────────────────────────────────────────────
@@ -117,6 +126,8 @@ class RunState:
     tokens_used: int = 0
     started_at: float = field(default_factory=time.time)
     decisions: list = field(default_factory=list)
+    last_breach: Optional[str] = None   # breach from the latest checkpoint; cleared once limits are raised
+    warned: bool = False
 
     @property
     def duration_ms(self) -> int:
@@ -124,21 +135,30 @@ class RunState:
 
 
 def get_active_run() -> Optional[RunState]:
-    return getattr(_local, "run", None)
+    return _active.get()
 
 
 def _set_active_run(run: Optional[RunState]):
-    _local.run = run
+    return _active.set(run)
+
+
+def _reset_active_run(token):
+    try:
+        _active.reset(token)
+    except ValueError:  # async generator finalized from a different context
+        pass
 
 
 _client: Optional[GovClient] = None
 _local_only: bool = False
+_fail_closed: bool = False
 
 
 def init(
     api_key: Optional[str] = None,
     endpoint: str = "http://localhost:8000",
     local_only: bool = False,
+    fail_closed: bool = False,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -146,11 +166,15 @@ def init(
     Local mode — no backend required:
         agentfences.init(local_only=True)
 
-    Cloud mode — connects to a Fences backend:
+    Cloud mode — connects to a Fences backend, which is authoritative for limits:
         agentfences.init(api_key="fc_...", endpoint="https://...")
+
+    If the backend can't be reached, limits are enforced locally (fail open).
+    Pass fail_closed=True to treat an unreachable backend as a breach instead.
     """
-    global _client, _local_only
+    global _client, _local_only, _fail_closed
     _local_only = local_only
+    _fail_closed = fail_closed
 
     if local_only:
         _client = None
@@ -162,6 +186,7 @@ def init(
             "Use agentfences.init(local_only=True) for local usage."
         )
     _client = GovClient(api_key=api_key, endpoint=endpoint)
+    _start_decision_worker()
 
 
 def _get_client() -> Optional[GovClient]:
@@ -176,6 +201,14 @@ def _require_init():
         )
 
 
+def _warn_unreachable(run: RunState, err: str):
+    if not run.warned:
+        run.warned = True
+        log.warning("Fences backend unreachable for run %s (%s); enforcing limits locally", run.run_id, err)
+
+
+# ── Decorator ─────────────────────────────────────────────────────────────────
+
 def governed(
     budget_usd: float,
     max_iterations: int = 100,
@@ -185,6 +218,7 @@ def governed(
 ):
     """
     Decorator that applies governance policy to an agent function.
+    Works on sync functions, async functions and async generators (streaming agents).
 
     Args:
         budget_usd: Maximum spend allowed for this run in USD.
@@ -209,47 +243,66 @@ def governed(
             return response
     """
     def decorator(func: Callable) -> Callable:
-        is_async = asyncio.iscoroutinefunction(func)
+        start = functools.partial(_start_run, func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens, raise_on_breach)
 
-        @functools.wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            _require_init()
-            run = _start_run(func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens, raise_on_breach)
-            _set_active_run(run)
-            try:
-                result = await func(*args, **kwargs)
-                _end_run(run, status="success")
-                return result
-            except (BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached):
-                _end_run(run, status="breached")
-                raise
-            except Exception as e:
-                _end_run(run, status="error", error=str(e))
-                raise
-            finally:
-                _set_active_run(None)
+        if inspect.isasyncgenfunction(func):
+            @functools.wraps(func)
+            async def agen_wrapper(*args, **kwargs):
+                _require_init()
+                run = await asyncio.to_thread(start)
+                token, exc = _set_active_run(run), None
+                try:
+                    async for item in func(*args, **kwargs):
+                        yield item
+                except BaseException as e:
+                    exc = e
+                    raise
+                finally:
+                    _reset_active_run(token)
+                    await asyncio.to_thread(_end_run, run, *_outcome(run, exc))
+            return agen_wrapper
+
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                _require_init()
+                run = await asyncio.to_thread(start)
+                token, exc = _set_active_run(run), None
+                try:
+                    return await func(*args, **kwargs)
+                except BaseException as e:
+                    exc = e
+                    raise
+                finally:
+                    _reset_active_run(token)
+                    await asyncio.to_thread(_end_run, run, *_outcome(run, exc))
+            return async_wrapper
 
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):
             _require_init()
-            run = _start_run(func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens, raise_on_breach)
-            _set_active_run(run)
+            run = start()
+            token, exc = _set_active_run(run), None
             try:
-                result = func(*args, **kwargs)
-                _end_run(run, status="success")
-                return result
-            except (BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached):
-                _end_run(run, status="breached")
-                raise
-            except Exception as e:
-                _end_run(run, status="error", error=str(e))
+                return func(*args, **kwargs)
+            except BaseException as e:
+                exc = e
                 raise
             finally:
-                _set_active_run(None)
-
-        return async_wrapper if is_async else sync_wrapper
+                _reset_active_run(token)
+                _end_run(run, *_outcome(run, exc))
+        return sync_wrapper
 
     return decorator
+
+
+def _outcome(run: RunState, exc: Optional[BaseException]):
+    """(status, error) to report when the governed function exits."""
+    if exc is None or isinstance(exc, GeneratorExit):  # GeneratorExit: consumer stopped a stream early
+        return ("breached" if run.last_breach else "success"), None
+    if isinstance(exc, FencesError):
+        return "breached", None
+    return "error", str(exc) or type(exc).__name__  # includes cancellation
 
 
 def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens, raise_on_breach) -> RunState:
@@ -265,7 +318,9 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
     )
     client = _get_client()
     if client:
-        client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens)
+        resp = client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens)
+        if "network_error" in resp:
+            _warn_unreachable(run, resp["network_error"])
     return run
 
 
@@ -275,16 +330,96 @@ def _end_run(run: RunState, status: str, error: Optional[str] = None):
         client.end_run(run.run_id, status=status, error=error)
 
 
+# ── Checkpoint ────────────────────────────────────────────────────────────────
+
+def _local_breach(run: RunState) -> Optional[str]:
+    # Limits trip only once exceeded, same rule as the backend.
+    if round(run.cost_usd, 9) > run.budget_usd:  # round away float drift (0.02*5 != 0.10)
+        return "budget_exceeded"
+    if run.iterations > run.max_iterations:
+        return "iteration_limit"
+    if run.duration_ms > run.max_duration_ms:
+        return "time_limit"
+    if run.max_tokens > 0 and run.tokens_used > run.max_tokens:
+        return "token_limit"
+    return None
+
+
+def _server_check(run: RunState, cost_delta_usd: float, tokens_delta: int) -> dict:
+    return _client.checkpoint(run.run_id, cost_delta_usd, run.iterations, run.duration_ms, tokens_delta)
+
+
+_BREACH_EXCEPTIONS = {
+    "budget_exceeded": lambda r: BudgetExceeded(r.cost_usd, r.budget_usd),
+    "iteration_limit": lambda r: IterationLimitReached(r.iterations, r.max_iterations),
+    "time_limit":      lambda r: TimeLimitReached(r.duration_ms, r.max_duration_ms),
+    "token_limit":     lambda r: TokenLimitReached(r.tokens_used, r.max_tokens),
+}
+
+
+def _decide(run: RunState, resp: Optional[dict]) -> CheckpointResult:
+    """
+    Cloud mode: the backend decides. It sees spend from other processes and limits
+    changed from the dashboard, so a raised limit lets the next checkpoint pass.
+    Local rules apply in local_only mode, or when the backend can't be reached.
+    """
+    if resp is None or "network_error" in resp:
+        if resp is not None:
+            _warn_unreachable(run, resp["network_error"])
+            if _fail_closed:
+                run.last_breach = "fences_unreachable"
+                return _breach(run)
+        run.last_breach = _local_breach(run)
+    else:
+        # Backend is authoritative: adopt its totals and (on a breach) its current limits
+        run.cost_usd = resp.get("spent_usd", run.cost_usd)
+        run.iterations = resp.get("iterations", run.iterations)
+        run.tokens_used = resp.get("tokens_used", run.tokens_used)
+        run.budget_usd = resp.get("budget_usd", run.budget_usd)
+        run.max_iterations = resp.get("max_iterations", run.max_iterations)
+        run.max_tokens = resp.get("max_tokens", run.max_tokens)
+        run.max_duration_ms = resp.get("max_duration_ms", run.max_duration_ms)
+        if resp.get("ok"):
+            run.last_breach = None
+        else:  # a fresh breach, or a 409 because the run is still fenced from an earlier one
+            run.last_breach = resp.get("breach") or run.last_breach or "limit_reached"
+    return _breach(run) if run.last_breach else CheckpointResult()
+
+
+def _breach(run: RunState) -> CheckpointResult:
+    result = _make_breach_result(
+        run.last_breach,
+        spent=run.cost_usd,
+        limit=run.budget_usd,
+        iterations=run.iterations,
+        tokens_used=run.tokens_used,
+        duration_ms=run.duration_ms,
+    )
+    if run.raise_on_breach:
+        raise _BREACH_EXCEPTIONS.get(run.last_breach, lambda r: FencesError(result.message))(run)
+    return result
+
+
+def _record_step(cost_delta_usd: float, tokens_used: int) -> Optional[RunState]:
+    run = get_active_run()
+    if run is not None:
+        run.cost_usd += cost_delta_usd
+        run.tokens_used += tokens_used
+        run.iterations += 1
+    return run
+
+
 async def checkpoint(cost_delta_usd: float = 0.0, tokens_used: int = 0) -> CheckpointResult:
     """
     Report spend and token usage, then check all governance limits.
 
     Call this after each LLM call in your agent loop. Returns a
     CheckpointResult — check result.breached before continuing.
+    The backend call runs in a worker thread, so it never blocks the event loop.
 
     Args:
         cost_delta_usd: Amount spent since the last checkpoint call.
-        tokens_used: Total tokens (input + output) consumed by this step.
+        tokens_used: Tokens (input + output) consumed since the last checkpoint call.
 
     Returns:
         CheckpointResult with:
@@ -294,87 +429,56 @@ async def checkpoint(cost_delta_usd: float = 0.0, tokens_used: int = 0) -> Check
             .message       — human-readable, ready to return to user
             .system_prompt — inject into LLM context for graceful summarisation
     """
-    run = get_active_run()
+    run = _record_step(cost_delta_usd, tokens_used)
     if run is None:
         return CheckpointResult()
+    resp = await asyncio.to_thread(_server_check, run, cost_delta_usd, tokens_used) if _client else None
+    return _decide(run, resp)
 
-    run.cost_usd    += cost_delta_usd
-    run.tokens_used += tokens_used
-    run.iterations  += 1
 
-    breach_result: Optional[CheckpointResult] = None
-
-    if round(run.cost_usd, 9) > run.budget_usd:  # round away float drift (0.02*5 != 0.10)
-        breach_result = _make_breach_result(
-            "budget_exceeded",
-            spent=run.cost_usd,
-            limit=run.budget_usd,
-        )
-    elif run.iterations > run.max_iterations:
-        breach_result = _make_breach_result(
-            "iteration_limit",
-            iterations=run.iterations,
-        )
-    elif run.duration_ms > run.max_duration_ms:
-        breach_result = _make_breach_result(
-            "time_limit",
-            duration_ms=run.duration_ms,
-        )
-    elif run.max_tokens > 0 and run.tokens_used > run.max_tokens:
-        breach_result = _make_breach_result(
-            "token_limit",
-            tokens_used=run.tokens_used,
-        )
-
-    if breach_result:
-        _end_run(run, status="breached")
-        if run.raise_on_breach:
-            if breach_result.breach_type == "budget_exceeded":
-                raise BudgetExceeded(run.cost_usd, run.budget_usd)
-            elif breach_result.breach_type == "iteration_limit":
-                raise IterationLimitReached(run.iterations, run.max_iterations)
-            elif breach_result.breach_type == "time_limit":
-                raise TimeLimitReached(run.duration_ms, run.max_duration_ms)
-            elif breach_result.breach_type == "token_limit":
-                raise TokenLimitReached(run.tokens_used, run.max_tokens)
-        return breach_result
-
-    # Server check — cloud mode only
-    client = _get_client()
-    if client is None:
+def checkpoint_sync(cost_delta_usd: float = 0.0, tokens_used: int = 0) -> CheckpointResult:
+    """checkpoint() for synchronous agents. Same arguments and result."""
+    run = _record_step(cost_delta_usd, tokens_used)
+    if run is None:
         return CheckpointResult()
+    return _decide(run, _server_check(run, cost_delta_usd, tokens_used) if _client else None)
 
-    result = client.checkpoint(
-        run.run_id, cost_delta_usd, run.iterations, run.duration_ms, run.tokens_used
-    )
 
-    if result.get("ok", True):
-        return CheckpointResult()
+# ── Decision trail ────────────────────────────────────────────────────────────
 
-    breach = result.get("breach")
-    # Server is authoritative: adopt its totals so messages and exceptions report them
-    run.cost_usd = result.get("spent_usd", run.cost_usd)
-    run.iterations = result.get("iterations", run.iterations)
-    run.tokens_used = result.get("tokens_used", run.tokens_used)
-    server_result = _make_breach_result(
-        breach,
-        spent=result.get("spent_usd", run.cost_usd),
-        limit=result.get("budget_usd", run.budget_usd),
-        iterations=result.get("iterations", run.iterations),
-        tokens_used=result.get("tokens_used", run.tokens_used),
-        duration_ms=run.duration_ms,
-    )
-    _end_run(run, status="breached")
-    if run.raise_on_breach:
-        if breach == "budget_exceeded":
-            raise BudgetExceeded(run.cost_usd, run.budget_usd)
-        elif breach == "iteration_limit":
-            raise IterationLimitReached(run.iterations, run.max_iterations)
-        elif breach == "time_limit":
-            raise TimeLimitReached(run.duration_ms, run.max_duration_ms)
-        elif breach == "token_limit":
-            raise TokenLimitReached(run.tokens_used, run.max_tokens)
-    return server_result
+# Decisions go to the backend from one background thread, in order, so
+# log_decision() never blocks the agent on a network round trip.
+_decisions: "queue.Queue" = queue.Queue()
+_worker: Optional[threading.Thread] = None
+
+
+def _decision_worker():
+    while True:
+        client, payload = _decisions.get()
+        try:
+            client.log_decision(**payload)
+        except Exception:
+            pass
+        finally:
+            _decisions.task_done()
+
+
+def _start_decision_worker():
+    global _worker
+    if _worker is None:
+        _worker = threading.Thread(target=_decision_worker, name="agentfences-decisions", daemon=True)
+        _worker.start()
+
+
+def flush(timeout: float = 5.0):
+    """Wait up to `timeout` seconds for queued decisions to reach the backend.
+    Runs automatically at exit; call it yourself in serverless handlers."""
+    deadline = time.time() + timeout
+    while _decisions.unfinished_tasks and time.time() < deadline:
+        time.sleep(0.02)
+
+
+atexit.register(flush)
 
 
 def log_decision(reasoning: str, action: Optional[str] = None):
@@ -399,9 +503,4 @@ def log_decision(reasoning: str, action: Optional[str] = None):
 
     client = _get_client()
     if client:
-        client.log_decision(
-            run_id=run.run_id,
-            iteration=run.iterations,
-            reasoning=reasoning,
-            action=action,
-        )
+        _decisions.put((client, {"run_id": run.run_id, "iteration": run.iterations, "reasoning": reasoning, "action": action}))
