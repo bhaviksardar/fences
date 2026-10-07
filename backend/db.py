@@ -2,7 +2,7 @@ import os
 import time
 import secrets
 import hashlib
-from sqlalchemy import Column, String, Float, Integer, Boolean, select, update
+from sqlalchemy import Column, String, Float, Integer, Boolean, inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 
@@ -25,6 +25,8 @@ class Run(Base):
     __tablename__ = "runs"
 
     run_id = Column(String, primary_key=True)
+    # Hash of the API key that started the run. Every run query is scoped to it.
+    owner_key_hash = Column(String, nullable=True, index=True)
     agent_name = Column(String, nullable=False)
     budget_usd = Column(Float, nullable=False)
     max_iterations = Column(Integer, nullable=False, default=100)
@@ -69,9 +71,18 @@ def hash_api_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode()).hexdigest()
 
 
+def _add_missing_columns(conn):
+    # create_all() never alters existing tables, so columns added later are added here.
+    # Runs created before ownership existed keep a NULL owner and are visible to no key.
+    if "owner_key_hash" not in {c["name"] for c in inspect(conn).get_columns("runs")}:
+        conn.execute(text("ALTER TABLE runs ADD COLUMN owner_key_hash VARCHAR"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_runs_owner_key_hash ON runs (owner_key_hash)"))
+
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_add_missing_columns)
 
 
 async def get_session() -> AsyncSession:
