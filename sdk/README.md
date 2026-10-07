@@ -51,6 +51,7 @@ result.system_prompt  # ready to inject into LLM conversation context
 ## Quickstart — no backend needed
 
 ```python
+import asyncio
 import agentfences
 from agentfences import governed, checkpoint, log_decision
 
@@ -66,6 +67,9 @@ async def my_agent(query: str):
             return result.message  # or inject result.system_prompt into your LLM
 
     return "done"
+
+print(asyncio.run(my_agent("hello")))
+# I've reached my budget limit (spent $0.1200 of $0.1000). I'll summarize what I found so far.
 ```
 
 ## Limits
@@ -120,7 +124,7 @@ agentfences.init(local_only=True)
 agentfences.init(api_key="fc_...", endpoint="https://your-fences-instance.com")
 ```
 
-In cloud mode the backend is authoritative: it sees spend from every process sharing a run, so one process can't overspend because it didn't see another's spend. Backend calls run off the event loop and `log_decision()` never blocks; decisions are sent in the background and flushed at exit (call `agentfences.flush()` yourself before a serverless handler returns).
+In cloud mode the backend is authoritative: it sees spend from every process sharing a run, so one process can't overspend because it didn't see another's spend. On Fences Cloud, a limit raised from the dashboard lets the run's next `checkpoint()` pass, so a fenced agent can resume. Backend calls run off the event loop and `log_decision()` never blocks; decisions are sent in the background and flushed at exit (call `agentfences.flush()` yourself before a serverless handler returns).
 
 If the backend can't be reached, limits are enforced locally and a warning is logged once per run. To treat an unreachable backend as a breach instead:
 ```python
