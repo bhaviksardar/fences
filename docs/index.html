@@ -1,932 +1,261 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Fences — Agent Governance</title>
-  <meta name="description" content="Runtime governance for AI agents. Budget, iteration, time, and token limits — agents handle breaches gracefully, not with exceptions." />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    :root {
-      --bg:       #ffffff;
-      --surface:  #f8f8f8;
-      --border:   #e5e5e5;
-      --text:     #0a0a0a;
-      --muted:    #6b7280;
-      --accent:   #0a0a0a;
-      --green:    #16a34a;
-      --red:      #dc2626;
-      --mono:     'JetBrains Mono', monospace;
-      --sans:     'Inter', sans-serif;
-    }
-
-    html { scroll-behavior: smooth; }
-
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--sans);
-      font-size: 16px;
-      line-height: 1.6;
-      -webkit-font-smoothing: antialiased;
-    }
-
-    /* ── Nav ── */
-    nav {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 20px 48px;
-      border-bottom: 1px solid var(--border);
-      position: sticky;
-      top: 0;
-      background: rgba(255,255,255,0.92);
-      backdrop-filter: blur(12px);
-      z-index: 100;
-    }
-
-    .nav-logo {
-      font-family: var(--mono);
-      font-weight: 700;
-      font-size: 16px;
-      color: var(--text);
-      text-decoration: none;
-      display: flex;
-      align-items: center;
-      gap: 0;
-      letter-spacing: -0.02em;
-    }
-
-    .logo-bracket {
-      color: var(--muted);
-      font-weight: 400;
-    }
-
-    .logo-bar {
-      color: var(--text);
-      font-weight: 700;
-    }
-
-    .logo-name {
-      color: var(--text);
-      font-weight: 700;
-      margin-left: 6px;
-    }
-
-    .nav-links {
-      display: flex;
-      align-items: center;
-      gap: 32px;
-    }
-
-    .nav-links a {
-      color: var(--muted);
-      text-decoration: none;
-      font-size: 14px;
-      transition: color 0.15s;
-    }
-
-    .nav-links a:hover { color: var(--text); }
-
-    .nav-cta {
-      background: var(--text) !important;
-      color: #fff !important;
-      font-weight: 600 !important;
-      padding: 8px 18px;
-      border-radius: 6px;
-      font-size: 14px !important;
-      transition: opacity 0.15s !important;
-    }
-
-    .nav-cta:hover { opacity: 0.8 !important; }
-
-    /* ── Hero ── */
-    .hero {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 100px 48px 80px;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 64px;
-      align-items: center;
-    }
-
-    .hero-eyebrow {
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 500;
-      color: var(--muted);
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      margin-bottom: 20px;
-    }
-
-    .hero-headline {
-      font-family: var(--mono);
-      font-size: clamp(32px, 4vw, 52px);
-      font-weight: 700;
-      line-height: 1.1;
-      margin-bottom: 24px;
-      letter-spacing: -0.03em;
-      color: var(--text);
-    }
-
-    .hero-headline em {
-      font-style: normal;
-      text-decoration: underline;
-      text-decoration-thickness: 3px;
-      text-underline-offset: 6px;
-    }
-
-    .hero-sub {
-      color: var(--muted);
-      font-size: 17px;
-      line-height: 1.7;
-      margin-bottom: 36px;
-      max-width: 440px;
-    }
-
-    .hero-actions {
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-
-    .btn-primary {
-      background: var(--text);
-      color: #fff;
-      font-weight: 600;
-      font-size: 14px;
-      padding: 12px 24px;
-      border-radius: 6px;
-      text-decoration: none;
-      transition: opacity 0.15s;
-    }
-
-    .btn-primary:hover { opacity: 0.8; }
-
-    .btn-secondary {
-      color: var(--muted);
-      font-size: 14px;
-      text-decoration: none;
-      transition: color 0.15s;
-    }
-
-    .btn-secondary:hover { color: var(--text); }
-
-    /* ── Terminal ── */
-    .terminal {
-      background: #0a0a0a;
-      border: 1px solid #1a1a1a;
-      border-radius: 10px;
-      overflow: hidden;
-      font-family: var(--mono);
-      font-size: 13px;
-    }
-
-    .terminal-bar {
-      background: #161616;
-      padding: 12px 16px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      border-bottom: 1px solid #1a1a1a;
-    }
-
-    .dot { width: 12px; height: 12px; border-radius: 50%; }
-    .dot-red    { background: #ff5f57; }
-    .dot-yellow { background: #ffbd2e; }
-    .dot-green  { background: #28c840; }
-
-    .terminal-title {
-      color: #555;
-      font-size: 12px;
-      margin-left: 8px;
-    }
-
-    .terminal-body { padding: 20px; min-height: 300px; }
-
-    .t-line {
-      display: flex;
-      margin-bottom: 4px;
-      opacity: 0;
-      transform: translateY(4px);
-      transition: opacity 0.2s, transform 0.2s;
-    }
-
-    .t-line.visible { opacity: 1; transform: translateY(0); }
-
-    .t-prompt { color: #555; margin-right: 8px; user-select: none; }
-    .t-cmd    { color: #f0f0f0; }
-    .t-out    { color: #555; margin-left: 16px; }
-    .t-step   { color: #60a5fa; margin-left: 16px; }
-    .t-ok     { color: #4ade80; margin-left: 16px; }
-    .t-warn   { color: #fbbf24; margin-left: 16px; font-weight: 500; }
-    .t-err    { color: #f87171; margin-left: 16px; font-weight: 500; }
-    .t-blank  { height: 8px; }
-
-    .t-cursor {
-      display: inline-block;
-      width: 8px;
-      height: 14px;
-      background: #f0f0f0;
-      vertical-align: middle;
-      animation: blink 1s step-end infinite;
-    }
-
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0; }
-    }
-
-    /* ── Install strip ── */
-    .install-strip {
-      border-top: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
-      background: var(--surface);
-      padding: 20px 48px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 24px;
-    }
-
-    .install-label {
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .install-cmd {
-      font-family: var(--mono);
-      font-size: 13px;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      padding: 8px 16px;
-      border-radius: 6px;
-      color: var(--text);
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .copy-btn {
-      background: none;
-      border: none;
-      color: var(--muted);
-      cursor: pointer;
-      font-size: 12px;
-      padding: 0;
-      transition: color 0.15s;
-      font-family: var(--sans);
-    }
-
-    .copy-btn:hover { color: var(--text); }
-
-    /* ── Features ── */
-    .features {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 96px 48px;
-    }
-
-    .section-label {
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 500;
-      color: var(--muted);
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      margin-bottom: 16px;
-    }
-
-    .section-title {
-      font-family: var(--mono);
-      font-size: clamp(24px, 3vw, 36px);
-      font-weight: 700;
-      margin-bottom: 16px;
-      letter-spacing: -0.02em;
-    }
-
-    .section-sub {
-      color: var(--muted);
-      font-size: 16px;
-      max-width: 520px;
-      margin-bottom: 56px;
-    }
-
-    .feature-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 1px;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      overflow: hidden;
-      background: var(--border);
-    }
-
-    .feature-card {
-      background: var(--bg);
-      padding: 32px;
-      transition: background 0.15s;
-    }
-
-    .feature-card:hover { background: var(--surface); }
-
-    .feature-icon {
-      font-size: 22px;
-      margin-bottom: 20px;
-      display: block;
-    }
-
-    .feature-title {
-      font-family: var(--mono);
-      font-size: 14px;
-      font-weight: 700;
-      margin-bottom: 10px;
-    }
-
-    .feature-desc {
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.65;
-      margin-bottom: 20px;
-    }
-
-    .feature-tag {
-      font-family: var(--mono);
-      font-size: 11px;
-      color: var(--text);
-      background: var(--surface);
-      border: 1px solid var(--border);
-      padding: 4px 10px;
-      border-radius: 4px;
-      display: inline-block;
-    }
-
-    /* ── Code section ── */
-    .code-section {
-      border-top: 1px solid var(--border);
-      background: var(--surface);
-      padding: 96px 48px;
-    }
-
-    .code-inner {
-      max-width: 1100px;
-      margin: 0 auto;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 64px;
-      align-items: start;
-    }
-
-    .code-block {
-      background: #0a0a0a;
-      border: 1px solid #1a1a1a;
-      border-radius: 10px;
-      overflow: hidden;
-    }
-
-    .code-header {
-      background: #111;
-      padding: 12px 16px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      border-bottom: 1px solid #1a1a1a;
-    }
-
-    .code-filename { font-family: var(--mono); font-size: 12px; color: #555; }
-    .code-lang {
-      font-family: var(--mono);
-      font-size: 11px;
-      color: #888;
-      background: #1a1a1a;
-      padding: 2px 8px;
-      border-radius: 4px;
-    }
-
-    pre {
-      padding: 24px;
-      font-family: var(--mono);
-      font-size: 13px;
-      line-height: 1.7;
-      overflow-x: auto;
-      color: #d4d4d4;
-    }
-
-    .kw  { color: #c792ea; }
-    .fn  { color: #82aaff; }
-    .dec { color: #ffd580; }
-    .str { color: #c3e88d; }
-    .cm  { color: #546e7a; }
-    .num { color: #f78c6c; }
-
-    .modes { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
-
-    .mode-card {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 20px;
-      background: var(--bg);
-    }
-
-    .mode-card.active {
-      border-color: var(--text);
-      background: var(--bg);
-    }
-
-    .mode-title {
-      font-family: var(--mono);
-      font-size: 13px;
-      font-weight: 600;
-      margin-bottom: 6px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .mode-badge {
-      font-size: 10px;
-      padding: 2px 8px;
-      border-radius: 100px;
-      font-family: var(--sans);
-      font-weight: 500;
-    }
-
-    .badge-free {
-      background: #f0fdf4;
-      color: var(--green);
-      border: 1px solid #bbf7d0;
-    }
-
-    .badge-cloud {
-      background: var(--surface);
-      color: var(--muted);
-      border: 1px solid var(--border);
-    }
-
-    .mode-desc {
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.6;
-    }
-
-    /* ── Exceptions table ── */
-    .exceptions {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 96px 48px;
-    }
-
-    .exception-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 40px;
-      font-size: 14px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      overflow: hidden;
-    }
-
-    .exception-table th {
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 500;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      text-align: left;
-      padding: 12px 16px;
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
-    }
-
-    .exception-table td {
-      padding: 16px;
-      border-bottom: 1px solid var(--border);
-      vertical-align: top;
-    }
-
-    .exception-table tr:last-child td { border-bottom: none; }
-    .exception-table tr:hover td { background: var(--surface); }
-
-    .ex-name  { font-family: var(--mono); font-size: 13px; color: var(--red); }
-    .ex-param { font-family: var(--mono); font-size: 13px; color: var(--text); }
-    .ex-desc  { color: var(--muted); font-size: 13px; }
-
-    /* ── CTA ── */
-    .cta-section {
-      border-top: 1px solid var(--border);
-      background: var(--text);
-      color: #fff;
-      padding: 96px 48px;
-      text-align: center;
-    }
-
-    .cta-section h2 {
-      font-family: var(--mono);
-      font-size: clamp(28px, 4vw, 44px);
-      font-weight: 700;
-      margin-bottom: 16px;
-      letter-spacing: -0.02em;
-      color: #fff;
-    }
-
-    .cta-section p {
-      color: rgba(255,255,255,0.5);
-      font-size: 16px;
-      margin-bottom: 36px;
-    }
-
-    .cta-actions {
-      display: flex;
-      gap: 12px;
-      justify-content: center;
-      flex-wrap: wrap;
-    }
-
-    .btn-primary-inv {
-      background: #fff;
-      color: #000;
-      font-weight: 600;
-      font-size: 14px;
-      padding: 12px 24px;
-      border-radius: 6px;
-      text-decoration: none;
-      transition: opacity 0.15s;
-    }
-
-    .btn-primary-inv:hover { opacity: 0.85; }
-
-    .btn-secondary-inv {
-      color: rgba(255,255,255,0.5);
-      font-size: 14px;
-      text-decoration: none;
-      transition: color 0.15s;
-    }
-
-    .btn-secondary-inv:hover { color: #fff; }
-
-    /* ── Footer ── */
-    footer {
-      border-top: 1px solid var(--border);
-      padding: 32px 48px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-
-    .footer-logo {
-      font-family: var(--mono);
-      font-weight: 700;
-      font-size: 14px;
-      color: var(--text);
-      text-decoration: none;
-    }
-
-    .footer-links { display: flex; gap: 24px; }
-
-    .footer-links a {
-      color: var(--muted);
-      text-decoration: none;
-      font-size: 13px;
-      transition: color 0.15s;
-    }
-
-    .footer-links a:hover { color: var(--text); }
-    .footer-copy { color: var(--muted); font-size: 12px; }
-
-    /* ── Responsive ── */
-    @media (max-width: 768px) {
-      nav { padding: 16px 24px; }
-      .nav-links { display: none; }
-      .hero { grid-template-columns: 1fr; padding: 60px 24px 48px; gap: 40px; }
-      .install-strip { padding: 20px 24px; flex-direction: column; gap: 12px; }
-      .features { padding: 60px 24px; }
-      .feature-grid { grid-template-columns: 1fr; }
-      .code-section { padding: 60px 24px; }
-      .code-inner { grid-template-columns: 1fr; gap: 40px; }
-      .exceptions { padding: 60px 24px; }
-      .cta-section { padding: 60px 24px; }
-      footer { padding: 24px; flex-direction: column; gap: 16px; text-align: center; }
-      .footer-links { justify-content: center; }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      .t-line { transition: none; }
-      .t-cursor { animation: none; }
-    }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fences — Control and visibility for AI agents</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f0efe9; --white: #fff; --ink: #111; --gray: #666; --border: #dfded8;
+    --cobalt: #3454d1; --vermilion: #d15434; --ok: #3f6b2a;
+    --serif: 'Instrument Serif', Georgia, serif; --sans: 'Geist', system-ui, sans-serif; --mono: 'Geist Mono', ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html { scroll-behavior: smooth; }
+  body { background: var(--paper); color: var(--ink); font: 16px/1.6 var(--sans); }
+  a { color: inherit; }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; }
+  .eyebrow { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--gray); }
+  h1, h2 { font-family: var(--serif); font-weight: 400; letter-spacing: -.01em; line-height: 1.02; }
+  h1 { font-size: clamp(48px, 8vw, 104px); }
+  h2 { font-size: clamp(36px, 5vw, 60px); margin: 12px 0 16px; }
+  h1 em, h2 em { color: var(--cobalt); }
+  h3 { font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
+  .lead { font-size: 19px; color: var(--gray); max-width: 620px; }
+  section { padding: 112px 0; border-top: 1px solid var(--border); }
+
+  /* Nav */
+  nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--paper) 85%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); }
+  nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+  .logo { font: 600 18px var(--mono); text-decoration: none; }
+  .links { display: flex; gap: 32px; font-size: 14px; }
+  .links a { text-decoration: none; color: var(--gray); } .links a:hover { color: var(--ink); }
+  .ctas { display: flex; gap: 10px; align-items: center; }
+  .btn { display: inline-block; padding: 10px 18px; border-radius: 999px; font: 500 14px var(--sans); text-decoration: none; border: 1px solid var(--ink); }
+  .btn.solid { background: var(--ink); color: var(--white); }
+  .btn.ghost { background: transparent; }
+  .btn.big { padding: 14px 26px; font-size: 16px; }
+
+  /* Hero */
+  .hero { padding: 96px 0 0; text-align: center; overflow: hidden; }
+  .hero .lead { margin: 24px auto 36px; }
+  .hero .ctas { justify-content: center; }
+  .pickets { height: 72px; margin-top: 72px; background: repeating-linear-gradient(90deg, transparent 0 34px, var(--border) 34px 40px); mask: linear-gradient(transparent, #000); }
+  .screen { position: relative; margin: -24px auto 0; max-width: 1080px; background: var(--white); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 30px 80px -30px rgba(17,17,17,.25); overflow: hidden; }
+  .screen .bar { display: flex; gap: 6px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .screen .bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
+  .screen .bar span { margin-left: 12px; font: 12px var(--mono); color: var(--gray); }
+  .screen iframe { display: block; width: 100%; height: 560px; border: 0; }
+
+  /* Limits */
+  .limits { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--border); border-radius: 14px; background: var(--white); margin-top: 48px; }
+  .limits div { padding: 28px; border-left: 1px solid var(--border); }
+  .limits div:first-child { border-left: 0; }
+  .limits b { display: block; font: 400 44px var(--serif); margin-bottom: 4px; }
+  .limits code { font: 12px var(--mono); color: var(--cobalt); }
+  .limits p { color: var(--gray); font-size: 14px; margin-top: 8px; }
+
+  /* Before / after */
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 48px; }
+  .card { background: var(--white); border: 1px solid var(--border); border-radius: 14px; padding: 28px; }
+  .card .tag { font: 500 12px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+  .card.bad .tag { color: var(--vermilion); } .card.good .tag { color: var(--ok); }
+  .log { margin-top: 18px; font: 13px/1.9 var(--mono); }
+  .log div { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px dashed var(--border); }
+  .log .hot { color: var(--vermilion); } .log .cool { color: var(--ok); }
+  .card .note { margin-top: 18px; color: var(--gray); font-size: 15px; }
+
+  /* Numbered features */
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 48px; }
+  .feature { background: var(--white); border: 1px solid var(--border); border-radius: 14px; padding: 28px; display: flex; flex-direction: column; gap: 12px; }
+  .feature .num { font: 500 13px var(--mono); color: var(--cobalt); }
+  .feature p { color: var(--gray); font-size: 15px; }
+  .feature .chips { margin-top: auto; display: flex; flex-wrap: wrap; gap: 6px; padding-top: 8px; }
+  .chips span { font: 12px var(--mono); padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--gray); }
+
+  /* Code */
+  .split { display: grid; grid-template-columns: 5fr 7fr; gap: 56px; align-items: center; }
+  pre { background: var(--ink); color: #e9e8e2; border-radius: 14px; padding: 28px; font: 13.5px/1.7 var(--mono); overflow-x: auto; }
+  pre .c { color: #8a8984; } pre .k { color: #9fb1ff; } pre .s { color: #f0a58f; }
+  .steps { margin-top: 28px; display: grid; gap: 14px; }
+  .steps div { display: flex; gap: 14px; } .steps b { font: 500 13px var(--mono); color: var(--cobalt); padding-top: 2px; }
+
+
+  /* FAQ */
+  .faq { margin-top: 40px; border-top: 1px solid var(--border); }
+  details { border-bottom: 1px solid var(--border); padding: 22px 0; }
+  summary { cursor: pointer; font-size: 19px; font-weight: 500; list-style: none; display: flex; justify-content: space-between; }
+  summary::after { content: '+'; font: 400 24px var(--mono); color: var(--gray); }
+  details[open] summary::after { content: '−'; }
+  details p { margin-top: 12px; color: var(--gray); max-width: 760px; }
+
+  /* CTA + footer */
+  .final { text-align: center; }
+  .final .lead { margin: 0 auto 32px; }
+  footer { border-top: 1px solid var(--border); padding: 48px 0; font-size: 14px; color: var(--gray); }
+  footer .wrap { display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+  footer .cols { display: flex; gap: 64px; }
+  footer .cols div { display: grid; gap: 6px; } footer .cols b { color: var(--ink); font-weight: 500; }
+  footer a { text-decoration: none; } footer a:hover { color: var(--ink); }
+
+  @media (max-width: 860px) {
+    .links { display: none; }
+    .limits, .compare, .features, .split { grid-template-columns: 1fr; }
+    .limits div { border-left: 0; border-top: 1px solid var(--border); } .limits div:first-child { border-top: 0; }
+    section { padding: 72px 0; }
+    .screen iframe { height: 480px; }
+  }
+</style>
 </head>
 <body>
+<div style="background:var(--ink);color:var(--paper);text-align:center;font:13px/1.5 var(--sans);padding:8px 16px">Fences Cloud (dashboard, stored audit trail, team sign-in) is coming soon. The SDK is free and works today in local mode: <a href="docs/#quickstart" style="color:inherit">quickstart</a>.</div>
 
-<!-- Nav -->
 <nav>
-  <a href="/" class="nav-logo">
-    <span class="logo-bracket"></span><span class="logo-bar">|=|</span><span class="logo-bracket"></span><span class="logo-name">Fences</span>
-  </a>
-  <div class="nav-links">
-    <a href="#features">Features</a>
-    <a href="#quickstart">Quickstart</a>
-    <a href="https://github.com/bhaviksardar/fences">Docs</a>
-    <a href="https://github.com/bhaviksardar/fences" class="nav-cta">GitHub</a>
+  <div class="wrap">
+    <a class="logo" href="./">(|=|) Fences</a>
+    <div class="links"><a href="#limits">Limits</a><a href="#how">How it works</a><a href="#features">Features</a><a href="#faq">FAQ</a><a href="docs/">Docs</a></div>
+    <div class="ctas"><a class="btn ghost" href="https://github.com/bhaviksardar/fences">GitHub</a><a class="btn solid" href="docs/#quickstart">Get started</a></div>
   </div>
 </nav>
 
-<!-- Hero -->
-<section class="hero">
-  <div>
-    <p class="hero-eyebrow">Agent governance SDK</p>
-    <h1 class="hero-headline">Stop agents<br/>before they<br/><em>go wrong.</em></h1>
-    <p class="hero-sub">
-      Budget limits, runaway loop protection, and a decision audit trail —
-      enforced at runtime, in three lines of code.
-    </p>
-    <div class="hero-actions">
-      <a href="#quickstart" class="btn-primary">Get started free</a>
-      <a href="https://github.com/bhaviksardar/fences" class="btn-secondary">View on GitHub →</a>
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Runtime governance for AI agents</p>
+    <h1 style="margin-top:20px">See what your agents do.<br>Decide what they <em>can</em>.</h1>
+    <p class="lead">Fences sits in every agent loop: hard limits on spend, steps, time and tokens, a live view of every run, and a decision trail you can actually read.</p>
+    <div class="ctas"><a class="btn solid big" href="docs/#quickstart">Start fencing — free</a><a class="btn ghost big" href="#how">See the code</a></div>
+  </div>
+  <div class="pickets"></div>
+  <div class="wrap">
+    <div class="screen">
+      <div class="bar"><i></i><i></i><i></i><span>fences / dashboard — live</span></div>
+      <iframe src="demo.html?embed" title="Live Fences dashboard demo" loading="lazy"></iframe>
     </div>
   </div>
+</header>
 
-  <div class="terminal">
-    <div class="terminal-bar">
-      <div class="dot dot-red"></div>
-      <div class="dot dot-yellow"></div>
-      <div class="dot dot-green"></div>
-      <span class="terminal-title">agent_run.py</span>
-    </div>
-    <div class="terminal-body" id="terminal-body"></div>
-  </div>
-</section>
-
-<!-- Install strip -->
-<div class="install-strip">
-  <span class="install-label">Install</span>
-  <div class="install-cmd">
-    <span>pip install agentfences</span>
-    <button class="copy-btn" onclick="copyInstall(this)">copy</button>
-  </div>
-  <span class="install-label">No account or backend required</span>
-</div>
-
-<!-- Features -->
-<section class="features" id="features">
-  <p class="section-label">What it does</p>
-  <h2 class="section-title">Four problems.<br/>One decorator.</h2>
-  <p class="section-sub">Agents fail in predictable ways. Fences catches all four — and lets the agent handle it gracefully instead of crashing.</p>
-
-  <div class="feature-grid">
-    <div class="feature-card">
-      <span class="feature-icon">💰</span>
-      <h3 class="feature-title">Budget enforcement</h3>
-      <p class="feature-desc">Set a spend limit per run. The moment cumulative cost crosses it, the agent stops with a clean result — not a crash.</p>
-      <span class="feature-tag">budget_usd</span>
-    </div>
-    <div class="feature-card">
-      <span class="feature-icon">🔁</span>
-      <h3 class="feature-title">Loop protection</h3>
-      <p class="feature-desc">An agent can stay within budget and still loop forever on a cheap model. Iteration and time limits catch what spend control misses.</p>
-      <span class="feature-tag">max_iterations</span>
-    </div>
-    <div class="feature-card">
-      <span class="feature-icon">🪙</span>
-      <h3 class="feature-title">Token governance</h3>
-      <p class="feature-desc">Cap total token usage (input + output) across an entire run — independent of cost. Useful when context window or throughput matters more than spend.</p>
-      <span class="feature-tag">max_tokens</span>
-    </div>
-    <div class="feature-card">
-      <span class="feature-icon">📋</span>
-      <h3 class="feature-title">Decision audit trail</h3>
-      <p class="feature-desc">Agents record why they did something at each step. When a run hits a limit, the full reasoning trail is preserved — not lost in a traceback.</p>
-      <span class="feature-tag">log_decision()</span>
+<section id="limits">
+  <div class="wrap">
+    <p class="eyebrow">What gets fenced</p>
+    <h2>Four limits. <em>Zero</em> runaway loops.</h2>
+    <p class="lead">Set any combination per run. The first one crossed stops the agent, and it tells you which.</p>
+    <div class="limits">
+      <div><b>Spend</b><code>budget_usd</code><p>Dollar cap across every model call in the run.</p></div>
+      <div><b>Iterations</b><code>max_iterations</code><p>Catches the agent that keeps retrying the same tool.</p></div>
+      <div><b>Time</b><code>max_duration_ms</code><p>Wall-clock ceiling, so nothing runs overnight by accident.</p></div>
+      <div><b>Tokens</b><code>max_tokens</code><p>Context and output budget, independent of price.</p></div>
     </div>
   </div>
 </section>
 
-<!-- Code section -->
-<section class="code-section" id="quickstart">
-  <div class="code-inner">
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Before and after</p>
+    <h2>Same agent. <em>One</em> line different.</h2>
+    <div class="compare">
+      <div class="card bad">
+        <span class="tag">Without Fences</span>
+        <div class="log">
+          <div><span>research-agent · step 1,204</span><span class="hot">$212.40</span></div>
+          <div><span>research-agent · step 2,871</span><span class="hot">$506.18</span></div>
+          <div><span>research-agent · step 3,412</span><span class="hot">$1,284.07</span></div>
+          <div><span>status</span><span class="hot">still running</span></div>
+        </div>
+        <p class="note">You find out from the invoice. No record of what it was doing or why it never stopped.</p>
+      </div>
+      <div class="card good">
+        <span class="tag">With Fences</span>
+        <div class="log">
+          <div><span>research-agent · step 186</span><span>$4.97</span></div>
+          <div><span>research-agent · step 187</span><span class="cool">$5.00 / $5.00</span></div>
+          <div><span>breach</span><span class="cool">budget_exceeded</span></div>
+          <div><span>status</span><span class="cool">halted · summarised</span></div>
+        </div>
+        <p class="note">The agent gets a clean signal, writes up what it found, and stops. Every decision is on the record.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap split">
     <div>
-      <p class="section-label">Quickstart</p>
-      <h2 class="section-title">Agents handle limits.<br/>Not your code.</h2>
-      <p class="section-sub" style="margin-bottom: 32px;">
-        checkpoint() returns a result — not an exception. The agent reads it,
-        summarises what it found, and stops gracefully. No try/catch in your
-        orchestration layer.
-      </p>
-
-      <div class="modes">
-        <div class="mode-card active">
-          <div class="mode-title">
-            Local mode
-            <span class="mode-badge badge-free">Free</span>
-          </div>
-          <p class="mode-desc">No account, no backend, no API key. Governance runs entirely in-process. Perfect for getting started or self-hosted deployments.</p>
-        </div>
-        <div class="mode-card">
-          <div class="mode-title">
-            Cloud mode
-            <span class="mode-badge badge-cloud">Coming soon</span>
-          </div>
-          <p class="mode-desc">Connect to Fences Cloud for persistent audit trails, a live dashboard, and server-authoritative enforcement. Same code — one line changes.</p>
-        </div>
+      <p class="eyebrow">How it works</p>
+      <h2>Wrap the loop. <em>Checkpoint</em> each step.</h2>
+      <div class="steps">
+        <div><b>01</b><span><code>pip install agentfences</code> and point it at your Fences key.</span></div>
+        <div><b>02</b><span>Decorate the agent with its limits.</span></div>
+        <div><b>03</b><span>Call <code>checkpoint()</code> after each model call. Breaches come back as a result, not an exception.</span></div>
       </div>
     </div>
+<pre><span class="k">import</span> agentfences
+<span class="k">from</span> agentfences <span class="k">import</span> governed, checkpoint, log_decision
 
-    <div class="code-block">
-      <div class="code-header">
-        <span class="code-filename">agent.py</span>
-        <span class="code-lang">Python</span>
-      </div>
-      <pre><code><span class="kw">import</span> agentfences
-<span class="kw">from</span> agentfences <span class="kw">import</span> governed, checkpoint, log_decision
+agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="s">"https://your-fences-instance.com"</span>)
 
-agentfences.<span class="fn">init</span>(<span class="str">local_only</span>=<span class="kw">True</span>)
+<span class="k">@governed</span>(budget_usd=<span class="s">5.00</span>, max_iterations=<span class="s">300</span>, max_tokens=<span class="s">500_000</span>)
+<span class="k">async def</span> research(messages):
+    <span class="k">while True</span>:
+        log_decision(reasoning=<span class="s">"searching sources"</span>, action=<span class="s">"search"</span>)
+        response = call_llm(messages)
 
-<span class="dec">@governed</span>(
-    budget_usd=<span class="num">0.50</span>,
-    max_iterations=<span class="num">20</span>,
-    max_tokens=<span class="num">50_000</span>,
-)
-<span class="kw">async def</span> <span class="fn">run_agent</span>(query: str, messages: list):
-    <span class="kw">while True</span>:
-        <span class="fn">log_decision</span>(reasoning=<span class="str">"calling LLM"</span>, action=<span class="str">"llm_call"</span>)
-        response = <span class="fn">call_llm</span>(messages)
-
-        result = <span class="kw">await</span> <span class="fn">checkpoint</span>(
-            cost_delta_usd=<span class="fn">compute_cost</span>(response.usage),
+        result = <span class="k">await</span> checkpoint(
+            cost_delta_usd=cost(response.usage),
             tokens_used=response.usage.total_tokens,
         )
+        <span class="k">if</span> result.breached:  <span class="c"># budget_exceeded, iteration_limit, ...</span>
+            messages.append({<span class="s">"role"</span>: <span class="s">"system"</span>, <span class="s">"content"</span>: result.system_prompt})
+            <span class="k">return</span> call_llm(messages)  <span class="c"># wrap up gracefully</span></pre>
+  </div>
+</section>
 
-        <span class="kw">if</span> result.breached:
-            <span class="cm"># Inject limit message — LLM summarises gracefully</span>
-            messages.<span class="fn">append</span>({<span class="str">"role"</span>: <span class="str">"system"</span>,
-                             <span class="str">"content"</span>: result.system_prompt})
-            <span class="kw">return</span> <span class="fn">call_llm</span>(messages)
-
-        <span class="kw">if</span> response.<span class="fn">is_done</span>():
-            <span class="kw">return</span> response</code></pre>
+<section id="features">
+  <div class="wrap">
+    <p class="eyebrow">The platform</p>
+    <h2>Built on every <em>checkpoint</em>.</h2>
+    <div class="features">
+      <div class="feature"><span class="num">01</span><h3>Enforced server-side</h3><p>Limits live on the Fences backend, not in agent memory. A crashed or restarted worker can't reset its own budget.</p><div class="chips"><span>checkpoint</span><span>breach</span></div></div>
+      <div class="feature"><span class="num">02</span><h3>Watch runs live</h3><p>Every run streams to the dashboard as it checks in: spend, iterations, tokens, status.</p><div class="chips"><span>websocket</span><span>dashboard</span></div></div>
+      <div class="feature"><span class="num">03</span><h3>Raise limits mid-run</h3><p>A run hit its fence but was close? Raise the limit and it resumes on the next checkpoint. No redeploy.</p><div class="chips"><span>PATCH /limits</span></div></div>
+      <div class="feature"><span class="num">04</span><h3>Decision audit trail</h3><p>Every <code>log_decision</code> is stored with its step and action, so you can replay why an agent did what it did.</p><div class="chips"><span>log_decision</span><span>audit</span></div></div>
+      <div class="feature"><span class="num">05</span><h3>Graceful, not fatal</h3><p>Breaches return a ready-made system prompt, so the agent can summarise and exit instead of crashing your pipeline.</p><div class="chips"><span>system_prompt</span></div></div>
+      <div class="feature"><span class="num">06</span><h3>Your team, your keys</h3><p>Sign in with Google, GitHub, Microsoft or company SSO. Per-user API keys, revocable, isolated per account.</p><div class="chips"><span>SSO</span><span>API keys</span></div></div>
     </div>
   </div>
 </section>
 
-<!-- Exceptions table -->
-<section class="exceptions">
-  <p class="section-label">Reference</p>
-  <h2 class="section-title">Limits and exceptions</h2>
-
-  <table class="exception-table">
-    <thead>
-      <tr>
-        <th>Limit</th>
-        <th>Parameter</th>
-        <th>When it fires</th>
-        <th>result.breach_type</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td><span class="ex-name">Budget</span></td>
-        <td><span class="ex-param">budget_usd</span></td>
-        <td><span class="ex-desc">Cumulative spend across all checkpoint() calls exceeds the limit.</span></td>
-        <td><span class="ex-param">budget_exceeded</span></td>
-      </tr>
-      <tr>
-        <td><span class="ex-name">Iterations</span></td>
-        <td><span class="ex-param">max_iterations</span></td>
-        <td><span class="ex-desc">checkpoint() has been called more times than the limit allows.</span></td>
-        <td><span class="ex-param">iteration_limit</span></td>
-      </tr>
-      <tr>
-        <td><span class="ex-name">Duration</span></td>
-        <td><span class="ex-param">max_duration_ms</span></td>
-        <td><span class="ex-desc">Wall-clock time since the run started exceeds the duration limit.</span></td>
-        <td><span class="ex-param">time_limit</span></td>
-      </tr>
-      <tr>
-        <td><span class="ex-name">Tokens</span></td>
-        <td><span class="ex-param">max_tokens</span></td>
-        <td><span class="ex-desc">Total tokens (input + output) across all LLM calls exceeds the limit.</span></td>
-        <td><span class="ex-param">token_limit</span></td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div style="margin-top: 32px; padding: 20px 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);">
-    <p style="font-family: var(--mono); font-size: 13px; font-weight: 600; margin-bottom: 10px;">CheckpointResult</p>
-    <p style="color: var(--muted); font-size: 13px; line-height: 1.7;">
-      Every <code style="font-family: var(--mono); background: var(--bg); padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border);">checkpoint()</code> call returns a result object.
-      <code style="font-family: var(--mono); background: var(--bg); padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border);">result.breached</code> tells the agent whether to continue.
-      <code style="font-family: var(--mono); background: var(--bg); padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border);">result.system_prompt</code> is a ready-made message to inject into the LLM conversation so it summarises gracefully instead of stopping mid-thought.
-      Set <code style="font-family: var(--mono); background: var(--bg); padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border);">raise_on_breach=True</code> in <code style="font-family: var(--mono); background: var(--bg); padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border);">@governed</code> to get exceptions instead (legacy behaviour).
-    </p>
+<section id="faq">
+  <div class="wrap">
+    <p class="eyebrow">FAQ</p>
+    <h2>Questions.</h2>
+    <div class="faq">
+      <details><summary>Does Fences call my LLM or see my prompts?</summary><p>No. Your agent reports cost, tokens and an optional short reasoning note at each checkpoint. Prompts and completions never leave your infrastructure.</p></details>
+      <details><summary>What happens when a limit is crossed?</summary><p>The checkpoint returns <code>breached</code> with the reason (<code>budget_exceeded</code>, <code>iteration_limit</code>, <code>time_limit</code> or <code>token_limit</code>), the run is marked breached, and further checkpoints are refused until you raise the limit.</p></details>
+      <details><summary>Which frameworks does it work with?</summary><p>Anything with a loop. Fences doesn't care whether you use raw API calls, LangChain or your own orchestrator. You call <code>checkpoint()</code> where a step ends.</p></details>
+      <details><summary>Can I try it without an account?</summary><p>Yes. <code>agentfences.init(local_only=True)</code> enforces limits in-process with no key. Add an API key when you want the dashboard and the stored audit trail.</p></details>
+      <details><summary>How do I sign in?</summary><p>Google, GitHub, Microsoft, Apple, email and password, or your company's SAML/OIDC SSO.</p></details>
+    </div>
   </div>
 </section>
 
-<!-- CTA -->
-<section class="cta-section">
-  <h2>Give your agents brakes.</h2>
-  <p>Free to use. No account required to get started.</p>
-  <div class="cta-actions">
-    <a href="https://github.com/bhaviksardar/fences" class="btn-primary-inv">View on GitHub</a>
-    <a href="https://github.com/bhaviksardar/fences" class="btn-secondary-inv">Read the docs →</a>
+<section class="final">
+  <div class="wrap">
+    <h2>See it. Steer it. <em>Fence</em> it.</h2>
+    <p class="lead">One decorator gets you limits today, and the data for everything after.</p>
+    <a class="btn solid big" href="docs/#quickstart">Get started</a>
   </div>
 </section>
 
-<!-- Footer -->
 <footer>
-  <a href="/" class="footer-logo">
-    <span style="color:var(--muted)">(</span>|=|<span style="color:var(--muted)">)</span> Fences
-  </a>
-  <div class="footer-links">
-    <a href="https://github.com/bhaviksardar/fences">GitHub</a>
-    <a href="https://github.com/bhaviksardar/fences">Docs</a>
-    <a href="https://github.com/bhaviksardar/fences/blob/main/LICENSE">MIT License</a>
+  <div class="wrap">
+    <div><span class="logo">(|=|) Fences</span><p style="margin-top:8px">© 2026 Fences</p></div>
+    <div class="cols">
+      <div><b>Product</b><a href="#limits">Limits</a><a href="#how">How it works</a><a href="#features">Features</a><a href="docs/">Docs</a></div>
+      <div><b>Code</b><a href="https://github.com/bhaviksardar/fences">GitHub</a><a href="https://pypi.org/project/agentfences/">PyPI</a><a href="docs/">Docs</a></div>
+    </div>
   </div>
-  <p class="footer-copy">© 2025 Bhavik Sardar</p>
 </footer>
 
-<script>
-const lines = [
-  { type: 'cmd',  text: 'python agent.py' },
-  { type: 'step', text: 'iteration 0: calling gpt-4o-mini...' },
-  { type: 'ok',   text: '✓  $0.031 — step 1 complete' },
-  { type: 'step', text: 'iteration 1: calling gpt-4o-mini...' },
-  { type: 'ok',   text: '✓  $0.028 — step 2 complete' },
-  { type: 'step', text: 'iteration 2: calling gpt-4o-mini...' },
-  { type: 'ok',   text: '✓  $0.033 — step 3 complete' },
-  { type: 'step', text: 'iteration 3: calling gpt-4o-mini...' },
-  { type: 'blank' },
-  { type: 'warn', text: '⚠  result.breached — budget_exceeded' },
-  { type: 'step', text: 'injecting system_prompt into conversation...' },
-  { type: 'step', text: 'asking agent to summarise...' },
-  { type: 'blank' },
-  { type: 'ok',   text: '✓  Agent: "Based on my research so far, the' },
-  { type: 'ok',   text: '   three biggest risks are: 1) lack of cost' },
-  { type: 'ok',   text: '   controls 2) runaway loops 3) no audit..."' },
-  { type: 'blank' },
-  { type: 'cursor' },
-];
-
-const body = document.getElementById('terminal-body');
-let idx = 0;
-
-function appendLine() {
-  if (idx >= lines.length) return;
-  const l = lines[idx++];
-
-  if (l.type === 'blank') {
-    const el = document.createElement('div');
-    el.className = 't-blank';
-    body.appendChild(el);
-    setTimeout(appendLine, 80);
-    return;
-  }
-
-  if (l.type === 'cursor') {
-    const el = document.createElement('div');
-    el.className = 't-line visible';
-    el.innerHTML = `<span class="t-prompt">$</span><span class="t-cursor"></span>`;
-    body.appendChild(el);
-    return;
-  }
-
-  const el = document.createElement('div');
-  el.className = 't-line';
-
-  if (l.type === 'cmd')  el.innerHTML = `<span class="t-prompt">$</span><span class="t-cmd">${l.text}</span>`;
-  if (l.type === 'step') el.innerHTML = `<span class="t-step">${l.text}</span>`;
-  if (l.type === 'ok')   el.innerHTML = `<span class="t-ok">${l.text}</span>`;
-  if (l.type === 'err')  el.innerHTML = `<span class="t-err">${l.text}</span>`;
-  if (l.type === 'warn') el.innerHTML = `<span class="t-warn">${l.text}</span>`;
-  if (l.type === 'out')  el.innerHTML = `<span class="t-out">${l.text}</span>`;
-
-  body.appendChild(el);
-  requestAnimationFrame(() => el.classList.add('visible'));
-
-  const delay = l.type === 'warn' ? 800 : l.type === 'step' ? 500 : 200;
-  setTimeout(appendLine, delay);
-}
-
-setTimeout(appendLine, 600);
-
-setInterval(() => {
-  body.innerHTML = '';
-  idx = 0;
-  setTimeout(appendLine, 400);
-}, 13000);
-
-function copyInstall(btn) {
-  navigator.clipboard.writeText('pip install agentfences').then(() => {
-    btn.textContent = 'copied!';
-    setTimeout(() => btn.textContent = 'copy', 2000);
-  });
-}
-</script>
 </body>
 </html>

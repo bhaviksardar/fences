@@ -1,0 +1,870 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fences Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f0efe9; --white: #fff; --ink: #111; --gray: #666; --border: #dfded8; --soft: #f7f7f4;
+    --cobalt: #3454d1; --red: #c53b1f; --amber: #b7791f; --green: #3f6b2a;
+    --serif: 'Instrument Serif', Georgia, serif; --sans: 'Geist', system-ui, sans-serif; --mono: 'Geist Mono', ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--white); color: var(--ink); font: 14px/1.5 var(--sans); display: grid; grid-template-columns: 228px 1fr; min-height: 100vh; }
+  a { color: inherit; }
+  button { font: inherit; cursor: pointer; }
+  input { font: 13px var(--mono); padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--white); width: 100%; }
+  input:focus { outline: 2px solid var(--cobalt); outline-offset: -1px; }
+  .btn { padding: 8px 14px; border: 1px solid var(--ink); border-radius: 999px; background: var(--ink); color: var(--white); font-weight: 500; text-decoration: none; text-align: center; white-space: nowrap; }
+  .btn.ghost { background: none; color: var(--ink); }
+  .link { background: none; border: 0; padding: 0; color: var(--gray); text-decoration: underline; }
+  .muted { color: var(--gray); }
+  .mono { font-family: var(--mono); }
+  .err { color: var(--red); font-size: 13px; }
+
+  /* Sidebar */
+  .side { position: sticky; top: 0; height: 100vh; background: var(--paper); border-right: 1px solid var(--border); padding: 20px 14px; display: flex; flex-direction: column; gap: 24px; }
+  .logo { font: 600 17px var(--mono); text-decoration: none; padding: 0 8px; }
+  .side nav { display: grid; gap: 2px; }
+  .side nav a { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-radius: 8px; text-decoration: none; color: var(--gray); }
+  .side nav a:hover { background: rgba(17,17,17,.04); color: var(--ink); }
+  .side nav a.on { background: var(--white); color: var(--ink); font-weight: 500; box-shadow: 0 0 0 1px var(--border); }
+  .tag { font: 500 10px var(--mono); padding: 1px 6px; border-radius: 999px; background: var(--border); color: var(--gray); letter-spacing: .04em; }
+  .side .foot { margin-top: auto; font-size: 13px; }
+
+  /* Profile: avatar in the sidebar, card in a popover (closes on outside click / Esc) */
+  .profile-btn { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; border: 0; border-radius: 10px; background: none; color: var(--ink); text-align: left; }
+  .profile-btn:hover, .profile-btn:focus-visible { background: rgba(17,17,17,.05); }
+  .profile-btn .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .profile-btn .chev { color: var(--gray); font-size: 11px; }
+  .avatar { width: 30px; height: 30px; flex: none; border-radius: 50%; overflow: hidden; display: grid; place-items: center; background: var(--ink); color: var(--white); font: 600 12px var(--sans); }
+  .avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .avatar.lg { width: 44px; height: 44px; font-size: 16px; }
+  #profile { inset: auto auto 68px 14px; margin: 0; width: 280px; padding: 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--white); color: var(--ink); box-shadow: 0 20px 50px -20px rgba(17,17,17,.35); }
+  #profile .head { display: flex; gap: 12px; align-items: center; min-width: 0; }
+  #profile .head div { min-width: 0; } #profile .head b, #profile .head .muted { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #profile .meta { margin: 14px 0; padding: 12px 0; border-block: 1px solid var(--border); font-size: 12px; color: var(--gray); }
+  #profile .actions { display: grid; gap: 8px; }
+
+  /* Main */
+  main { padding: 32px 40px 64px; min-width: 0; }
+  header.top { display: flex; justify-content: space-between; align-items: end; gap: 16px; margin-bottom: 24px; }
+  h1 { font: 400 40px/1 var(--serif); letter-spacing: -.01em; }
+  h2 { font-size: 15px; font-weight: 600; margin: 32px 0 12px; }
+  .live { font: 12px var(--mono); color: var(--gray); display: flex; align-items: center; gap: 6px; }
+  .live::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 24px; }
+  .metric { padding: 18px 20px; border-left: 1px solid var(--border); }
+  .metric:first-child { border-left: 0; }
+  .metric span { font-size: 12px; color: var(--gray); }
+  .metric b { display: block; font: 400 32px/1.2 var(--serif); }
+
+  .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs { display: flex; gap: 4px; background: var(--soft); border: 1px solid var(--border); border-radius: 999px; padding: 3px; }
+  .tabs button { border: 0; background: none; padding: 5px 12px; border-radius: 999px; color: var(--gray); font-size: 13px; }
+  .tabs button.on { background: var(--white); color: var(--ink); box-shadow: 0 0 0 1px var(--border); }
+  .tabs small { font-family: var(--mono); margin-left: 4px; }
+  .toolbar input { width: 240px; }
+
+  .table { border: 1px solid var(--border); border-radius: 12px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  tbody tr:last-child > td { border-bottom: 0; }
+  th { font-size: 12px; color: var(--gray); font-weight: 500; background: var(--soft); }
+  td { font: 13px var(--mono); }
+  td small { display: block; color: var(--gray); font-size: 11px; }
+  td b { font: 500 14px var(--sans); }
+  tr[data-id], tr[data-agent] { cursor: pointer; }
+  tr[data-id]:hover, tr[data-agent]:hover, tr.sel { background: var(--soft); }
+
+  .pill { display: inline-flex; align-items: center; gap: 6px; font: 500 12px var(--mono); padding: 2px 10px 2px 8px; border-radius: 999px; background: var(--soft); border: 1px solid var(--border); }
+  .pill::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .running { color: var(--amber); } .success { color: var(--green); } .breached, .error { color: var(--red); }
+  .running.pill::before { animation: pulse 1.5s infinite; }
+
+  .meter { width: 120px; height: 6px; border-radius: 3px; background: var(--paper); overflow: hidden; margin-bottom: 4px; }
+  .meter i { display: block; height: 100%; background: var(--cobalt); }
+  .meter i.warn { background: var(--amber); } .meter i.over { background: var(--red); }
+
+  /* Expanded run */
+  tr.detail > td { background: var(--soft); padding: 20px; white-space: normal; font-family: var(--sans); }
+  .detail-grid { display: grid; grid-template-columns: 320px 1fr; gap: 24px; }
+  .panel { background: var(--white); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .panel h4 { font-size: 13px; font-weight: 600; margin-bottom: 12px; display: flex; justify-content: space-between; }
+  .limit { margin-bottom: 14px; font-size: 13px; }
+  .limit .meter { width: 100%; margin: 4px 0 0; }
+  .limit div:first-child { display: flex; justify-content: space-between; }
+  .limit span:last-child { font-family: var(--mono); color: var(--gray); }
+  .limits-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .limits-form label { font-size: 12px; color: var(--gray); display: grid; gap: 4px; }
+  .limits-form .row { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
+  .trail { max-height: 340px; overflow-y: auto; }
+  .trail-filters { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: end; gap: 10px 16px; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 240px; }
+  .chip { border: 1px solid var(--border); background: var(--white); border-radius: 999px; padding: 3px 10px; font: 12px var(--mono); color: var(--gray); }
+  .chip small { display: inline; margin-left: 4px; font-size: 11px; }
+  .chip.on { background: var(--ink); border-color: var(--ink); color: var(--white); }
+  .times { display: flex; gap: 8px; align-items: end; font-size: 12px; color: var(--gray); }  /* From, To, Clear stay on one line */
+  .times label { display: grid; gap: 2px; } .times input { width: 196px; padding: 5px 8px; font-size: 12px; }
+  .times .btn { margin-bottom: 1px; }
+  /* Trail timeline: one lane per category, one dot per decision */
+  .trail-graph { position: relative; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .trail-graph svg { display: block; }
+  .trail-graph .lane { font: 11px var(--mono); fill: var(--gray); }
+  .trail-graph .tick { font: 10px var(--mono); fill: #898781; }
+  .trail-graph .grid { stroke: #ecebe6; stroke-width: 1; }
+  .trail-graph .dot { fill: var(--cobalt); stroke: var(--white); stroke-width: 2; }
+  .trail-graph .dot.fence { fill: var(--red); }
+  .tip { position: absolute; z-index: 2; pointer-events: none; max-width: 280px; padding: 8px 10px; border-radius: 8px; background: var(--ink); color: var(--white); font-size: 12px; line-height: 1.4; }
+  .tip b { display: block; font: 500 12px var(--mono); }
+  .tip span { color: #c3c2b7; }
+  .run-error { grid-column: 1 / -1; display: grid; gap: 4px; padding: 12px 16px; border: 1px solid #f0c9bf; border-left: 3px solid var(--red); border-radius: 10px; background: #fdf3f0; }
+  .run-error span { font-size: 12px; font-weight: 600; color: var(--red); }
+  .run-error code { font: 13px/1.5 var(--mono); color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+  .btn.sm { padding: 5px 12px; font-size: 12px; }
+  .decision { display: grid; grid-template-columns: 40px 1fr auto; gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
+  .decision:last-child { border-bottom: 0; }
+  .decision small { font: 12px var(--mono); color: var(--gray); padding-top: 1px; }
+  .decision time { font: 11px var(--mono); color: var(--gray); white-space: nowrap; padding-top: 2px; }
+  .decision em { font: normal 12px var(--mono); color: var(--cobalt); margin-right: 6px; }
+  .decision.fence em { color: var(--red); }
+
+  /* First-run setup */
+  .steps { display: grid; gap: 16px; max-width: 860px; }
+  .step { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 16px; border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .step > b { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--paper); font: 500 13px var(--mono); }
+  .step.done > b { background: var(--green); color: var(--white); }
+  .step h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .step p { color: var(--gray); margin-bottom: 12px; }
+  .step pre { position: relative; }
+  .copy { position: absolute; top: 10px; right: 10px; background: #2a2a2a; color: #e9e8e2; border: 0; border-radius: 6px; padding: 4px 10px; font: 12px var(--mono); }
+  .waiting { display: flex; align-items: center; gap: 10px; color: var(--gray); }
+  .waiting::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--amber); animation: pulse 1.2s infinite; }
+
+  .danger { color: var(--red); }
+  .btn.danger { background: var(--red); border-color: var(--red); color: var(--white); }
+  .ceilings { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; max-width: 900px; margin-top: 10px; }
+  .btn.ghost.danger { background: none; color: var(--red); border-color: #e7b3a6; }
+  .run-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .reason { margin: -6px 0 12px; font-size: 13px; color: var(--red); }
+    .ceilings label { display: grid; gap: 3px; font-size: 12px; color: var(--gray); }
+  .limit-cards { display: grid; gap: 16px; max-width: 900px; }
+  .limit-card h4 { justify-content: flex-start; gap: 10px; }
+  .limit-card .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+  .intro { max-width: 760px; margin: -8px 0 20px; color: var(--gray); }
+  .account { max-width: 720px; padding: 16px; border: 1px solid #f0c9bf; border-radius: 12px; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+
+  /* Keys */
+  .keyform { display: flex; gap: 8px; max-width: 520px; }
+  .newkey { margin: 12px 0; padding: 14px; background: var(--paper); border-radius: 10px; font: 13px var(--mono); word-break: break-all; }
+  #keys tr[data-key] { cursor: pointer; } #keys tr[data-key]:hover { background: var(--soft); }
+  dialog { margin: auto; border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: min(480px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgb(0 0 0 / .3); }
+  dialog h3 { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  pre { background: var(--ink); color: #e9e8e2; border-radius: 12px; padding: 20px; font: 13px/1.7 var(--mono); overflow-x: auto; }
+
+  /* Embedded in the landing page: just the runs view */
+  .embed { display: block; }
+  .embed .side, .embed header.top { display: none; }
+  .embed main { padding: 20px; }
+
+  @media (max-width: 860px) {
+    body { grid-template-columns: minmax(0, 1fr); }  /* never wider than the screen; wide code and tables scroll inside */
+    .side { position: static; height: auto; flex-direction: row; align-items: center; padding: 12px 16px; overflow-x: auto; }
+    .side nav { display: flex; flex: 1; min-width: 0; overflow-x: auto; } .side .foot { margin: 0; flex: none; }
+    .side { gap: 10px; overflow: visible; } .logo { padding: 0; } .logo, .side nav a { white-space: nowrap; }  /* links scroll; logo and avatar stay put */
+    .profile-btn .name, .profile-btn .chev { display: none; }
+    #profile { inset: 64px 16px auto auto; }
+    main { padding: 20px 16px 48px; }
+    .metrics { grid-template-columns: 1fr 1fr; } .metric:nth-child(3) { border-left: 0; } .metric:nth-child(n+3) { border-top: 1px solid var(--border); }
+    .detail-grid { grid-template-columns: 1fr; position: sticky; left: 20px; width: calc(100vw - 72px); }  /* stay on screen inside the side-scrolling table */
+    .toolbar input { width: 100%; }
+    .tabs { max-width: 100%; overflow-x: auto; } .tabs button { white-space: nowrap; }
+    .times { flex-wrap: wrap; } .times label { flex: 1 1 140px; } .times input { width: 100%; }
+  }
+  [hidden] { display: none !important; }  /* class display rules (.steps grid, nav flex) must not unhide */
+</style>
+</head>
+<body>
+<aside class="side">
+  <a class="logo" href="/">(|=|) Fences</a>
+  <nav>
+    <a href="#runs">Runs <span class="tag" id="nav-running" hidden></span></a>
+    <a href="#agents">Agents</a>
+    <a href="#limits" id="nav-limits" hidden>Limits</a>
+    <a href="#keys" id="nav-keys" hidden>API keys</a>
+  </nav>
+  <div class="foot">
+    <button class="profile-btn" id="profile-btn" popovertarget="profile" aria-label="Account" hidden>
+      <span class="avatar" id="avatar"></span><span class="name" id="who"></span><span class="chev">▲</span>
+    </button>
+  </div>
+</aside>
+
+<div id="profile" popover>
+  <div class="head"><span class="avatar lg" id="avatar-lg"></span><div><b id="p-name"></b><span class="muted" id="p-email"></span></div></div>
+  <div class="meta">Member since <span id="p-since"></span></div>
+  <div class="actions">
+    <a class="btn ghost sm" href="#keys" id="p-keys">API keys &amp; account</a>
+    <button class="btn sm" id="logout">Sign out</button>
+  </div>
+</div>
+
+<main>
+  <section data-view="runs">
+    <header class="top"><h1 id="runs-title">Runs</h1><span class="live" id="status"></span></header>
+    <div class="steps" id="setup" hidden>
+      <div class="step" id="step-key"><b>1</b><div>
+        <h3>Create an API key</h3>
+        <p>Your agents use it to report each step to Fences.</p>
+        <button class="btn" id="setup-key">Create API key</button>
+        <div id="setup-newkey"></div>
+      </div></div>
+      <div class="step"><b>2</b><div>
+        <h3>Install the SDK</h3>
+        <pre><button class="copy">Copy</button>pip install agentfences</pre>
+      </div></div>
+      <div class="step"><b>3</b><div>
+        <h3>Fence your agent</h3>
+        <p>Wrap the agent with its limits and call <span class="mono">checkpoint()</span> after each model call.</p>
+<pre><button class="copy">Copy</button>import agentfences
+from agentfences import governed, checkpoint, log_decision
+
+agentfences.init(api_key="<span id="setup-keyval">fc_...</span>", endpoint="<span class="origin"></span>")
+
+@governed(budget_usd=1.00, max_iterations=50)
+async def my_agent(task):
+    while True:
+        log_decision(reasoning="deciding next step", action="llm_call")
+        response = call_llm(task)
+        result = await checkpoint(cost_delta_usd=0.01, tokens_used=500)
+        if result.breached:
+            return result.message</pre>
+      </div></div>
+      <div class="step"><b>4</b><div>
+        <h3>Run it</h3>
+        <p class="waiting">Waiting for your first run… this page updates on its own.</p>
+      </div></div>
+    </div>
+    <div id="runs-body">
+    <div class="metrics">
+      <div class="metric"><span>Running now</span><b id="m-running">0</b></div>
+      <div class="metric"><span>Total runs</span><b id="m-total">0</b></div>
+      <div class="metric"><span>Breach rate</span><b id="m-breach">—</b></div>
+      <div class="metric"><span>Total spend</span><b id="m-spend">$0</b></div>
+    </div>
+    <div class="toolbar">
+      <div class="tabs" id="tabs"></div>
+      <input id="q" type="search" placeholder="Search agent or run id" aria-label="Search runs">
+    </div>
+    <div class="table">
+      <table>
+        <thead><tr><th>Agent</th><th>Status</th><th>Spend</th><th>Iterations</th><th>Tokens</th><th>Duration</th><th>Started</th></tr></thead>
+        <tbody id="runs"></tbody>
+      </table>
+    </div>
+    </div>
+  </section>
+
+  <section data-view="agents" hidden>
+    <header class="top"><h1>Agents</h1></header>
+    <div class="table">
+      <table>
+        <thead><tr><th>Agent</th><th>Runs</th><th>Running</th><th>Success rate</th><th>Breach rate</th><th>Total spend</th><th>Avg / run</th><th>Last run</th><th></th></tr></thead>
+        <tbody id="agents"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section data-view="limits" hidden>
+    <header class="top"><h1>Limits</h1></header>
+    <p class="intro">Rules each API key's agents can't change. Per-run limits cap every run, whatever the agent asks for. Daily and monthly caps cover all of a key's runs together. An agent name stops a key reporting as any other agent. Leave a field empty for no limit.</p>
+    <div class="limit-cards" id="limit-cards"></div>
+  </section>
+
+  <section data-view="keys" hidden>
+    <header class="top"><h1>API keys</h1></header>
+    <form id="newkey-form">
+      <div class="keyform">
+        <input id="key-label" placeholder="Label, e.g. prod-agent" maxlength="64" required>
+        <button class="btn">Create key</button>
+      </div>
+      <p class="muted" style="font-size:12px;margin-top:6px">Set what each key's agents may spend and do in <a href="#limits">Limits</a>.</p>
+    </form>
+    <div id="newkey"></div>
+    <h2>Your keys</h2>
+    <div class="table">
+      <table>
+        <thead><tr><th>Prefix</th><th>Label</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+        <tbody id="keys"></tbody>
+      </table>
+    </div>
+    <dialog id="key-dialog">
+      <h3 id="kd-label"></h3>
+      <div class="newkey" id="kd-key"></div>
+      <p class="muted" id="kd-note"></p>
+      <p><a href="#limits" id="kd-limits" onclick="this.closest('dialog').close()">Edit this key's limits →</a></p>
+      <div class="row">
+        <button class="btn ghost" id="kd-show">Show</button>
+        <button class="btn ghost" id="kd-copy">Copy</button>
+        <button class="btn" onclick="this.closest('dialog').close()">Close</button>
+      </div>
+    </dialog>
+    <h2>Connect an agent</h2>
+<pre>pip install agentfences
+
+import agentfences
+agentfences.init(api_key="fc_...", endpoint="<span class="origin"></span>")</pre>
+    <h2>Account</h2>
+    <div class="account">
+      <div><b>Delete account</b><p class="muted" style="font-size:13px">Permanently deletes every run, decision and API key, and your login. This can't be undone.</p></div>
+      <button class="btn danger" id="delete-account">Delete account</button>
+    </div>
+  </section>
+</main>
+
+<script>
+// ponytail: polls every 3s; switch to the /ws/runs feed if run volume makes polling expensive
+const EMBED = new URLSearchParams(location.search).has('embed');
+if (EMBED) document.body.classList.add('embed');
+let user = null, timer = null, demo = null, lastRuns = [], filter = 'all';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const when = ts => ts ? new Date(ts * 1000).toLocaleString() : '—';
+const money = x => '$' + (x < 1 ? x.toFixed(4) : x.toFixed(2));
+const num = n => n.toLocaleString();
+const pct = (a, b) => b ? Math.round(100 * a / b) + '%' : '—';
+function dur(ms) {
+  const s = Math.floor(ms / 1000);
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`;
+}
+function ago(ts) {
+  const s = Date.now() / 1000 - ts;
+  return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : new Date(ts * 1000).toLocaleDateString();
+}
+function meter(used, limit) {
+  if (!limit) return '';
+  const p = used / limit;
+  return `<div class="meter"><i class="${p >= 1 ? 'over' : p >= .75 ? 'warn' : ''}" style="width:${Math.min(100, p * 100)}%"></i></div>`;
+}
+const pill = (s, breach) => `<span class="pill ${esc(s)}">${breach === 'stopped_by_user' ? 'stopped' : esc(s)}</span>`;
+const REASONS = { budget_exceeded: 'Budget exceeded', iteration_limit: 'Step limit reached', time_limit: 'Time limit reached',
+  token_limit: 'Token limit reached', key_daily_budget: "Key's daily spend cap reached", key_monthly_budget: "Key's monthly spend cap reached",
+  stopped_by_user: 'Stopped from the dashboard' };
+// Same rule the backend applies at each checkpoint and on a limits change
+const breachOf = r => +r.spent_usd.toFixed(9) > r.budget_usd ? 'budget_exceeded' : r.iterations > r.max_iterations ? 'iteration_limit'
+  : r.duration_ms > r.max_duration_ms ? 'time_limit' : r.max_tokens && r.tokens_used > r.max_tokens ? 'token_limit' : null;
+
+async function api(path, body, method = body === undefined ? 'GET' : 'POST') {
+  const r = await fetch(path, { method, ...(body === undefined ? {} : {
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }) });
+  if (r.status === 401 && !path.startsWith('/auth/')) { showLogin(); throw new Error('Not logged in'); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(Array.isArray(data.detail) ? data.detail.map(d => d.msg).join('; ') : data.detail || r.statusText);
+  return data;
+}
+
+// ── Views ─────────────────────────────────────────────────────────────────────
+function route() {
+  let view = location.hash.slice(1);
+  if (!['runs', 'agents', 'limits', 'keys'].includes(view) || (['limits', 'keys'].includes(view) && !user)) view = 'runs';
+  document.querySelectorAll('[data-view]').forEach(s => s.hidden = s.dataset.view !== view);
+  document.querySelectorAll('.side nav a[href]').forEach(a => a.classList.toggle('on', a.hash === '#' + view));
+}
+onhashchange = route;
+
+// ── Logged-out demo: the real UI driven by simulated runs ─────────────────────
+const now = Date.now() / 1000;
+const THOUGHTS = [
+  ['search', 'Querying the vector store for related tickets.'], ['read_file', 'Reading the failing test to understand the expected behavior.'],
+  ['call_llm', 'Drafting a fix and asking the model to review it.'], ['run_tests', 'Running the suite to confirm nothing else broke.'],
+  ['summarize', 'Condensing findings into a short report for the user.'],
+];
+function demoRun(id, agent, budget, maxIt, rate, ago, status, spent, it) {
+  return { run_id: id, agent_name: agent, budget_usd: budget, max_iterations: maxIt, max_duration_ms: 3_600_000, max_tokens: 0, rate,
+    spent_usd: spent, iterations: it, tokens_used: it * 1800, duration_ms: ago * 1000, status, started_at: now - ago,
+    decisions: Array.from({ length: it }, (_, i) => ({ iteration: i + 1, action: THOUGHTS[i % 5][0], reasoning: THOUGHTS[i % 5][1], timestamp: now - ago + i * ago / it })) };
+}
+const DEMO = [
+  demoRun('run_7f3a', 'support-triage', 2.00, 400, 0.011, 240, 'running', 0.71, 64),
+  demoRun('run_91c2', 'code-review-bot', 1.00, 200, 0.019, 420, 'running', 0.83, 44),
+  demoRun('run_4b8e', 'research-agent', 5.00, 300, 0.027, 95, 'running', 1.12, 41),
+  demoRun('run_2d61', 'invoice-parser', 0.50, 100, 0, 3600, 'success', 0.31, 27),
+  demoRun('run_c5a0', 'support-triage', 2.00, 400, 0, 5400, 'success', 1.24, 151),
+  demoRun('run_e0f9', 'web-scraper', 1.50, 250, 0, 7200, 'breached', 1.50, 112),
+];
+DEMO[3].duration_ms = 48_000; DEMO[4].duration_ms = 412_000; DEMO[5].duration_ms = 1_310_000;
+
+function tickDemo() {
+  for (const r of DEMO.filter(r => r.status === 'running')) {
+    r.spent_usd += r.rate * (0.5 + Math.random());
+    r.iterations++; r.tokens_used += 1200 + Math.floor(Math.random() * 1200);
+    r.duration_ms = (Date.now() / 1000 - r.started_at) * 1000;
+    const [action, reasoning] = THOUGHTS[r.iterations % 5];
+    r.decisions.push({ iteration: r.iterations, action, reasoning, timestamp: Date.now() / 1000 });
+    const breach = breachOf(r);
+    if (breach) {
+      r.status = 'breached'; r.cooldown = 5;
+      r.decisions.push({ iteration: r.iterations, action: 'fence', reasoning: `${breach}: Fences halted the run.`, timestamp: Date.now() / 1000 });
+    }
+    r.decisions = r.decisions.slice(-50);
+  }
+  // Loop: a fenced demo run restarts as a fresh run after a few ticks
+  for (const r of DEMO.filter(r => r.cooldown && !--r.cooldown)) {
+    Object.assign(r, { status: 'running', spent_usd: 0, iterations: 0, tokens_used: 0, duration_ms: 0, decisions: [], started_at: Date.now() / 1000 });
+  }
+  render(DEMO);
+}
+
+// Demo data plays only in the landing page's preview; the dashboard itself needs a login
+function showLogin() {
+  if (!EMBED) return location.href = '/auth/login';
+  demo = setInterval(tickDemo, 1500);
+  tickDemo();
+}
+
+// Photo from the login provider when there is one, else initials (also if the photo fails to load)
+function setAvatar(el, me) {
+  const initials = (me.name ? me.name.split(/\s+/).slice(0, 2).map(w => w[0]).join('') : me.email[0]).toUpperCase();
+  el.textContent = initials;
+  if (!/^https:\/\//.test(me.picture_url || '')) return;
+  const img = new Image();
+  img.alt = ''; img.referrerPolicy = 'no-referrer'; img.src = me.picture_url;
+  img.onerror = () => el.textContent = initials;
+  el.replaceChildren(img);
+}
+
+async function showDash(me) {
+  clearInterval(demo); demo = null; opened.clear();
+  user = me.email;
+  $('profile-btn').hidden = $('nav-keys').hidden = $('nav-limits').hidden = false;
+  $('who').textContent = me.name ? me.name.split(/\s+/)[0] : me.email.split('@')[0];
+  setAvatar($('avatar'), me); setAvatar($('avatar-lg'), me);
+  $('p-name').textContent = me.name || me.email.split('@')[0];
+  $('p-email').textContent = me.email;
+  $('p-since').textContent = new Date(me.created_at * 1000).toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' });
+  document.querySelectorAll('.origin').forEach(el => el.textContent = location.origin);
+  route();
+  await Promise.all([refresh(), loadKeys()]);
+  timer = setInterval(refresh, 3000);
+}
+
+$('p-keys').onclick = () => $('profile').hidePopover?.();
+$('logout').onclick = async () => { location.href = (await api('/auth/logout', {})).redirect; };
+
+async function refresh() {
+  render((await api('/api/runs')).runs);
+  $('status').textContent = 'live · ' + new Date().toLocaleTimeString();
+}
+
+// ── Runs ──────────────────────────────────────────────────────────────────────
+const TABS = [['all', 'All'], ['running', 'Running'], ['breached', 'Breached'], ['success', 'Completed'], ['error', 'Errored']];
+
+function render(runs) {
+  lastRuns = runs = runs.slice().sort((a, b) => b.started_at - a.started_at);
+  const count = s => runs.filter(r => r.status === s).length;
+  const setup = !demo && !runs.length;  // logged in, nothing reported yet
+  $('setup').hidden = !setup; $('runs-body').hidden = setup;
+  $('runs-title').textContent = setup ? 'Set up Fences' : 'Runs';
+  const running = count('running');
+  $('m-running').textContent = running;
+  $('m-total').textContent = runs.length;
+  $('m-breach').textContent = pct(count('breached'), runs.length);
+  $('m-spend').textContent = money(runs.reduce((s, r) => s + r.spent_usd, 0));
+  $('nav-running').hidden = !running; $('nav-running').textContent = running;
+  $('tabs').innerHTML = TABS.map(([k, label]) =>
+    `<button data-tab="${k}" class="${k === filter ? 'on' : ''}">${label}<small>${k === 'all' ? runs.length : count(k)}</small></button>`).join('');
+  renderAgents(runs);
+
+  // Don't redraw the table under someone typing (limits form, trail time filters) or reading a timeline
+  if (document.activeElement?.tagName === 'INPUT' && document.activeElement.closest('#runs')) return;
+  if (document.querySelector('#runs .trail-graph:hover')) return;
+  const q = $('q').value.trim().toLowerCase();
+  const shown = runs.filter(r => (filter === 'all' || r.status === filter)
+    && (!q || r.agent_name.toLowerCase().includes(q) || r.run_id.toLowerCase().includes(q)));
+  const tops = {};  // each open trail keeps its scroll position across the redraw
+  document.querySelectorAll('#runs tr.detail').forEach(tr => tops[tr.dataset.run] = tr.querySelector('.trail').scrollTop);
+  $('runs').innerHTML = shown.map(runRow).join('') || `<tr><td colspan="7" class="muted">${
+    runs.length ? 'No runs match this filter.' : 'No runs yet. Create an API key and point the SDK at this backend.'}</td></tr>`;
+  for (const r of shown) {
+    if (!opened.has(r.run_id)) continue;
+    drawTrail(r.run_id);
+    detailOf(r.run_id).querySelector('.trail').scrollTop = tops[r.run_id] || 0;
+    loadTrail(r.run_id);
+  }
+}
+
+// Expanded runs: run_id -> that run's trail and filters. Any number can be open at once.
+const opened = new Map();
+const newTrail = () => ({ data: null, actions: new Set(), from: '', to: '' });
+const detailOf = id => [...document.querySelectorAll('#runs tr.detail')].find(tr => tr.dataset.run === id);
+const runOf = el => el.closest('tr.detail')?.dataset.run;
+
+function runRow(r) {
+  const open = opened.has(r.run_id);
+  return `<tr data-id="${esc(r.run_id)}" class="${open ? 'sel' : ''}">
+      <td><b>${esc(r.agent_name)}</b><small>${esc(r.run_id)}</small></td>
+      <td>${pill(r.status, r.breach)}</td>
+      <td>${meter(r.spent_usd, r.budget_usd)}${money(r.spent_usd)} <span class="muted">/ ${money(r.budget_usd)}</span></td>
+      <td>${num(r.iterations)} <span class="muted">/ ${num(r.max_iterations)}</span></td>
+      <td>${num(r.tokens_used)}${r.max_tokens ? ` <span class="muted">/ ${num(r.max_tokens)}</span>` : ''}</td>
+      <td>${dur(r.duration_ms || 0)}</td>
+      <td title="${when(r.started_at)}">${ago(r.started_at)}</td>
+    </tr>${open ? detailRow(r) : ''}`;
+}
+
+function detailRow(r) {
+  const limit = (label, used, max, fmt) => `<div class="limit"><div><span>${label}</span><span>${fmt(used)} / ${max ? fmt(max) : '∞'}</span></div>${meter(used, max) || meter(0, 1)}</div>`;
+  const editable = r.status === 'running' || r.status === 'breached';
+  const t = opened.get(r.run_id);
+  return `<tr class="detail" data-run="${esc(r.run_id)}"><td colspan="7"><div class="detail-grid">
+    ${r.error ? `<div class="run-error" role="alert"><span>Run failed${r.ended_at ? ' · ' + when(r.ended_at) : ''}</span><code>${esc(r.error)}</code></div>` : ''}
+    <div class="panel">
+      <h4>Limits</h4>
+      ${r.status === 'breached' && r.breach ? `<p class="reason">${esc(REASONS[r.breach] || r.breach)}</p>` : ''}
+      ${limit('Spend', r.spent_usd, r.budget_usd, money)}
+      ${limit('Iterations', r.iterations, r.max_iterations, num)}
+      ${limit('Duration', r.duration_ms || 0, r.max_duration_ms, dur)}
+      ${limit('Tokens', r.tokens_used, r.max_tokens, num)}
+      ${editable ? `<form class="limits-form" data-run="${esc(r.run_id)}">
+        <label>Budget ($)<input name="budget_usd" type="number" step="0.01" min="0.01" value="${r.budget_usd}"></label>
+        <label>Max iterations<input name="max_iterations" type="number" min="1" value="${r.max_iterations}"></label>
+        <label>Max time (s)<input name="max_duration_ms" type="number" min="1" value="${Math.round(r.max_duration_ms / 1000)}"></label>
+        <label>Max tokens (0 = ∞)<input name="max_tokens" type="number" min="0" value="${r.max_tokens}"></label>
+        <div class="row"><button class="btn">${r.status === 'breached' ? 'Raise limits & resume' : 'Update limits'}</button><span class="err limits-err"></span></div>
+      </form>` : `<p class="muted" style="font-size:13px">This run has ended${r.ended_at ? ' (' + when(r.ended_at) + ')' : ''}, so its limits are locked.</p>`}
+      ${demo ? '' : `<div class="run-actions">
+        ${r.status === 'running' ? `<button type="button" class="btn danger sm" data-stop-run="${esc(r.run_id)}">Stop run</button>` : ''}
+        <button type="button" class="btn ghost danger sm" data-delete-run="${esc(r.run_id)}">Delete run</button>
+      </div>`}
+    </div>
+    <div class="panel"><h4>Decision trail <span class="muted mono trail-count"></span></h4>
+      <div class="trail-filters">
+        <div class="chips trail-chips"></div>
+        <div class="times">
+          <label>From<input type="datetime-local" step="1" class="trail-from" value="${esc(t.from)}"></label>
+          <label>To<input type="datetime-local" step="1" class="trail-to" value="${esc(t.to)}"></label>
+          <button type="button" class="btn ghost sm trail-clear">Clear filters</button>
+        </div>
+      </div>
+      <div class="trail-graph"></div>
+      <div class="trail"></div></div>
+  </div></td></tr>`;
+}
+
+async function loadTrail(id) {
+  const d = demo ? DEMO.find(r => r.run_id === id) : await api(`/api/runs/${encodeURIComponent(id)}/decisions`);
+  const t = opened.get(id);
+  if (!t) return;  // closed meanwhile
+  t.data = d.decisions;
+  drawTrail(id);
+}
+
+// Category chips + time window, applied in the browser to the run's full trail
+function drawTrail(id) {
+  const tr = detailOf(id), t = opened.get(id);
+  if (!tr || !t) return;
+  const el = sel => tr.querySelector(sel);
+  if (!t.data) { el('.trail').innerHTML = '<p class="muted">Loading…</p>'; return; }
+  const counts = {};
+  for (const x of t.data) counts[cat(x)] = (counts[cat(x)] || 0) + 1;
+  const from = new Date(t.from).getTime() / 1000, to = new Date(t.to).getTime() / 1000;
+  const shown = t.data.filter(x => (!t.actions.size || t.actions.has(cat(x)))
+    && (!t.from || x.timestamp >= from) && (!t.to || x.timestamp <= to));
+  el('.trail-chips').innerHTML = Object.entries(counts).map(([a, n]) =>
+    `<button type="button" class="chip ${t.actions.has(a) ? 'on' : ''}" data-action="${esc(a)}">${esc(a)}<small>${n}</small></button>`).join('');
+  el('.trail-count').textContent = `${shown.length} of ${t.data.length} · newest first`;
+  drawGraph(el('.trail-graph'), shown.filter(x => x.timestamp));
+  el('.trail').innerHTML = shown.slice(-200).reverse().map(x => `<div class="decision ${x.action === 'fence' ? 'fence' : ''}">
+      <small>#${x.iteration}</small>
+      <div>${x.action ? `<em>${esc(x.action)}</em>` : ''}${esc(x.reasoning)}</div>
+      <time>${x.timestamp ? new Date(x.timestamp * 1000).toLocaleTimeString() : ''}</time></div>`).join('')
+    || `<p class="muted">${t.data.length ? 'No decisions match these filters.' : 'No decisions logged. Call log_decision() in your agent to record its reasoning.'}</p>`;
+}
+
+const cat = x => x.action || 'none';
+
+// Swimlane timeline of the filtered trail: x = time, one lane per category. Loops read as dense rows of dots.
+function drawGraph(box, shown) {
+  box.hidden = !shown.length;
+  if (!shown.length) return;
+  const W = box.clientWidth || 600, LABEL = 116, PAD = 14, LANE = 24, AXIS = 22;
+  const lanes = [...new Set(shown.map(cat))];
+  const t0 = Math.min(...shown.map(x => x.timestamp)), t1 = Math.max(...shown.map(x => x.timestamp)), span = t1 - t0 || 1;
+  const H = lanes.length * LANE + AXIS;
+  const xOf = t => LABEL + (t - t0) / span * (W - LABEL - PAD);
+  const yOf = a => lanes.indexOf(a) * LANE + LANE / 2;
+  const fmt = t => span < 86400 ? new Date(t * 1000).toLocaleTimeString() : new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const n = W - LABEL < 360 ? 1 : 3;  // narrow: just start and end, so time labels don't collide
+  const ticks = Array.from({ length: n + 1 }, (_, i) => t0 + span * i / n);
+  box._points = shown.map(x => ({ x: xOf(x.timestamp), y: yOf(cat(x)), d: x }));
+  box.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="Timeline of ${shown.length} decisions across ${lanes.length} categories">
+    ${lanes.map(a => `<line class="grid" x1="${LABEL}" x2="${W - PAD}" y1="${yOf(a)}" y2="${yOf(a)}"/>
+      <text class="lane" x="0" y="${yOf(a) + 4}"><title>${esc(a)}</title>${esc(a.length > 15 ? a.slice(0, 14) + '…' : a)}</text>`).join('')}
+    ${ticks.map((t, i) => `<line class="grid" x1="${xOf(t)}" x2="${xOf(t)}" y1="0" y2="${H - AXIS + 4}"/>
+      <text class="tick" x="${xOf(t)}" y="${H - 4}" text-anchor="${i === 0 ? 'start' : i === n ? 'end' : 'middle'}">${fmt(t)}</text>`).join('')}
+    ${box._points.map(p => `<circle class="dot ${p.d.action === 'fence' ? 'fence' : ''}" cx="${p.x}" cy="${p.y}" r="4"/>`).join('')}
+  </svg><div class="tip" hidden></div>`;
+}
+
+// Nearest dot within 24px gets a tooltip; the dot itself is only 8px, too small to aim at
+$('runs').onpointermove = e => {
+  const box = e.target.closest('.trail-graph');
+  document.querySelectorAll('#runs .trail-graph').forEach(g => {
+    g.querySelectorAll('circle').forEach(c => c.setAttribute('r', 4));
+    if (g !== box) g.querySelector('.tip')?.setAttribute('hidden', '');
+  });
+  const tip = box?.querySelector('.tip');
+  if (!tip) return;
+  const r = box.getBoundingClientRect(), dots = box.querySelectorAll('circle');
+  let best = null, bestD = 24;
+  for (const [i, p] of (box._points || []).entries()) {
+    const dist = Math.hypot(p.x - (e.clientX - r.left), p.y - (e.clientY - r.top));
+    if (dist < bestD) { best = i; bestD = dist; }
+  }
+  tip.hidden = best === null;
+  if (best === null) return;
+  const p = box._points[best];
+  dots[best].setAttribute('r', 6);
+  tip.replaceChildren();
+  const head = document.createElement('b'), act = document.createElement('span'), why = document.createElement('div');
+  head.textContent = `#${p.d.iteration} · ${new Date(p.d.timestamp * 1000).toLocaleTimeString()}`;
+  act.textContent = cat(p.d);
+  why.textContent = p.d.reasoning.length > 140 ? p.d.reasoning.slice(0, 140) + '…' : p.d.reasoning;
+  tip.append(head, act, why);
+  tip.style.left = Math.min(p.x + 12, box.clientWidth - 290) + 'px';
+  tip.style.top = (p.y + 12) + 'px';
+};
+
+$('runs').onclick = async e => {
+  const stop = e.target.dataset.stopRun;
+  if (stop) {
+    if (!confirm('Stop this run? The agent\'s next checkpoint will be refused. Raising its limits resumes it.')) return;
+    await api(`/api/runs/${encodeURIComponent(stop)}/stop`, {});
+    return refresh();
+  }
+  const del = e.target.dataset.deleteRun;
+  if (del) {
+    if (!confirm('Delete this run and its audit trail? This can\'t be undone.')) return;
+    await api(`/api/runs/${encodeURIComponent(del)}`, undefined, 'DELETE');
+    opened.delete(del);
+    return refresh();
+  }
+  const chip = e.target.closest('.chip');
+  if (chip) {
+    const id = runOf(chip), t = opened.get(id), a = chip.dataset.action;
+    t.actions.has(a) ? t.actions.delete(a) : t.actions.add(a);
+    return drawTrail(id);
+  }
+  if (e.target.classList.contains('trail-clear')) {
+    const id = runOf(e.target), tr = detailOf(id);
+    opened.set(id, { ...newTrail(), data: opened.get(id).data });
+    tr.querySelector('.trail-from').value = tr.querySelector('.trail-to').value = '';
+    return drawTrail(id);
+  }
+  const row = e.target.closest('tr[data-id]');
+  if (!row) return;
+  const id = row.dataset.id;
+  opened.has(id) ? opened.delete(id) : opened.set(id, newTrail());
+  render(lastRuns);
+};
+
+$('runs').oninput = e => {
+  const t = opened.get(runOf(e.target));
+  if (!t) return;
+  if (e.target.classList.contains('trail-from')) t.from = e.target.value;
+  else if (e.target.classList.contains('trail-to')) t.to = e.target.value;
+  else return;
+  drawTrail(runOf(e.target));
+};
+
+$('runs').onsubmit = async e => {
+  e.preventDefault();
+  const id = e.target.dataset.run, body = {};
+  for (const [k, v] of new FormData(e.target)) if (v !== '') body[k] = k === 'max_duration_ms' ? Math.round(v * 1000) : Number(v);
+  try {
+    if (demo) {
+      const r = DEMO.find(r => r.run_id === id);
+      Object.assign(r, body, { cooldown: 0 });
+      r.status = breachOf(r) ? 'breached' : 'running';
+    } else {
+      await api(`/api/runs/${encodeURIComponent(id)}/limits`, body, 'PATCH');
+    }
+    document.activeElement.blur();
+    demo ? render(DEMO) : refresh();
+  } catch (err) { e.target.querySelector('.limits-err').textContent = err.message; }
+};
+
+$('tabs').onclick = e => {
+  const tab = e.target.closest('[data-tab]');
+  if (tab) { filter = tab.dataset.tab; render(lastRuns); }
+};
+$('q').oninput = () => render(lastRuns);
+
+// ── Agents (aggregated client-side from runs) ─────────────────────────────────
+function renderAgents(runs) {
+  const by = {};
+  for (const r of runs) (by[r.agent_name] ||= []).push(r);
+  $('agents').innerHTML = Object.entries(by).map(([name, rs]) => {
+    const c = s => rs.filter(r => r.status === s).length;
+    const done = rs.length - c('running'), spend = rs.reduce((s, r) => s + r.spent_usd, 0);
+    return `<tr data-agent="${esc(name)}">
+      <td><b>${esc(name)}</b></td><td>${rs.length}</td><td>${c('running') || '—'}</td>
+      <td>${pct(c('success'), done)}</td><td class="${c('breached') ? 'breached' : ''}">${pct(c('breached'), done)}</td>
+      <td>${money(spend)}</td><td>${money(spend / rs.length)}</td><td>${ago(Math.max(...rs.map(r => r.started_at)))}</td>
+      <td>${demo ? '' : `<button class="btn ghost danger sm" data-delete-agent="${esc(name)}">Delete runs</button>`}</td></tr>`;
+  }).join('') || '<tr><td colspan="9" class="muted">No agents yet.</td></tr>';
+}
+
+$('agents').onclick = async e => {
+  const agent = e.target.dataset.deleteAgent;
+  if (agent) {
+    if (!confirm(`Delete every run of ${agent}, and their audit trails? This can't be undone.`)) return;
+    await api(`/api/runs?agent=${encodeURIComponent(agent)}`, undefined, 'DELETE');
+    return refresh();
+  }
+  const row = e.target.closest('tr[data-agent]');
+  if (!row) return;
+  $('q').value = row.dataset.agent; filter = 'all';
+  location.hash = 'runs';
+  render(lastRuns);
+};
+
+// ── First-run setup ──
+$('setup-key').onclick = async () => {
+  const k = await api('/api/keys', { label: 'first-agent' });
+  fullKeys[k.prefix] = k.key;
+  $('setup-keyval').textContent = k.key;
+  $('setup-newkey').innerHTML = `<div class="newkey">${esc(k.key)}<br><span class="muted">Copy this now — it won't be shown again. It's also filled into step 3.</span></div>`;
+  $('setup-key').hidden = true; $('step-key').classList.add('done');
+  loadKeys();
+};
+
+document.addEventListener('click', e => {
+  if (!e.target.matches('.copy')) return;
+  navigator.clipboard.writeText(e.target.parentElement.textContent.replace(e.target.textContent, '').trim());
+  e.target.textContent = 'Copied';
+  setTimeout(() => e.target.textContent = 'Copy', 1500);
+});
+
+// ── API keys ──────────────────────────────────────────────────────────────────
+// Full keys are only returned at creation (the backend stores a hash), so keys
+// made in this page session are held here for the reveal dialog. Lost on reload.
+const fullKeys = {};
+let keyList = [];
+
+// A key's governance settings; time is entered in minutes, stored in ms. unit 0 = text.
+const CEILINGS = [['max_budget_usd', 'Max $ per run', 0.01, 1], ['max_iterations', 'Max steps per run', 1, 1],
+                  ['max_duration_ms', 'Max minutes per run', 1, 60000], ['max_tokens', 'Max tokens per run', 1, 1],
+                  ['daily_budget_usd', 'Daily $ cap', 0.01, 1], ['monthly_budget_usd', 'Monthly $ cap', 0.01, 1],
+                  ['agent_name', 'Only agent name', 0, 0]];
+const ceilingInputs = (k = {}) => CEILINGS.map(([name, label, step, unit]) => unit
+  ? `<label>${label}<input name="${name}" type="number" min="${step}" step="${step}" placeholder="no limit" value="${k[name] ? k[name] / unit : ''}"></label>`
+  : `<label>${label}<input name="${name}" maxlength="128" placeholder="any" value="${esc(k[name] || '')}"></label>`).join('');
+function readCeilings(form, emptyAs) {
+  const out = {};
+  for (const [name, , , unit] of CEILINGS) {
+    const v = form.elements[name].value.trim();
+    if (v !== '') out[name] = unit ? Number(v) * unit : v; else if (emptyAs !== undefined) out[name] = emptyAs;
+  }
+  return out;
+}
+function ceilingSummary(k) {
+  const parts = [k.agent_name && `only ${esc(k.agent_name)}`, k.max_budget_usd && `${money(k.max_budget_usd)}/run`,
+                 k.max_iterations && `${num(k.max_iterations)} steps`, k.max_duration_ms && `${+(k.max_duration_ms / 60000).toFixed(1)} min`,
+                 k.max_tokens && `${num(k.max_tokens)} tokens`, k.daily_budget_usd && `${money(k.daily_budget_usd)}/day`,
+                 k.monthly_budget_usd && `${money(k.monthly_budget_usd)}/mo`].filter(Boolean);
+  return parts.length ? parts.join(' · ') : '<span class="muted">none</span>';
+}
+async function loadKeys() {
+  keyList = (await api('/api/keys')).keys;
+  $('keys').innerHTML = keyList.map(k => `
+    <tr data-key="${esc(k.prefix)}" data-label="${esc(k.label)}"><td>${esc(k.prefix)}…</td><td>${esc(k.label)}</td><td>${when(k.created_at)}</td><td>${when(k.last_used_at)}</td>
+    <td>${k.revoked ? '<span class="muted">revoked</span>' : `<button class="link" data-revoke="${esc(k.prefix)}">Revoke</button>`}</td></tr>`).join('')
+    || '<tr><td colspan="5" class="muted">No keys yet.</td></tr>';
+  renderLimits();
+}
+
+// ── Limits: one card per active key ───────────────────────────────────────────
+function renderLimits() {
+  $('limit-cards').innerHTML = keyList.filter(k => !k.revoked).map(k => `
+    <form class="panel limit-card" data-prefix="${esc(k.prefix)}">
+      <h4>${esc(k.label)} <span class="muted mono">${esc(k.prefix)}…</span></h4>
+      <p class="muted" style="font-size:12px">Now: ${ceilingSummary(k)}</p>
+      <div class="ceilings">${ceilingInputs(k)}</div>
+      <div class="row"><button class="btn sm">Save limits</button><span class="muted saved"></span><span class="err"></span></div>
+    </form>`).join('') || '<p class="muted">No API keys yet. <a href="#keys">Create one</a>, then set its limits here.</p>';
+}
+
+$('limit-cards').onsubmit = async e => {
+  e.preventDefault();
+  const form = e.target, err = form.querySelector('.err');
+  err.textContent = '';
+  try {
+    await api(`/api/keys/${encodeURIComponent(form.dataset.prefix)}`, readCeilings(form, null), 'PATCH');
+    await loadKeys();
+    const saved = [...$('limit-cards').children].find(f => f.dataset.prefix === form.dataset.prefix)?.querySelector('.saved');
+    if (saved) saved.textContent = 'Saved';
+  } catch (e2) { err.textContent = e2.message; }
+};
+
+$('newkey-form').onsubmit = async e => {
+  e.preventDefault();
+  const k = await api('/api/keys', { label: $('key-label').value });
+  e.target.reset();
+  fullKeys[k.prefix] = k.key;
+  $('key-label').value = '';
+  $('newkey').innerHTML = `<div class="newkey">${esc(k.key)}<br><span class="muted">Copy this now — it won't be shown again.</span></div>`;
+  loadKeys();
+};
+
+function openKey(prefix, label) {
+  const full = fullKeys[prefix];
+  $('kd-label').textContent = label || prefix;
+  $('kd-key').textContent = prefix + '•'.repeat(16);  // hidden until Show is clicked
+  $('kd-key').dataset.full = full || '';
+  $('kd-show').hidden = $('kd-copy').hidden = !full;
+  $('kd-show').textContent = 'Show';
+  $('kd-note').textContent = full
+    ? 'Copy this now — it can\'t be shown again after you reload the page.'
+    : 'The full key was only shown when it was created. Create a new key if you\'ve lost it.';
+  $('kd-limits').hidden = !!(keyList.find(k => k.prefix === prefix) || {}).revoked;
+  $('key-dialog').showModal();
+}
+
+$('delete-account').onclick = async () => {
+  if (prompt(`This permanently deletes your account, every run, audit trail and API key.\nType ${user} to confirm.`) !== user) return;
+  location.href = (await api('/api/account', undefined, 'DELETE')).redirect;
+};
+
+$('kd-show').onclick = () => {
+  const el = $('kd-key'), shown = $('kd-show').textContent === 'Hide';
+  el.textContent = shown ? el.dataset.full.slice(0, 12) + '•'.repeat(16) : el.dataset.full;
+  $('kd-show').textContent = shown ? 'Show' : 'Hide';
+};
+
+$('kd-copy').onclick = () => {
+  navigator.clipboard.writeText($('kd-key').dataset.full);
+  $('kd-copy').textContent = 'Copied';
+  setTimeout(() => $('kd-copy').textContent = 'Copy', 1500);
+};
+
+$('keys').onclick = async e => {
+  const prefix = e.target.dataset.revoke;
+  const row = e.target.closest('tr[data-key]');
+  if (!prefix && row) return openKey(row.dataset.key, row.dataset.label);
+  if (!prefix || !confirm(`Revoke ${prefix}…? Agents using it will stop working.`)) return;
+  await api(`/api/keys/${encodeURIComponent(prefix)}/revoke`, {});
+  loadKeys();
+};
+
+if (EMBED) showLogin(); else api('/auth/me').then(showDash, showLogin);
+</script>
+</body>
+</html>
