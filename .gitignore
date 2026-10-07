@@ -33,3 +33,8 @@ venv/
 dist/
 build/
 graphify-out/
+# Tests stay local
+sdk/test_*.py
+sdk/conftest.py
+sdk/_env.py
+sdk/pytest.ini
