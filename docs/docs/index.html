@@ -1,0 +1,606 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fences Docs</title>
+<meta name="description" content="Set up Fences: install the agentfences SDK, fence an agent with spend, iteration, time and token limits, connect to the dashboard, and call the REST API from any language.">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f0efe9; --white: #fff; --ink: #111; --gray: #666; --border: #dfded8;
+    --cobalt: #3454d1; --vermilion: #d15434; --ok: #3f6b2a; --amber: #b7791f;
+    --serif: 'Instrument Serif', Georgia, serif; --sans: 'Geist', system-ui, sans-serif; --mono: 'Geist Mono', ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html { scroll-behavior: smooth; scroll-padding-top: 88px; }
+  body { background: var(--paper); color: var(--ink); font: 16px/1.65 var(--sans); }
+  a { color: inherit; }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; }
+
+  /* Nav — same as the landing page */
+  nav.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--paper) 85%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); }
+  nav.top .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; gap: 16px; }
+  .logo { font: 600 18px var(--mono); text-decoration: none; white-space: nowrap; }
+  .logo small { font: 500 12px var(--mono); color: var(--gray); margin-left: 8px; }
+  .ctas { display: flex; gap: 10px; align-items: center; }
+  .btn { display: inline-block; padding: 10px 18px; border-radius: 999px; font: 500 14px var(--sans); text-decoration: none; border: 1px solid var(--ink); white-space: nowrap; }
+  .btn.solid { background: var(--ink); color: var(--white); }
+
+  /* Layout */
+  .layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 56px; padding-top: 48px; padding-bottom: 120px; }
+  .toc { position: sticky; top: 96px; align-self: start; max-height: calc(100vh - 120px); overflow-y: auto; font-size: 14px; }
+  .toc b { display: block; font: 500 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--gray); margin: 20px 0 6px; }
+  .toc b:first-child { margin-top: 0; }
+  .toc a { display: block; padding: 3px 0 3px 12px; border-left: 2px solid transparent; text-decoration: none; color: var(--gray); }
+  .toc a:hover { color: var(--ink); }
+  .toc a.on { color: var(--ink); border-left-color: var(--cobalt); }
+  .layout > * { min-width: 0; }
+  article { max-width: 760px; }
+
+  /* Type */
+  .eyebrow { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--gray); }
+  h1 { font: 400 clamp(44px, 6vw, 72px)/1.02 var(--serif); letter-spacing: -.01em; margin: 12px 0 16px; }
+  h1 em, h2 em { color: var(--cobalt); }
+  .lead { font-size: 19px; color: var(--gray); }
+  section { padding-top: 56px; margin-top: 56px; border-top: 1px solid var(--border); }
+  h2 { font: 400 40px/1.1 var(--serif); letter-spacing: -.01em; margin-bottom: 12px; }
+  h3 { font-size: 18px; font-weight: 600; letter-spacing: -.01em; margin: 32px 0 8px; }
+  p, ul, ol { margin: 12px 0; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 4px 0; }
+  code { font: .88em var(--mono); background: var(--white); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+  .muted { color: var(--gray); }
+  .tag { display: inline-block; font: 500 11px var(--mono); padding: 1px 7px; border-radius: 999px; background: var(--white); border: 1px solid var(--cobalt); color: var(--cobalt); vertical-align: 3px; margin-left: 6px; }
+
+  /* Code blocks */
+  .code { position: relative; margin: 16px 0; }
+  pre { background: var(--ink); color: #e9e8e2; border-radius: 12px; padding: 20px; font: 13px/1.7 var(--mono); overflow-x: auto; }
+  pre code { all: unset; }
+  .code .copy { position: absolute; top: 10px; right: 10px; background: #2a2a2a; color: #e9e8e2; border: 0; border-radius: 6px; padding: 4px 10px; font: 12px var(--mono); cursor: pointer; }
+  .c { color: #8a8a82; }
+  .s { color: #a8c58a; }
+  .k { color: #9fb4ff; }
+
+  /* Tables */
+  .table { overflow-x: auto; margin: 16px 0; border: 1px solid var(--border); border-radius: 12px; background: var(--white); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font: 500 12px var(--mono); color: var(--gray); background: color-mix(in srgb, var(--paper) 50%, var(--white)); white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td code { white-space: nowrap; }
+
+  /* Callouts and steps */
+  .note { margin: 16px 0; padding: 14px 18px; background: var(--white); border: 1px solid var(--border); border-left: 3px solid var(--cobalt); border-radius: 10px; font-size: 15px; }
+  .note.warn { border-left-color: var(--amber); }
+  .steps { counter-reset: step; list-style: none; padding: 0; }
+  .steps > li { counter-increment: step; position: relative; padding-left: 44px; margin: 28px 0; }
+  .steps > li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--white); border: 1px solid var(--border); font: 500 13px var(--mono); }
+  .steps h3 { margin-top: 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
+  .card { background: var(--white); border: 1px solid var(--border); border-radius: 12px; padding: 18px; font-size: 15px; }
+  .card b { display: block; margin-bottom: 4px; }
+  .method { font: 500 11px var(--mono); padding: 2px 6px; border-radius: 4px; background: var(--paper); }
+
+  footer { border-top: 1px solid var(--border); padding: 32px 0; font-size: 14px; color: var(--gray); }
+  footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  footer a { color: var(--gray); }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; gap: 0; padding-top: 24px; }
+    .toc { position: static; max-height: none; display: flex; gap: 6px; overflow-x: auto; padding-bottom: 12px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+    .toc b { display: none; }
+    .toc a { flex: none; border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; background: var(--white); }
+    .toc a.on { border-color: var(--cobalt); }
+    .grid2 { grid-template-columns: 1fr; }
+    .ctas .btn:not(.solid) { display: none; }
+  }
+</style>
+</head>
+<body>
+<div style="background:var(--ink);color:var(--paper);text-align:center;font:13px/1.5 var(--sans);padding:8px 16px">Fences Cloud (dashboard, stored audit trail, team sign-in) is coming soon. The SDK is free and works today in local mode: <a href="#quickstart" style="color:inherit">quickstart</a>.</div>
+<nav class="top">
+  <div class="wrap">
+    <a class="logo" href="../">(|=|) Fences<small>docs</small></a>
+    <div class="ctas"><a class="btn" href="https://github.com/bhaviksardar/fences">GitHub</a><a class="btn solid" href="#quickstart">Get started</a></div>
+  </div>
+</nav>
+
+<div class="wrap layout">
+  <aside class="toc" id="toc">
+    <b>Start</b>
+    <a href="#overview">Overview</a>
+    <a href="#quickstart">Quickstart</a>
+    <a href="#connect">Connect to the dashboard</a>
+    <b>Guides</b>
+    <a href="#limits">Limits</a>
+    <a href="#breaches">Handling a breach</a>
+    <a href="#llm">Real LLM loops</a>
+    <a href="#agent-shapes">Sync, streaming &amp; concurrent</a>
+    <a href="#decisions">Decision trail</a>
+    <a href="#dashboard">Dashboard</a>
+    <a href="#reliability">Reliability</a>
+    <b>Reference</b>
+    <a href="#sdk">Python SDK</a>
+    <a href="#rest">REST API</a>
+    <a href="#websocket">Live WebSocket</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </aside>
+
+  <article>
+    <!-- Overview -->
+    <div id="overview">
+      <p class="eyebrow">Documentation</p>
+      <h1>Put <em>fences</em> around your agents.</h1>
+      <p class="lead">Fences caps what an AI agent can spend, how many steps it takes, how long it runs and how many tokens it burns. It also records why the agent took each step, and shows every run live in a dashboard.</p>
+      <div class="grid2">
+        <div class="card"><b>The SDK</b><code>agentfences</code> on PyPI. One decorator on your agent function, one <code>checkpoint()</code> call after each model call.</div>
+        <div class="card"><b>The dashboard</b>Live runs, the decision trail behind each one, and limits you can raise mid-run to let a stopped agent continue.</div>
+      </div>
+      <p>You can run the SDK entirely on its own (<strong>local mode</strong>: no account, nothing leaves your process) or connect it to Fences Cloud (<strong>cloud mode</strong>, coming soon) with an API key. Your agent code is the same either way; only <code>init()</code> changes.</p>
+    </div>
+
+    <!-- Quickstart -->
+    <section id="quickstart">
+      <p class="eyebrow">Two minutes</p>
+      <h2>Quickstart</h2>
+      <p>This runs fully locally. No account, no API key, no backend.</p>
+      <ol class="steps">
+        <li>
+          <h3>Install the SDK</h3>
+          <p>Requires Python 3.9 or newer.</p>
+<div class="code"><pre><code>pip install agentfences</code></pre></div>
+        </li>
+        <li>
+          <h3>Fence an agent</h3>
+          <p>Wrap the agent function with <code>@governed</code> and its limits, then call <code>checkpoint()</code> after each step with what that step cost.</p>
+<div class="code"><pre><code><span class="k">import</span> asyncio
+<span class="k">import</span> agentfences
+<span class="k">from</span> agentfences <span class="k">import</span> governed, checkpoint, log_decision
+
+agentfences.init(local_only=<span class="k">True</span>)
+
+@governed(budget_usd=<span class="k">0.10</span>, max_iterations=<span class="k">20</span>)
+<span class="k">async def</span> my_agent(query: str) -> str:
+    <span class="k">for</span> step <span class="k">in</span> range(<span class="k">100</span>):                       <span class="c"># a loop that would run away</span>
+        log_decision(reasoning=f<span class="s">"step {step}: searching"</span>, action=<span class="s">"search"</span>)
+
+        result = <span class="k">await</span> checkpoint(cost_delta_usd=<span class="k">0.02</span>, tokens_used=<span class="k">200</span>)
+        <span class="k">if</span> result.breached:
+            <span class="k">return</span> result.message
+    <span class="k">return</span> <span class="s">"done"</span>
+
+print(asyncio.run(my_agent(<span class="s">"hello"</span>)))</code></pre></div>
+        </li>
+        <li>
+          <h3>Run it</h3>
+          <p>Five steps spend exactly $0.10, which is allowed. The sixth would take it to $0.12, so the agent stops and returns:</p>
+<div class="code"><pre><code>I've reached my budget limit (spent $0.1200 of $0.1000). I'll summarize what I found so far.</code></pre></div>
+          <p>Nothing threw an exception. The agent read the result and decided how to stop, which is the default behaviour. See <a href="#breaches">Handling a breach</a> for the other options.</p>
+        </li>
+      </ol>
+    </section>
+
+    <!-- Connect -->
+    <section id="connect">
+      <p class="eyebrow">Cloud mode</p>
+      <h2>Connect to the dashboard</h2>
+      <p>Connecting sends every run, checkpoint and decision to this backend, so you can watch them live and change limits while they run.</p>
+      <ol class="steps">
+        <li>
+          <h3>Create an account and an API key</h3>
+          <p>Sign up, then open Dashboard → API keys and create a key. The full key (<code>fc_…</code>) is shown only once, so copy it straight away. Fences stores only a hash of it.</p>
+        </li>
+        <li>
+          <h3>Point the SDK at this backend</h3>
+          <p>Replace the <code>local_only</code> line with your key and this site's address. Keep the key in an environment variable rather than in code.</p>
+<div class="code"><pre><code><span class="k">import</span> os
+<span class="k">import</span> agentfences
+
+agentfences.init(
+    api_key=os.environ[<span class="s">"FENCES_API_KEY"</span>],
+    endpoint=<span class="s">"<span class="origin">https://your-fences-host</span>"</span>,
+)</code></pre></div>
+          <div class="note warn">Always pass <code>endpoint</code>. It defaults to <code>http://localhost:8000</code>, which is only right if you run the backend yourself on your own machine.</div>
+        </li>
+        <li>
+          <h3>Run your agent</h3>
+          <p>The run shows up in the dashboard as soon as it starts, and its spend, steps and decisions update live on every checkpoint.</p>
+        </li>
+      </ol>
+      <div class="table"><table>
+        <thead><tr><th></th><th>Local mode</th><th>Cloud mode</th></tr></thead>
+        <tbody>
+          <tr><td>Setup</td><td><code>init(local_only=True)</code></td><td><code>init(api_key=…, endpoint=…)</code></td></tr>
+          <tr><td>Who enforces limits</td><td>The SDK, in your process</td><td>The backend (it can see spend from other processes and limits raised in the dashboard)</td></tr>
+          <tr><td>Dashboard and decision trail</td><td>No</td><td>Yes</td></tr>
+          <tr><td>Network calls</td><td>None</td><td>One per run start, checkpoint and end; decisions are sent in the background</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- Limits -->
+    <section id="limits">
+      <p class="eyebrow">Guide</p>
+      <h2>Limits</h2>
+      <p>Set any combination on <code>@governed</code>. They are checked at every <code>checkpoint()</code>; the first one exceeded stops the run.</p>
+      <div class="table"><table>
+        <thead><tr><th>Limit</th><th>Parameter</th><th>Default</th><th><code>breach_type</code></th><th>Exception</th></tr></thead>
+        <tbody>
+          <tr><td>Spend (USD)</td><td><code>budget_usd</code></td><td>required</td><td><code>budget_exceeded</code></td><td><code>BudgetExceeded</code></td></tr>
+          <tr><td>Steps</td><td><code>max_iterations</code></td><td><code>100</code></td><td><code>iteration_limit</code></td><td><code>IterationLimitReached</code></td></tr>
+          <tr><td>Wall-clock time (ms)</td><td><code>max_duration_ms</code></td><td><code>300_000</code> (5 min)</td><td><code>time_limit</code></td><td><code>TimeLimitReached</code></td></tr>
+          <tr><td>Tokens (input + output)</td><td><code>max_tokens</code></td><td><code>0</code> = no limit</td><td><code>token_limit</code></td><td><code>TokenLimitReached</code></td></tr>
+        </tbody>
+      </table></div>
+      <h3>How limits are counted</h3>
+      <ul>
+        <li><strong>A limit trips only once it is exceeded.</strong> <code>budget_usd=0.10</code> lets the run spend exactly $0.10, and <code>max_iterations=5</code> allows five full checkpoints; the sixth trips.</li>
+        <li><strong>One iteration = one <code>checkpoint()</code> call.</strong> Call it once per model call (or once per loop turn) so the count means something.</li>
+        <li><strong><code>cost_delta_usd</code> and <code>tokens_used</code> are amounts for that step</strong>, not running totals. Fences adds them up.</li>
+        <li><strong>Limits are checked at checkpoints, not in between.</strong> Fences never interrupts a model call that is already running. A run with a 5-minute limit that makes one 10-minute call finds out at the next checkpoint.</li>
+        <li>If several limits are exceeded at once, the order is spend, then steps, then time, then tokens.</li>
+      </ul>
+      <p>Fences does not know model prices; you pass the cost of each step. A small helper works well:</p>
+<div class="code"><pre><code><span class="c"># Your model's price per token, in USD. Check your provider's pricing page.</span>
+PRICE_IN, PRICE_OUT = <span class="k">2.50</span> / <span class="k">1_000_000</span>, <span class="k">10.00</span> / <span class="k">1_000_000</span>
+
+<span class="k">def</span> cost_of(input_tokens: int, output_tokens: int) -> float:
+    <span class="k">return</span> input_tokens * PRICE_IN + output_tokens * PRICE_OUT</code></pre></div>
+    </section>
+
+    <!-- Breaches -->
+    <section id="breaches">
+      <p class="eyebrow">Guide</p>
+      <h2>Handling a breach</h2>
+      <p>By default <code>checkpoint()</code> never raises. It returns a <code>CheckpointResult</code> that your agent reads, so it can stop cleanly instead of crashing halfway through a task.</p>
+<div class="code"><pre><code>result = <span class="k">await</span> checkpoint(cost_delta_usd=<span class="k">0.02</span>, tokens_used=<span class="k">450</span>)
+
+result.ok             <span class="c"># True while within every limit</span>
+result.breached       <span class="c"># True once a limit is exceeded</span>
+result.breach_type    <span class="c"># "budget_exceeded" | "iteration_limit" | "time_limit" | "token_limit"</span>
+result.message        <span class="c"># first-person text you can return to the user</span>
+result.system_prompt  <span class="c"># instruction you can give the model so it wraps up</span></code></pre></div>
+      <h3>Option 1: return a message</h3>
+      <p>The simplest exit. <code>result.message</code> reads like the agent speaking, for example “I've reached my iteration limit (21 steps). I'll summarize what I found so far.”</p>
+      <h3>Option 2: let the model summarise</h3>
+      <p>Add <code>result.system_prompt</code> to the conversation and make one last call. The model stops working and tells the user what it found and why it stopped.</p>
+<div class="code"><pre><code><span class="k">if</span> result.breached:
+    messages.append({<span class="s">"role"</span>: <span class="s">"system"</span>, <span class="s">"content"</span>: result.system_prompt})
+    <span class="k">return</span> call_llm(messages)   <span class="c"># this final call isn't counted; there is no checkpoint after it</span></code></pre></div>
+      <h3>Option 3: raise exceptions</h3>
+      <p>Pass <code>raise_on_breach=True</code> to get an exception instead. All of them subclass <code>FencesError</code>.</p>
+<div class="code"><pre><code><span class="k">from</span> agentfences <span class="k">import</span> governed, checkpoint, FencesError
+
+@governed(budget_usd=<span class="k">0.50</span>, raise_on_breach=<span class="k">True</span>)
+<span class="k">async def</span> my_agent():
+    ...
+    <span class="k">await</span> checkpoint(cost_delta_usd=<span class="k">0.02</span>)   <span class="c"># raises BudgetExceeded, IterationLimitReached, ...</span>
+
+<span class="k">try</span>:
+    <span class="k">await</span> my_agent()
+<span class="k">except</span> FencesError <span class="k">as</span> e:
+    print(<span class="s">"stopped:"</span>, e)                      <span class="c"># e.g. "Run exceeded budget: spent $0.5200 of $0.5000 limit"</span></code></pre></div>
+      <h3>What happens to the run</h3>
+      <p>The run is marked <code>breached</code> the moment a limit trips. Further checkpoints in that run keep returning the breach, unless someone raises the limit in the dashboard (see <a href="#dashboard">Raise limits and resume</a>). When the function returns, the run ends with status <code>breached</code>, <code>success</code> or <code>error</code> (an exception other than a Fences one was raised).</p>
+    </section>
+
+    <!-- LLM loops -->
+    <section id="llm">
+      <p class="eyebrow">Guide</p>
+      <h2>Real LLM loops</h2>
+      <p>The pattern is always the same: call the model, report that call's cost and tokens, check the result. These examples use the OpenAI and Anthropic Python clients; any provider works, since Fences only sees the numbers you pass.</p>
+      <h3>OpenAI-style chat completions</h3>
+<div class="code"><pre><code><span class="k">from</span> openai <span class="k">import</span> AsyncOpenAI
+<span class="k">from</span> agentfences <span class="k">import</span> governed, checkpoint, log_decision
+
+client = AsyncOpenAI()
+
+@governed(budget_usd=<span class="k">1.00</span>, max_iterations=<span class="k">25</span>, max_tokens=<span class="k">200_000</span>)
+<span class="k">async def</span> research(question: str) -> str:
+    messages = [{<span class="s">"role"</span>: <span class="s">"user"</span>, <span class="s">"content"</span>: question}]
+    <span class="k">while True</span>:
+        log_decision(reasoning=<span class="s">"asking the model for the next step"</span>, action=<span class="s">"llm_call"</span>)
+        resp = <span class="k">await</span> client.chat.completions.create(model=MODEL, messages=messages, tools=TOOLS)
+        u = resp.usage
+
+        result = <span class="k">await</span> checkpoint(
+            cost_delta_usd=cost_of(u.prompt_tokens, u.completion_tokens),
+            tokens_used=u.total_tokens,
+        )
+        <span class="k">if</span> result.breached:
+            messages.append({<span class="s">"role"</span>: <span class="s">"system"</span>, <span class="s">"content"</span>: result.system_prompt})
+            final = <span class="k">await</span> client.chat.completions.create(model=MODEL, messages=messages)
+            <span class="k">return</span> final.choices[<span class="k">0</span>].message.content
+
+        msg = resp.choices[<span class="k">0</span>].message
+        <span class="k">if not</span> msg.tool_calls:
+            <span class="k">return</span> msg.content
+        messages += [msg, *<span class="k">await</span> run_tools(msg.tool_calls)]</code></pre></div>
+      <h3>Anthropic messages</h3>
+      <p>The same loop; only the usage field names differ.</p>
+<div class="code"><pre><code>resp = <span class="k">await</span> client.messages.create(model=MODEL, max_tokens=<span class="k">1024</span>, messages=messages, tools=TOOLS)
+u = resp.usage
+
+result = <span class="k">await</span> checkpoint(
+    cost_delta_usd=cost_of(u.input_tokens, u.output_tokens),
+    tokens_used=u.input_tokens + u.output_tokens,
+)</code></pre></div>
+      <p class="muted"><code>MODEL</code>, <code>TOOLS</code>, <code>run_tools</code> and <code>cost_of</code> are yours; <code>cost_of</code> is the helper from <a href="#limits">Limits</a>.</p>
+    </section>
+
+    <!-- Agent shapes -->
+    <section id="agent-shapes">
+      <p class="eyebrow">Guide</p>
+      <h2>Sync, streaming &amp; concurrent agents</h2>
+      <h3>Synchronous agents <span class="tag">0.1.6</span></h3>
+      <p><code>@governed</code> works on plain functions too. Use <code>checkpoint_sync()</code> inside them: same arguments, same result.</p>
+<div class="code"><pre><code><span class="k">from</span> agentfences <span class="k">import</span> governed, checkpoint_sync
+
+@governed(budget_usd=<span class="k">0.25</span>)
+<span class="k">def</span> classify(ticket: str) -> str:
+    resp = llm.invoke(ticket)
+    result = checkpoint_sync(cost_delta_usd=<span class="k">0.01</span>, tokens_used=<span class="k">300</span>)
+    <span class="k">return</span> result.message <span class="k">if</span> result.breached <span class="k">else</span> resp</code></pre></div>
+      <h3>Streaming agents <span class="tag">0.1.6</span></h3>
+      <p>Decorate an async generator and the whole stream is one run. If the caller stops reading early, the run still ends cleanly.</p>
+<div class="code"><pre><code>@governed(budget_usd=<span class="k">0.50</span>, max_iterations=<span class="k">10</span>)
+<span class="k">async def</span> stream_answer(question: str):
+    <span class="k">async for</span> chunk, cost, tokens <span class="k">in</span> my_streaming_loop(question):
+        <span class="k">yield</span> chunk
+        <span class="k">if</span> (<span class="k">await</span> checkpoint(cost_delta_usd=cost, tokens_used=tokens)).breached:
+            <span class="k">return</span></code></pre></div>
+      <h3>Concurrent and nested runs <span class="tag">0.1.6</span></h3>
+      <p>Every call to a <code>@governed</code> function is its own run with its own limits, even when many run at once in the same event loop:</p>
+<div class="code"><pre><code>answers = <span class="k">await</span> asyncio.gather(*(research(q) <span class="k">for</span> q <span class="k">in</span> questions))   <span class="c"># one run per question</span></code></pre></div>
+      <p>If one governed function calls another, the inner call is a separate run. While it runs, checkpoints count against the inner run; when it returns, checkpoints count against the outer run again.</p>
+      <div class="note">On 0.1.5 and earlier, use async functions and don't run several governed agents at once in the same thread.</div>
+    </section>
+
+    <!-- Decisions -->
+    <section id="decisions">
+      <p class="eyebrow">Guide</p>
+      <h2>Decision trail</h2>
+      <p>Call <code>log_decision()</code> before each step to record why the agent is doing it. The trail is most useful on runs that went wrong. It is kept for breached and failed runs too, and shows up in the dashboard under each run.</p>
+<div class="code"><pre><code>log_decision(
+    reasoning=<span class="s">"Search returned nothing; retrying with a narrower query"</span>,   <span class="c"># 1–2,000 characters</span>
+    action=<span class="s">"retry_search"</span>,                                                  <span class="c"># optional short label, up to 200</span>
+)</code></pre></div>
+      <ul>
+        <li>Each decision is tagged with the iteration it happened in.</li>
+        <li>It never slows the agent down: decisions are sent from a background thread, in order.</li>
+        <li>Queued decisions are flushed automatically when the process exits. In serverless functions, which can be frozen before that happens, call <code>agentfences.flush()</code> at the end of the handler. <span class="tag">0.1.6</span></li>
+        <li>Outside a <code>@governed</code> function, <code>log_decision()</code> does nothing.</li>
+      </ul>
+    </section>
+
+    <!-- Dashboard -->
+    <section id="dashboard">
+      <p class="eyebrow">Guide</p>
+      <h2>Dashboard</h2>
+      <div class="grid2">
+        <div class="card"><b>Runs</b>Every run, live: status, spend, steps, tokens and time against each limit. Filter by status, open a run to see its decision trail.</div>
+        <div class="card"><b>Agents</b>Runs grouped by agent function name, so you can see which agent breaches most and what it costs.</div>
+        <div class="card"><b>API keys</b>Create, label and revoke keys. A revoked key stops working on the agent's next call.</div>
+        <div class="card"><b>Raise limits and resume</b>Change any limit on a running or breached run without restarting it.</div>
+      </div>
+      <h3 id="resume">Raise limits and resume <span class="tag">0.1.6</span></h3>
+      <p>Open a running or breached run and edit its limits. If the run was breached and the new limits cover what it has used, it goes back to <code>running</code>. The agent's next <code>checkpoint()</code> then passes, and the agent carries on where it was.</p>
+      <p>This only helps an agent that is still calling <code>checkpoint()</code> after a breach, for example one that waits or retries instead of returning straight away. Runs that already ended can't be changed.</p>
+      <p>Only a logged-in dashboard user can raise limits. The API key your agent holds can't, so an agent can never unfence itself.</p>
+      <h3 id="ceilings">Key governance</h3>
+      <p>The limits in <code>@governed(...)</code> live in the agent's own code, so on their own they can't stop an agent that asks for more. Each API key carries its own rules, set in the dashboard and changeable only there:</p>
+      <ul>
+        <li><b>Per-run ceilings</b> (max spend, steps, minutes and tokens): every run started with the key is capped at them, whatever it asks for. <code>/api/runs/start</code> returns the limits the run actually got.</li>
+        <li><b>Daily and monthly spend caps</b> across all of the key's runs (UTC), so ending a run and starting a fresh one doesn't reset anything. Crossing one fences the run with <code>key_daily_budget</code> or <code>key_monthly_budget</code>.</li>
+        <li><b>One agent name</b>: runs started with the key always carry it, so an agent can't report as another.</li>
+      </ul>
+      <p>A key also only sees the runs it started. The dashboard sees every run in your account.</p>
+      <h3 id="stop">Stop a run</h3>
+      <p>Open a running run and press <b>Stop run</b>. Its next <code>checkpoint()</code> returns <code>breached</code> with <code>breach_type</code> <code>stopped_by_user</code>, so the agent winds down like any other breach. Raising its limits resumes it.</p>
+      <h3 id="delete">Deleting data</h3>
+      <p>From the dashboard you can delete a single run, every run of an agent, or your whole account (runs, audit trails, keys and login). Deletion needs a dashboard login too, so an agent can't erase its own audit trail.</p>
+      <h3>Run statuses</h3>
+      <div class="table"><table>
+        <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>running</code></td><td>Started and within all limits.</td></tr>
+          <tr><td><code>breached</code></td><td>A limit was exceeded. Stays <code>breached</code> after the function returns.</td></tr>
+          <tr><td><code>success</code></td><td>The function returned normally without a breach.</td></tr>
+          <tr><td><code>error</code></td><td>The function raised an exception that isn't a Fences one (from 0.1.6, cancellation counts too). The error text is saved on the run.</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- Reliability -->
+    <section id="reliability">
+      <p class="eyebrow">Guide</p>
+      <h2>Reliability</h2>
+      <h3>If the backend can't be reached</h3>
+      <p>Each call to the backend times out after 3 seconds. If a call fails, the SDK logs one warning per run (0.1.6) and <strong>enforces the same limits locally</strong>, so an outage never leaves an agent unfenced and never stops a healthy one.</p>
+      <p>If you'd rather stop agents when Fences can't be reached, fail closed: <span class="tag">0.1.6</span></p>
+<div class="code"><pre><code>agentfences.init(api_key=..., endpoint=..., fail_closed=<span class="k">True</span>)
+<span class="c"># an unreachable backend now counts as a breach (breach_type "fences_unreachable")</span></code></pre></div>
+      <h3>The backend is the source of truth</h3>
+      <p>In cloud mode the backend decides whether a checkpoint passes, and the SDK adopts its totals. That catches spend the local process can't see, such as another worker reporting against the same run, and picks up limits raised in the dashboard.</p>
+      <h3>Rejected keys fail loudly</h3>
+      <p>A wrong or revoked API key is not treated as an outage. The SDK raises <code>PermissionError</code> so you notice immediately, instead of quietly falling back to local limits.</p>
+      <h3>No blocking</h3>
+      <p>In async agents, backend calls run in a worker thread so they never block the event loop. <span class="tag">0.1.6</span></p>
+    </section>
+
+    <!-- SDK reference -->
+    <section id="sdk">
+      <p class="eyebrow">Reference</p>
+      <h2>Python SDK</h2>
+      <p>Everything is importable from <code>agentfences</code>. The latest release is on <a href="https://pypi.org/project/agentfences/">PyPI</a>.</p>
+
+      <h3><code>init(api_key=None, endpoint="http://localhost:8000", local_only=False, fail_closed=False)</code></h3>
+      <p>Call once at startup, before any governed function runs. Pass either <code>local_only=True</code>, or an <code>api_key</code> and <code>endpoint</code>. Calling a governed function before <code>init()</code> raises <code>RuntimeError</code>. <code>fail_closed</code> is new in 0.1.6.</p>
+
+      <h3><code>@governed(budget_usd, max_iterations=100, max_duration_ms=300_000, max_tokens=0, raise_on_breach=False)</code></h3>
+      <p>Makes each call of the decorated function a run with these limits. Works on async functions, and (from 0.1.6) on sync functions and async generators. The run is named after the function.</p>
+
+      <h3><code>await checkpoint(cost_delta_usd=0.0, tokens_used=0) → CheckpointResult</code></h3>
+      <p>Records one step's cost and tokens, counts one iteration, and checks every limit. Outside a governed function it does nothing and returns an OK result.</p>
+
+      <h3><code>checkpoint_sync(cost_delta_usd=0.0, tokens_used=0) → CheckpointResult</code> <span class="tag">0.1.6</span></h3>
+      <p>The same, for synchronous code.</p>
+
+      <h3><code>log_decision(reasoning, action=None)</code></h3>
+      <p>Adds an entry to the run's decision trail. See <a href="#decisions">Decision trail</a>.</p>
+
+      <h3><code>flush(timeout=5.0)</code> <span class="tag">0.1.6</span></h3>
+      <p>Waits up to <code>timeout</code> seconds for queued decisions to reach the backend.</p>
+
+      <h3><code>get_active_run() → RunState | None</code></h3>
+      <p>The current run, if any. Useful for reading <code>run_id</code>, <code>cost_usd</code>, <code>iterations</code>, <code>tokens_used</code> and <code>duration_ms</code> from inside the agent.</p>
+
+      <h3><code>CheckpointResult</code></h3>
+      <div class="table"><table>
+        <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>ok</code></td><td>bool</td><td><code>not breached</code></td></tr>
+          <tr><td><code>breached</code></td><td>bool</td><td>A limit has been exceeded</td></tr>
+          <tr><td><code>breach_type</code></td><td>str | None</td><td>See <a href="#limits">Limits</a>; also <code>fences_unreachable</code> when failing closed</td></tr>
+          <tr><td><code>message</code></td><td>str</td><td>First-person text for the user</td></tr>
+          <tr><td><code>system_prompt</code></td><td>str</td><td>Instruction telling the model to stop and summarise</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3>Exceptions</h3>
+      <p>Raised only with <code>raise_on_breach=True</code>. Each carries the numbers as attributes.</p>
+      <div class="table"><table>
+        <thead><tr><th>Exception</th><th>Attributes</th></tr></thead>
+        <tbody>
+          <tr><td><code>FencesError</code></td><td>Base class for all of the below</td></tr>
+          <tr><td><code>BudgetExceeded</code></td><td><code>spent_usd</code>, <code>budget_usd</code></td></tr>
+          <tr><td><code>IterationLimitReached</code></td><td><code>iterations</code>, <code>max_iterations</code></td></tr>
+          <tr><td><code>TimeLimitReached</code></td><td><code>duration_ms</code>, <code>max_duration_ms</code></td></tr>
+          <tr><td><code>TokenLimitReached</code></td><td><code>tokens_used</code>, <code>max_tokens</code></td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- REST -->
+    <section id="rest">
+      <p class="eyebrow">Reference</p>
+      <h2>REST API</h2>
+      <p>Not using Python? Everything the SDK does is four HTTP calls, so any language can be fenced. Send your key in the <code>X-API-Key</code> header and JSON bodies.</p>
+      <div class="table"><table>
+        <thead><tr><th>Endpoint</th><th>Body</th><th>Returns</th></tr></thead>
+        <tbody>
+          <tr><td><span class="method">POST</span> <code>/api/runs/start</code></td><td><code>run_id</code> (you choose, unique), <code>agent_name</code>, <code>budget_usd</code>, optional <code>max_iterations</code>, <code>max_duration_ms</code>, <code>max_tokens</code></td><td><code>{"ok": true, "limits": {...}}</code>, capped at the key's ceilings; 409 if the <code>run_id</code> exists</td></tr>
+          <tr><td><span class="method">POST</span> <code>/api/runs/{id}/checkpoint</code></td><td><code>cost_delta_usd</code> and <code>tokens_used</code> for this step; <code>iterations</code> and <code>duration_ms</code> so far</td><td>See below. On a fenced run: <code>{"ok": false, "breach": ...}</code> again, with the reason; 409 if the run has ended</td></tr>
+          <tr><td><span class="method">POST</span> <code>/api/runs/{id}/decisions</code></td><td><code>iteration</code>, <code>reasoning</code>, optional <code>action</code></td><td><code>{"ok": true}</code></td></tr>
+          <tr><td><span class="method">POST</span> <code>/api/runs/{id}/end</code></td><td><code>status</code> (<code>success</code> or <code>error</code>), optional <code>error</code></td><td><code>{"ok": true}</code>. A breached run stays <code>breached</code></td></tr>
+          <tr><td><span class="method">GET</span> <code>/api/runs</code></td><td></td><td><code>{"runs": [...]}</code>, newest first</td></tr>
+          <tr><td><span class="method">GET</span> <code>/api/runs/{id}</code></td><td></td><td><code>{"run": {...}}</code></td></tr>
+          <tr><td><span class="method">GET</span> <code>/api/runs/{id}/decisions</code></td><td></td><td><code>{"decisions": [...]}</code>, oldest first</td></tr>
+        </tbody>
+      </table></div>
+      <h3>A full run with curl</h3>
+<div class="code"><pre><code>BASE=<span class="origin">https://your-fences-host</span>
+KEY=fc_...
+
+curl -X POST $BASE/api/runs/start -H <span class="s">"X-API-Key: $KEY"</span> -H <span class="s">"Content-Type: application/json"</span> \
+  -d <span class="s">'{"run_id": "run-123", "agent_name": "support_bot", "budget_usd": 0.50, "max_iterations": 20}'</span>
+
+curl -X POST $BASE/api/runs/run-123/checkpoint -H <span class="s">"X-API-Key: $KEY"</span> -H <span class="s">"Content-Type: application/json"</span> \
+  -d <span class="s">'{"cost_delta_usd": 0.02, "tokens_used": 450, "iterations": 1, "duration_ms": 1200}'</span>
+
+curl -X POST $BASE/api/runs/run-123/end -H <span class="s">"X-API-Key: $KEY"</span> -H <span class="s">"Content-Type: application/json"</span> \
+  -d <span class="s">'{"status": "success"}'</span></code></pre></div>
+      <h3>Checkpoint responses</h3>
+<div class="code"><pre><code><span class="c">// Within limits</span>
+{ <span class="s">"ok"</span>: true, <span class="s">"spent_usd"</span>: 0.02, <span class="s">"iterations"</span>: 1, <span class="s">"tokens_used"</span>: 450 }
+
+<span class="c">// Breached: stop the agent. Totals and current limits are included.</span>
+{ <span class="s">"ok"</span>: false, <span class="s">"breach"</span>: <span class="s">"budget_exceeded"</span>,
+  <span class="s">"spent_usd"</span>: 0.52, <span class="s">"budget_usd"</span>: 0.5, <span class="s">"iterations"</span>: 14, <span class="s">"max_iterations"</span>: 20,
+  <span class="s">"tokens_used"</span>: 6300, <span class="s">"max_tokens"</span>: 0, <span class="s">"duration_ms"</span>: 18200, <span class="s">"max_duration_ms"</span>: 300000 }</code></pre></div>
+      <p>The server adds up <code>cost_delta_usd</code> and <code>tokens_used</code> itself, so send each step's amounts, not totals. Concurrent checkpoints on one run are counted exactly.</p>
+      <h3>Errors</h3>
+      <div class="table"><table>
+        <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>401</code></td><td>Missing, wrong or revoked API key</td></tr>
+          <tr><td><code>404</code></td><td>No such run, or it belongs to another account</td></tr>
+          <tr><td><code>409</code></td><td>Duplicate <code>run_id</code>, checkpoint on a run that isn't running, or limits changed on a finished run</td></tr>
+          <tr><td><code>422</code></td><td>Invalid body, e.g. a missing field or a negative cost. The response says which field</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- WebSocket -->
+    <section id="websocket">
+      <p class="eyebrow">Reference</p>
+      <h2>Live WebSocket</h2>
+      <p>The dashboard's live view is a WebSocket you can use too, for example to pipe breaches into Slack or your own monitoring.</p>
+<div class="code"><pre><code><span class="origin-ws">wss://your-fences-host</span>/ws/runs?api_key=fc_...</code></pre></div>
+      <p>On connect you get <code>initial_state</code> with your 50 most recent runs, then one JSON message per event. Every message except <code>ping</code> includes the full <code>run</code>.</p>
+      <div class="table"><table>
+        <thead><tr><th><code>type</code></th><th>Sent when</th></tr></thead>
+        <tbody>
+          <tr><td><code>run_started</code></td><td>A run starts</td></tr>
+          <tr><td><code>checkpoint</code></td><td>A checkpoint passes</td></tr>
+          <tr><td><code>run_breached</code></td><td>A limit trips; includes <code>breach</code></td></tr>
+          <tr><td><code>limits_updated</code></td><td>Limits change; includes <code>changes</code></td></tr>
+          <tr><td><code>run_ended</code></td><td>A run ends</td></tr>
+          <tr><td><code>ping</code></td><td>Every 30 seconds, to keep the connection open</td></tr>
+        </tbody>
+      </table></div>
+      <p>A bad key closes the socket with code <code>4001</code>.</p>
+    </section>
+
+    <!-- Troubleshooting -->
+    <section id="troubleshooting">
+      <p class="eyebrow">Reference</p>
+      <h2>Troubleshooting</h2>
+      <h3><code>RuntimeError: Call agentfences.init() before using Fences</code></h3>
+      <p>A governed function ran before <code>init()</code>. Call it once at startup, at module level or in your app's startup hook.</p>
+      <h3><code>PermissionError: Fences API key rejected</code></h3>
+      <p>The key is wrong or was revoked. Check the <code>FENCES_API_KEY</code> your process actually sees, or create a new key in the dashboard.</p>
+      <h3>“Fences backend unreachable … enforcing limits locally” warning <span class="tag">0.1.6</span></h3>
+      <p>The SDK couldn't reach <code>endpoint</code>. Check the address (it must be this site, not the <code>localhost</code> default) and that the machine can reach it. Your limits are still enforced in the meantime.</p>
+      <h3>My runs don't appear in the dashboard</h3>
+      <p>Either the SDK is in local mode (<code>local_only=True</code>), or the key belongs to a different account from the one you're logged into.</p>
+      <h3>The agent stopped one step later than I expected</h3>
+      <p>Limits trip once exceeded, not when reached: <code>max_iterations=5</code> allows five checkpoints. Versions before 0.1.5 tripped at the limit itself.</p>
+      <h3>The time limit didn't stop a long model call</h3>
+      <p>Limits are checked at checkpoints, so a single call that runs past the limit is caught at the next <code>checkpoint()</code>. Set a timeout on the model call itself if you need a hard cut-off.</p>
+    </section>
+  </article>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>(|=|) Fences</span>
+    <span><a href="../">Home</a> · <a href="https://github.com/bhaviksardar/fences">GitHub</a> · <a href="https://pypi.org/project/agentfences/">PyPI</a></span>
+  </div>
+</footer>
+
+<script>
+
+// Copy buttons on every code block
+document.querySelectorAll('.code').forEach(block => {
+  const btn = Object.assign(document.createElement('button'), { className: 'copy', textContent: 'Copy', type: 'button' });
+  btn.onclick = () => {
+    navigator.clipboard.writeText(block.querySelector('pre').innerText);
+    btn.textContent = 'Copied';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  };
+  block.append(btn);
+});
+
+// Highlight the section in view
+const links = [...document.querySelectorAll('#toc a')];
+const spy = new IntersectionObserver(entries => {
+  for (const e of entries) if (e.isIntersecting) {
+    links.forEach(a => a.classList.toggle('on', a.hash === '#' + e.target.id));
+  }
+}, { rootMargin: '-80px 0px -70% 0px' });
+links.forEach(a => { const s = document.querySelector(a.hash); if (s) spy.observe(s); });
+</script>
+</body>
+</html>
