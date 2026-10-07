@@ -1,12 +1,12 @@
 import os
 import time
 import secrets
-from fastapi import FastAPI, Header, HTTPException, Depends
+from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Literal
 from contextlib import asynccontextmanager
 
 from db import init_db, get_session, Run, Decision, ApiKey, hash_api_key, generate_api_key
@@ -19,25 +19,54 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Fences API", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
-)
+# The SDK calls the API from servers, which CORS doesn't affect. Only browser apps
+# need an entry here: CORS_ORIGINS=https://app.example.com,https://admin.example.com
+CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "X-API-Key"],
+    )
+
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "600"))
+ADMIN_RATE_LIMIT_PER_MINUTE = 20
+_hits: dict = {}
+
+
+def rate_limit(who: str, limit: int):
+    # ponytail: in-memory fixed window, per process. Move to Redis if you run more than one instance.
+    window = int(time.time() // 60)
+    seen_window, count = _hits.get(who, (window, 0))
+    count = count + 1 if seen_window == window else 1
+    _hits[who] = (window, count)
+    if count > limit:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded, try again in a minute")
 
 
 async def verify_api_key(
     x_api_key: str = Header(...),
     session: AsyncSession = Depends(get_session),
 ) -> str:
+    """Returns the key's hash, which identifies the caller's tenant."""
     key_hash = hash_api_key(x_api_key)
     result = await session.execute(select(ApiKey).where(ApiKey.key_hash == key_hash))
     key_record = result.scalar_one_or_none()
 
     if key_record is None or key_record.revoked:
         raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+    rate_limit(key_hash, RATE_LIMIT_PER_MINUTE)
 
     key_record.last_used_at = time.time()
     await session.commit()
-    return x_api_key
+    return key_hash
+
+
+async def owned_run(session: AsyncSession, run_id: str, key_hash: str) -> Run:
+    # Another tenant's run is indistinguishable from a missing one
+    run = await session.get(Run, run_id)
+    if run is None or run.owner_key_hash != key_hash:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
 
 
 class StartRunPayload(BaseModel):
@@ -52,12 +81,12 @@ class StartRunPayload(BaseModel):
 class CheckpointPayload(BaseModel):
     cost_delta_usd: float = Field(ge=0)
     iterations: int = Field(ge=0)
-    duration_ms: int = Field(ge=0)
+    duration_ms: int = Field(default=0, ge=0)  # accepted from older SDKs, ignored: the server times runs itself
     tokens_used: int = Field(default=0, ge=0)
 
 
 class EndRunPayload(BaseModel):
-    status: str
+    status: Literal["success", "error", "breached"]
     error: Optional[str] = None
 
 
@@ -96,7 +125,7 @@ def run_to_dict(run: Run) -> dict:
 @app.post("/api/runs/start")
 async def start_run(
     payload: StartRunPayload,
-    api_key: str = Depends(verify_api_key),
+    key_hash: str = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
 ):
     existing = await session.get(Run, payload.run_id)
@@ -105,6 +134,7 @@ async def start_run(
 
     run = Run(
         run_id=payload.run_id,
+        owner_key_hash=key_hash,
         agent_name=payload.agent_name,
         budget_usd=payload.budget_usd,
         max_iterations=payload.max_iterations,
@@ -125,12 +155,10 @@ async def start_run(
 async def checkpoint(
     run_id: str,
     payload: CheckpointPayload,
-    api_key: str = Depends(verify_api_key),
+    key_hash: str = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
 ):
-    run = await session.get(Run, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+    run = await owned_run(session, run_id, key_hash)
 
     if run.status != "running":
         raise HTTPException(status_code=409, detail=f"Run is already '{run.status}', cannot checkpoint")
@@ -147,12 +175,15 @@ async def checkpoint(
     await session.commit()
     await session.refresh(run)
 
+    # Time is measured on the server, so a client can't extend its own time limit
+    duration_ms = int((time.time() - run.started_at) * 1000)
+
     breach = None
     if round(run.spent_usd, 9) > run.budget_usd:  # round away float drift (0.02*5 != 0.10)
         breach = "budget_exceeded"
     elif run.iterations > run.max_iterations:
         breach = "iteration_limit"
-    elif payload.duration_ms > run.max_duration_ms:
+    elif duration_ms > run.max_duration_ms:
         breach = "time_limit"
     elif run.max_tokens > 0 and run.tokens_used > run.max_tokens:
         breach = "token_limit"
@@ -183,12 +214,10 @@ async def checkpoint(
 async def end_run(
     run_id: str,
     payload: EndRunPayload,
-    api_key: str = Depends(verify_api_key),
+    key_hash: str = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
 ):
-    run = await session.get(Run, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+    run = await owned_run(session, run_id, key_hash)
 
     if run.status != "breached":
         run.status = payload.status
@@ -200,10 +229,12 @@ async def end_run(
 
 @app.get("/api/runs")
 async def list_runs(
-    api_key: str = Depends(verify_api_key),
+    key_hash: str = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
 ):
-    result = await session.execute(select(Run).order_by(Run.started_at.desc()))
+    result = await session.execute(
+        select(Run).where(Run.owner_key_hash == key_hash).order_by(Run.started_at.desc())
+    )
     runs = result.scalars().all()
     return {"runs": [run_to_dict(r) for r in runs]}
 
@@ -211,12 +242,10 @@ async def list_runs(
 @app.get("/api/runs/{run_id}")
 async def get_run(
     run_id: str,
-    api_key: str = Depends(verify_api_key),
+    key_hash: str = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
 ):
-    run = await session.get(Run, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+    run = await owned_run(session, run_id, key_hash)
     return {"run": run_to_dict(run)}
 
 
@@ -224,12 +253,10 @@ async def get_run(
 async def log_decision(
     run_id: str,
     payload: DecisionPayload,
-    api_key: str = Depends(verify_api_key),
+    key_hash: str = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
 ):
-    run = await session.get(Run, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+    run = await owned_run(session, run_id, key_hash)
 
     session.add(Decision(
         run_id=run_id,
@@ -245,12 +272,10 @@ async def log_decision(
 @app.get("/api/runs/{run_id}/decisions")
 async def get_decisions(
     run_id: str,
-    api_key: str = Depends(verify_api_key),
+    key_hash: str = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
 ):
-    run = await session.get(Run, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+    run = await owned_run(session, run_id, key_hash)
 
     result = await session.execute(
         select(Decision)
@@ -279,10 +304,11 @@ async def health():
     return {"status": "ok"}
 
 
-def verify_admin(x_admin_password: str = Header(...)) -> str:
+def verify_admin(request: Request, x_admin_password: str = Header(...)) -> str:
     expected = os.environ.get("ADMIN_PASSWORD")
     if not expected:
         raise HTTPException(status_code=404, detail="Not found")
+    rate_limit(f"admin:{request.client.host if request.client else ''}", ADMIN_RATE_LIMIT_PER_MINUTE)
     if not secrets.compare_digest(x_admin_password, expected):
         raise HTTPException(status_code=401, detail="Invalid admin password")
     return x_admin_password
