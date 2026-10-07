@@ -201,7 +201,7 @@ agentfences.init(
     api_key=os.environ[<span class="s">"FENCES_API_KEY"</span>],
     endpoint=<span class="s">"<span class="origin">https://your-fences-host</span>"</span>,
 )</code></pre></div>
-          <div class="note warn">Always pass <code>endpoint</code>. It defaults to <code>http://localhost:8000</code>, which is only right if you run the backend yourself on your own machine.</div>
+          <div class="note warn">Always pass <code>endpoint</code>. It defaults to <code>http://localhost:8000</code>, which isn't a Fences server, so without it the SDK can't reach Fences and only enforces limits locally.</div>
         </li>
         <li>
           <h3>Run your agent</h3>
@@ -562,7 +562,7 @@ curl -X POST $BASE/api/runs/run-123/end -H <span class="s">"X-API-Key: $KEY"</sp
       <h3><code>PermissionError: Fences API key rejected</code></h3>
       <p>The key is wrong or was revoked. Check the <code>FENCES_API_KEY</code> your process actually sees, or create a new key in the dashboard.</p>
       <h3>“Fences backend unreachable … enforcing limits locally” warning <span class="tag">0.1.6</span></h3>
-      <p>The SDK couldn't reach <code>endpoint</code>. Check the address (it must be this site, not the <code>localhost</code> default) and that the machine can reach it. Your limits are still enforced in the meantime.</p>
+      <p>The SDK couldn't reach <code>endpoint</code>. Check the address (it must be your Fences Cloud address, not the <code>localhost</code> default) and that the machine can reach it. Your limits are still enforced in the meantime.</p>
       <h3>My runs don't appear in the dashboard</h3>
       <p>Either the SDK is in local mode (<code>local_only=True</code>), or the key belongs to a different account from the one you're logged into.</p>
       <h3>The agent stopped one step later than I expected</h3>
