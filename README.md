@@ -131,7 +131,7 @@ agentfences.init(api_key="fc_...", endpoint="https://...", fail_closed=True)
 
 ```
 fences/
-├── backend/    FastAPI service — cloud enforcement backend
+├── docs/       landing page
 └── sdk/        agentfences Python package
     └── agentfences/
 ```
