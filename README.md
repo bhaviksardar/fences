@@ -1,5 +1,7 @@
 # (|=|) Fences
 
+[![test](https://github.com/bhaviksardar/fences/actions/workflows/test.yml/badge.svg)](https://github.com/bhaviksardar/fences/actions/workflows/test.yml)
+
 Runtime governance for AI agents. Budget limits, loop protection, token governance, and a decision audit trail — in three lines of code.
 
 ```python
