@@ -1,7 +1,7 @@
 import os
 import time
 import secrets
-from fastapi import FastAPI, Header, HTTPException, Depends, Request
+from fastapi import FastAPI, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -29,17 +29,19 @@ if CORS_ORIGINS:
     )
 
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "600"))
-ADMIN_RATE_LIMIT_PER_MINUTE = 20
-_hits: dict = {}
+_window = 0
+_hits: dict = {}  # key hash -> requests in the current minute
 
 
 def rate_limit(who: str, limit: int):
     # ponytail: in-memory fixed window, per process. Move to Redis if you run more than one instance.
+    global _window
     window = int(time.time() // 60)
-    seen_window, count = _hits.get(who, (window, 0))
-    count = count + 1 if seen_window == window else 1
-    _hits[who] = (window, count)
-    if count > limit:
+    if window != _window:  # new minute: drop every old count
+        _window = window
+        _hits.clear()
+    _hits[who] = _hits.get(who, 0) + 1
+    if _hits[who] > limit:
         raise HTTPException(status_code=429, detail="Rate limit exceeded, try again in a minute")
 
 
@@ -304,11 +306,20 @@ async def health():
     return {"status": "ok"}
 
 
-def verify_admin(request: Request, x_admin_password: str = Header(...)) -> str:
+ADMIN_PASSWORD_MIN_LENGTH = 32
+
+
+def verify_admin(x_admin_password: str = Header(...)) -> str:
+    # No rate limit here: behind a proxy every caller shares one IP, so a limit would let
+    # anyone lock the admin out. A long random password makes guessing hopeless instead.
     expected = os.environ.get("ADMIN_PASSWORD")
     if not expected:
         raise HTTPException(status_code=404, detail="Not found")
-    rate_limit(f"admin:{request.client.host if request.client else ''}", ADMIN_RATE_LIMIT_PER_MINUTE)
+    if len(expected) < ADMIN_PASSWORD_MIN_LENGTH:
+        raise HTTPException(
+            status_code=503,
+            detail=f"ADMIN_PASSWORD must be at least {ADMIN_PASSWORD_MIN_LENGTH} characters, e.g. `openssl rand -hex 32`",
+        )
     if not secrets.compare_digest(x_admin_password, expected):
         raise HTTPException(status_code=401, detail="Invalid admin password")
     return x_admin_password
