@@ -13,6 +13,7 @@ from typing import Optional, Callable
 
 from .exceptions import FencesError, BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached
 from .client import GovClient
+from .pricing import cost_of, set_custom_prices
 
 log = logging.getLogger("agentfences")
 
@@ -49,6 +50,7 @@ class CheckpointResult:
     breach_type: Optional[str] = None   # "budget_exceeded" | "iteration_limit" | "time_limit" | "token_limit"
     message: str = ""                   # human-readable, ready to return to user
     system_prompt: str = ""             # inject into LLM conversation context
+    spent_usd: float = 0.0              # the run's total spend so far
 
     @property
     def ok(self) -> bool:
@@ -159,6 +161,7 @@ def init(
     endpoint: str = "http://localhost:8000",
     local_only: bool = False,
     fail_closed: bool = False,
+    prices: Optional[dict] = None,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -171,8 +174,13 @@ def init(
 
     If the backend can't be reached, limits are enforced locally (fail open).
     Pass fail_closed=True to treat an unreachable backend as a breach instead.
+
+    checkpoint(response) prices most OpenAI, Anthropic, Gemini, Mistral, DeepSeek, xAI
+    and Groq models itself. Add or override others in USD per 1M tokens:
+        agentfences.init(local_only=True, prices={"my-model": {"input": 1.0, "output": 3.0}})
     """
     global _client, _local_only, _fail_closed
+    set_custom_prices(prices)
     _local_only = local_only
     _fail_closed = fail_closed
 
@@ -383,7 +391,7 @@ def _decide(run: RunState, resp: Optional[dict]) -> CheckpointResult:
             run.last_breach = None
         else:  # a fresh breach, or a 409 because the run is still fenced from an earlier one
             run.last_breach = resp.get("breach") or run.last_breach or "limit_reached"
-    return _breach(run) if run.last_breach else CheckpointResult()
+    return _breach(run) if run.last_breach else CheckpointResult(spent_usd=run.cost_usd)
 
 
 def _breach(run: RunState) -> CheckpointResult:
@@ -395,6 +403,7 @@ def _breach(run: RunState) -> CheckpointResult:
         tokens_used=run.tokens_used,
         duration_ms=run.duration_ms,
     )
+    result.spent_usd = run.cost_usd
     if run.raise_on_breach:
         raise _BREACH_EXCEPTIONS.get(run.last_breach, lambda r: FencesError(result.message))(run)
     return result
@@ -409,17 +418,36 @@ def _record_step(cost_delta_usd: float, tokens_used: int) -> Optional[RunState]:
     return run
 
 
-async def checkpoint(cost_delta_usd: float = 0.0, tokens_used: int = 0) -> CheckpointResult:
-    """
-    Report spend and token usage, then check all governance limits.
+def _measure(response, cost_delta_usd: float, tokens_used: int):
+    """(cost, tokens) for one step: the response's priced usage plus any extra amounts passed."""
+    if isinstance(response, (int, float)) and not isinstance(response, bool):
+        # Before 0.1.7 the first argument was the cost: checkpoint(0.02) or checkpoint(0.02, 450)
+        return float(response), int(cost_delta_usd) + tokens_used
+    if response is None:
+        return cost_delta_usd, tokens_used
+    cost, tokens = cost_of(response)
+    return cost + cost_delta_usd, tokens + tokens_used
 
-    Call this after each LLM call in your agent loop. Returns a
-    CheckpointResult — check result.breached before continuing.
+
+async def checkpoint(response=None, cost_delta_usd: float = 0.0, tokens_used: int = 0) -> CheckpointResult:
+    """
+    Record one step's spend and tokens, then check all governance limits.
+
+    Call it after each model call with the model's response; Fences reads the model
+    and token usage from it and works out the cost:
+
+        resp = client.chat.completions.create(...)
+        result = await checkpoint(resp)
+
+    Returns a CheckpointResult — check result.breached before continuing.
     The backend call runs in a worker thread, so it never blocks the event loop.
 
     Args:
-        cost_delta_usd: Amount spent since the last checkpoint call.
-        tokens_used: Tokens (input + output) consumed since the last checkpoint call.
+        response: The model's response (OpenAI, Anthropic, Gemini, LangChain, or any
+            object or dict with the same usage fields). Optional.
+        cost_delta_usd: Extra spend for this step in USD, e.g. a paid tool call.
+            Without a response, the step's whole cost.
+        tokens_used: Extra tokens for this step, added to the response's.
 
     Returns:
         CheckpointResult with:
@@ -428,20 +456,23 @@ async def checkpoint(cost_delta_usd: float = 0.0, tokens_used: int = 0) -> Check
             .breach_type   — which limit was crossed
             .message       — human-readable, ready to return to user
             .system_prompt — inject into LLM context for graceful summarisation
+            .spent_usd     — the run's total spend so far
     """
-    run = _record_step(cost_delta_usd, tokens_used)
-    if run is None:
+    if get_active_run() is None:
         return CheckpointResult()
-    resp = await asyncio.to_thread(_server_check, run, cost_delta_usd, tokens_used) if _client else None
+    cost, tokens = _measure(response, cost_delta_usd, tokens_used)
+    run = _record_step(cost, tokens)
+    resp = await asyncio.to_thread(_server_check, run, cost, tokens) if _client else None
     return _decide(run, resp)
 
 
-def checkpoint_sync(cost_delta_usd: float = 0.0, tokens_used: int = 0) -> CheckpointResult:
+def checkpoint_sync(response=None, cost_delta_usd: float = 0.0, tokens_used: int = 0) -> CheckpointResult:
     """checkpoint() for synchronous agents. Same arguments and result."""
-    run = _record_step(cost_delta_usd, tokens_used)
-    if run is None:
+    if get_active_run() is None:
         return CheckpointResult()
-    return _decide(run, _server_check(run, cost_delta_usd, tokens_used) if _client else None)
+    cost, tokens = _measure(response, cost_delta_usd, tokens_used)
+    run = _record_step(cost, tokens)
+    return _decide(run, _server_check(run, cost, tokens) if _client else None)
 
 
 # ── Decision trail ────────────────────────────────────────────────────────────

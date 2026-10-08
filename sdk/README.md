@@ -14,10 +14,7 @@ async def run_agent(query: str, messages: list):
         log_decision(reasoning="calling LLM", action="llm_call")
         response = call_llm(messages)
 
-        result = await checkpoint(
-            cost_delta_usd=compute_cost(response.usage),
-            tokens_used=response.usage.total_tokens,
-        )
+        result = await checkpoint(response)  # Fences reads the usage and prices the call
 
         if result.breached:
             # Agent handles the limit gracefully — no exception, no crash
@@ -39,14 +36,34 @@ pip install agentfences
 `checkpoint()` returns a `CheckpointResult` after every call — not an exception. The agent reads it and decides what to do: stop, summarise, ask for more budget. No try/catch in your orchestration layer.
 
 ```python
-result = await checkpoint(cost_delta_usd=0.02, tokens_used=450)
+result = await checkpoint(response)
 
 result.ok           # True if within all limits
 result.breached     # True if a limit was crossed
 result.breach_type  # "budget_exceeded" | "iteration_limit" | "time_limit" | "token_limit"
 result.message      # "I've reached my budget limit... I'll summarise what I found."
 result.system_prompt  # ready to inject into LLM conversation context
+result.spent_usd    # the run's total spend so far
 ```
+
+## Cost tracking
+
+Pass the model's response to `checkpoint()` and Fences works out what the call cost. It reads the model name and token usage, including cache reads and writes and reasoning tokens, and prices them from a built-in table of current list prices:
+
+```python
+response = client.chat.completions.create(model="gpt-4o", messages=messages)
+result = await checkpoint(response)
+print(result.spent_usd)  # the run's total so far
+```
+
+- **Supported responses:** OpenAI (Chat Completions and Responses), Anthropic, Gemini and LangChain messages, or any object or dict with the same usage fields. If a gateway such as OpenRouter reports the billed cost, that is used instead.
+- **Built-in prices:** about 290 models from OpenAI, Anthropic, Google, Mistral, DeepSeek, xAI and Groq, including long-context pricing. They come from [LiteLLM's price list](https://github.com/BerriAI/litellm) and are refreshed each release.
+- **Other models:** a model missing from the table still has its tokens counted, and Fences logs a warning once, because `budget_usd` can't stop a model it can't price. Add prices in USD per 1M tokens:
+  ```python
+  agentfences.init(local_only=True, prices={"my-finetune": {"input": 2.0, "output": 6.0}})
+  ```
+- **Extra costs:** add a paid tool call or anything else to the step with `checkpoint(response, cost_delta_usd=0.01)`. Without a response, `cost_delta_usd` is the step's whole cost.
+- **Streaming:** pass the final message, or the last chunk once it carries usage (OpenAI: `stream_options={"include_usage": True}`).
 
 ## Quickstart — no backend needed
 
@@ -105,7 +122,7 @@ from agentfences import governed, checkpoint_sync
 def my_agent(query: str):
     while True:
         response = call_llm(query)
-        result = checkpoint_sync(cost_delta_usd=0.02, tokens_used=response.usage.total_tokens)
+        result = checkpoint_sync(response)
         if result.breached:
             return result.message
 ```
