@@ -100,17 +100,6 @@ print(asyncio.run(my_agent("hello")))
 
 A limit trips once it is exceeded, not when it is reached: a $0.10 budget allows exactly $0.10 of spend.
 
-## Legacy exception mode
-
-If you prefer exceptions over result objects:
-
-```python
-@governed(budget_usd=0.50, raise_on_breach=True)
-async def my_agent():
-    ...
-    await checkpoint(cost_delta_usd=0.02)  # raises BudgetExceeded, IterationLimitReached, etc.
-```
-
 ## Sync agents and streaming
 
 `@governed` works on sync functions, async functions and async generators. Sync agents use `checkpoint_sync()`, which takes the same arguments and returns the same `CheckpointResult`:

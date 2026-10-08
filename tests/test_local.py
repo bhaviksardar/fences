@@ -283,8 +283,19 @@ def check_unknown_model_warns_and_custom_prices():
     assert close(spent, 8.0)  # 1M in at $2 + 1M out at $6
 
 
+def check_breach_messages():
+    # Server-side stop reasons get their own wording, so an agent can tell the user why it stopped
+    from agentfences.core import _make_breach_result
+    for breach in ("stopped_by_user", "key_daily_budget", "key_monthly_budget", "fences_unreachable"):
+        result = _make_breach_result(breach)
+        assert result.breached and result.breach_type == breach
+        assert "Governance limit reached" not in result.message, breach
+        assert "governance limit has been reached" not in result.system_prompt, breach
+
+
 if __name__ == "__main__":
     check_requires_init()
+    check_breach_messages()
     agentfences.init(local_only=True)
     checks = [
         check_readme_quickstart, check_limits_trip_once_exceeded, check_time_limit,
