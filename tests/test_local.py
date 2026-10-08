@@ -4,13 +4,17 @@ Offline checks for agentfences in local mode: no server, no API key, no network.
     pip install ./sdk && python tests/test_local.py
 """
 import asyncio
+import logging
+import math
 import socket
+from types import SimpleNamespace as NS
 
 import agentfences
 from agentfences import (
     governed, checkpoint, checkpoint_sync, log_decision, get_active_run,
     BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached,
 )
+from agentfences.pricing import price_of
 
 
 def no_network(*args, **kwargs):
@@ -173,6 +177,112 @@ def check_outside_a_run():
     log_decision("ignored outside a run")
 
 
+def priced(model, inp=0, cache_read=0, cache_write=0, out=0):
+    """Expected cost from the bundled table, so these checks survive price refreshes."""
+    p = price_of(model)
+    assert p, f"{model} missing from prices.json"
+    if "above" in p and inp + cache_read + cache_write > p["above"]:
+        p = dict(p, **p["tier"])
+    return inp * p["in"] + cache_read * p.get("cache_read", p["in"]) + cache_write * p.get("cache_write", p["in"]) + out * p["out"]
+
+
+def step(response, **extra):
+    """Run one checkpoint on a response; return (spent_usd, tokens)."""
+    @governed(budget_usd=1e9)
+    def agent():
+        result = checkpoint_sync(response, **extra)
+        return result.spent_usd, get_active_run().tokens_used
+    return agent()
+
+
+def close(a, b):
+    return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-15)
+
+
+def check_prices_each_response_shape():
+    openai_chat = NS(model="gpt-4o-2024-08-06", usage=NS(
+        prompt_tokens=1000, completion_tokens=200, prompt_tokens_details=NS(cached_tokens=400)))
+    spent, tokens = step(openai_chat)
+    assert close(spent, priced("gpt-4o", inp=600, cache_read=400, out=200)) and tokens == 1200, (spent, tokens)
+
+    openai_responses = {"model": "gpt-4o", "usage": {"input_tokens": 1000, "output_tokens": 200,
+                        "input_tokens_details": {"cached_tokens": 300, "cache_write_tokens": 500}}}
+    spent, tokens = step(openai_responses)
+    assert close(spent, priced("gpt-4o", inp=200, cache_read=300, cache_write=500, out=200)) and tokens == 1200
+
+    anthropic = NS(model="claude-sonnet-4-5-20250929", usage=NS(
+        input_tokens=100, output_tokens=50, cache_read_input_tokens=1000, cache_creation_input_tokens=500))
+    spent, tokens = step(anthropic)
+    assert close(spent, priced("claude-sonnet-4-5", inp=100, cache_read=1000, cache_write=500, out=50)) and tokens == 1650
+
+    long_context = NS(model="claude-sonnet-4-5", usage=NS(
+        input_tokens=250_000, output_tokens=1000, cache_read_input_tokens=None, cache_creation_input_tokens=None))
+    spent, _ = step(long_context)
+    assert close(spent, priced("claude-sonnet-4-5", inp=250_000, out=1000))
+    assert spent > priced("claude-sonnet-4-5", inp=200_000, out=1000) * 1.25  # the long-context tier applied
+
+    gemini = NS(model_version="gemini-2.5-flash", usage_metadata=NS(
+        prompt_token_count=1000, candidates_token_count=100, thoughts_token_count=300, cached_content_token_count=None))
+    spent, tokens = step(gemini)
+    assert close(spent, priced("gemini-2.5-flash", inp=1000, out=400)) and tokens == 1400  # thinking billed as output
+
+    langchain = NS(response_metadata={"model_name": "gpt-4o"}, usage_metadata={
+        "input_tokens": 1000, "output_tokens": 100, "input_token_details": {"cache_read": 200}})
+    spent, tokens = step(langchain)
+    assert close(spent, priced("gpt-4o", inp=800, cache_read=200, out=100)) and tokens == 1100
+
+    gateway = {"model": "anything", "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0123}}
+    assert step(gateway) == (0.0123, 15)  # a reported cost wins over the table
+
+
+def check_extra_costs_and_old_calls():
+    resp = NS(model="gpt-4o", usage=NS(prompt_tokens=1000, completion_tokens=0, prompt_tokens_details=None))
+    spent, tokens = step(resp, cost_delta_usd=0.01, tokens_used=5)  # e.g. a paid tool call on top
+    assert close(spent, priced("gpt-4o", inp=1000) + 0.01) and tokens == 1005
+
+    @governed(budget_usd=1)
+    def old_style():
+        checkpoint_sync(0.02, 450)  # pre-0.1.7 positional form still works
+        run = get_active_run()
+        return run.cost_usd, run.tokens_used
+    assert old_style() == (0.02, 450)
+
+
+def check_budget_stops_on_real_usage():
+    resp = NS(model="gpt-4o", usage=NS(prompt_tokens=10_000, completion_tokens=1000, prompt_tokens_details=None))
+    per_call = priced("gpt-4o", inp=10_000, out=1000)
+
+    @governed(budget_usd=per_call * 3.5)
+    async def agent():
+        for calls in range(100):
+            result = await checkpoint(resp)
+            if result.breached:
+                return calls, result
+    calls, result = asyncio.run(agent())
+    assert calls == 3 and result.breach_type == "budget_exceeded" and close(result.spent_usd, per_call * 4)
+
+
+def check_unknown_model_warns_and_custom_prices():
+    seen = []
+    handler = logging.Handler()
+    handler.emit = lambda record: seen.append(record.getMessage())
+    logging.getLogger("agentfences").addHandler(handler)
+    try:
+        resp = {"model": "my-finetune-v2", "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}}
+        assert step(resp) == (0.0, 2_000_000)  # tokens still counted
+        step(resp)
+        assert len([m for m in seen if "no price for model 'my-finetune-v2'" in m]) == 1  # warned once
+
+        assert step(NS(model="gpt-4o")) == (0.0, 0)
+        assert any("has no token usage" in m for m in seen)
+    finally:
+        logging.getLogger("agentfences").removeHandler(handler)
+
+    agentfences.init(local_only=True, prices={"my-finetune-v2": {"input": 2.0, "output": 6.0}})
+    spent, _ = step(resp)
+    assert close(spent, 8.0)  # 1M in at $2 + 1M out at $6
+
+
 if __name__ == "__main__":
     check_requires_init()
     agentfences.init(local_only=True)
@@ -180,6 +290,8 @@ if __name__ == "__main__":
         check_readme_quickstart, check_limits_trip_once_exceeded, check_time_limit,
         check_raise_on_breach, check_sync_agent, check_streaming_agent,
         check_concurrent_runs_are_independent, check_nested_runs, check_outside_a_run,
+        check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
+        check_unknown_model_warns_and_custom_prices,
     ]
     for check in checks:
         check()
