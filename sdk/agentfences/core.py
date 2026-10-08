@@ -75,6 +75,13 @@ def _make_breach_result(breach_type: str, **kwargs) -> CheckpointResult:
             f"I've reached my token limit ({kwargs.get('tokens_used', 0):,} tokens). "
             f"I'll summarize what I found so far."
         ),
+        "stopped_by_user": "I was stopped from the Fences dashboard. I'll summarize what I found so far.",
+        "key_daily_budget": "My daily spending cap has been reached. I'll summarize what I found so far.",
+        "key_monthly_budget": "My monthly spending cap has been reached. I'll summarize what I found so far.",
+        "fences_unreachable": (
+            "I can't reach Fences to confirm I'm within my limits, so I'm stopping to be safe. "
+            "I'll summarize what I found so far."
+        ),
     }
 
     system_prompts = {
@@ -98,6 +105,24 @@ def _make_breach_result(breach_type: str, **kwargs) -> CheckpointResult:
             f"You have reached your token limit ({kwargs.get('tokens_used', 0):,} tokens used). "
             f"Stop your current task immediately and summarize what you have found or "
             f"completed so far. Tell the user you stopped due to the token limit."
+        ),
+        "stopped_by_user": (
+            "A person stopped this run from the Fences dashboard. Stop your current task immediately "
+            "and summarize what you have found or completed so far. Tell the user you were stopped by an operator."
+        ),
+        "key_daily_budget": (
+            "Your daily spending cap, across all of your runs, has been reached. Stop your current task "
+            "immediately and summarize what you have found or completed so far. Tell the user you stopped "
+            "because the daily cap was reached."
+        ),
+        "key_monthly_budget": (
+            "Your monthly spending cap, across all of your runs, has been reached. Stop your current task "
+            "immediately and summarize what you have found or completed so far. Tell the user you stopped "
+            "because the monthly cap was reached."
+        ),
+        "fences_unreachable": (
+            "Your governance service can't be reached and you are configured to stop when that happens. "
+            "Stop your current task immediately and summarize what you have found or completed so far."
         ),
     }
 
