@@ -2,7 +2,7 @@
 
 [![test](https://github.com/bhaviksardar/fences/actions/workflows/test.yml/badge.svg)](https://github.com/bhaviksardar/fences/actions/workflows/test.yml)
 
-Runtime governance for AI agents. Budget limits, loop protection, token governance, and a decision audit trail — in three lines of code.
+The open-source SDK for Fences, on-call for AI agents. It records what your agent decides and why, enforces limits the agent can't raise, and lets you stop a run from the Fences dashboard. Works offline too: local limits, no account.
 
 ```python
 import agentfences
