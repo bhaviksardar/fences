@@ -4,11 +4,6 @@
 *.pem
 *.key
 
-# Tests — kept local only, not part of the public repo
-sdk/tests/
-sdk/pytest.ini
-sdk/requirements-dev.txt
-
 # Local database
 *.db
 *.sqlite

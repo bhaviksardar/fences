@@ -174,6 +174,10 @@ def _ask(reason: str, amount_usd: Optional[float]):
     return run, approval_id
 
 
+def _waiting(run, approval_id: str, deadline: float) -> bool:
+    return run.approvals.get(approval_id) is None and time.monotonic() < deadline
+
+
 def _settle(run, approval_id: str) -> Approval:
     from .core import record_event
     run.awaiting -= 1
@@ -192,7 +196,7 @@ def request_approval_sync(reason: str, amount_usd: Optional[float] = None, timeo
         return asked
     run, approval_id = asked
     deadline = time.monotonic() + timeout_s
-    while run.approvals.get(approval_id) is None and time.monotonic() < deadline:
+    while _waiting(run, approval_id, deadline):
         time.sleep(0.1)
     return _settle(run, approval_id)
 
@@ -214,6 +218,6 @@ async def request_approval(reason: str, amount_usd: Optional[float] = None, time
         return asked
     run, approval_id = asked
     deadline = time.monotonic() + timeout_s
-    while run.approvals.get(approval_id) is None and time.monotonic() < deadline:
+    while _waiting(run, approval_id, deadline):
         await asyncio.sleep(0.1)
     return _settle(run, approval_id)
