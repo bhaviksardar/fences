@@ -1,0 +1,24 @@
+{
+  "name": "agentfences",
+  "version": "0.3.0",
+  "description": "On-call for AI agents: limits your agents can't raise, cost tracking, a decision trail, and a stop button",
+  "license": "MIT",
+  "author": "Bhavik Sardar",
+  "homepage": "https://github.com/bhaviksardar/fences",
+  "repository": { "type": "git", "url": "git+https://github.com/bhaviksardar/fences.git", "directory": "sdk-js" },
+  "keywords": ["ai", "agents", "governance", "llm", "budget", "on-call"],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "files": ["dist"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "node scripts/prices.mjs && tsc",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
