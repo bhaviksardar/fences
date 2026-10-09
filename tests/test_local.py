@@ -307,10 +307,11 @@ class RecordingClient:
         out, self.heartbeat_commands = self.heartbeat_commands, []
         return {"commands": out}
 
-    def request_approval(self, run_id, approval_id, reason, amount_usd):
+    def request_approval(self, run_id, approval_id, reason, amount_usd, timeout_s):
         if not self.approvals_supported:
             return {"unsupported": True}
-        self.approval_requests.append({"run_id": run_id, "approval_id": approval_id, "reason": reason, "amount_usd": amount_usd})
+        self.approval_requests.append({"run_id": run_id, "approval_id": approval_id, "reason": reason,
+                                       "amount_usd": amount_usd, "timeout_s": timeout_s})
         return {"ok": True}
 
     def log_decision(self, run_id, iteration, reasoning, action):
@@ -639,7 +640,7 @@ def check_approvals():
         def approver():
             wait_for(lambda: sent.approval_requests)
             req = sent.approval_requests[-1]
-            assert req["reason"] == "Refund $240 to order 1182?" and req["amount_usd"] == 240
+            assert req["reason"] == "Refund $240 to order 1182?" and req["amount_usd"] == 240 and req["timeout_s"] == 600
             time.sleep(0.1)
             sent.heartbeat_commands = [{"run_id": req["run_id"], "type": "approval", "approval_id": req["approval_id"],
                                         "granted": True, "by": "dana@example.com", "note": "ok, loyal customer", "amount_usd": 240}]
