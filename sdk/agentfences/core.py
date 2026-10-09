@@ -275,10 +275,6 @@ def init(
     control.configure(_client, heartbeat_s, pause_timeout_s)
 
 
-def _get_client() -> Optional[GovClient]:
-    return _client
-
-
 def _require_init():
     if not _local_only and _client is None:
         raise RuntimeError(
@@ -405,7 +401,7 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
         raise_on_breach=raise_on_breach,
         context=events.current_context(),
     )
-    client = _get_client()
+    client = _client
     if client:
         # The run must start even if redaction drops its context: limits depend on it
         sent = events.redact({"type": "run_start", "agent_name": agent_name, "context": dict(run.context)}) if run.context else None
@@ -421,7 +417,7 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
 
 def _end_run(run: RunState, status: str, error: Optional[str] = None):
     control.unregister(run)
-    client = _get_client()
+    client = _client
     if client:
         # The run must end even if redaction drops its error details
         sent = events.redact({"type": "run_end", "status": status, "error": error, "exception": run.exception}) if error else None
@@ -654,7 +650,7 @@ def record_event(event: dict):
         return
     event = {"ts": time.time(), "iteration": run.iterations, **event}
     run.events.append(event)
-    client = _get_client()
+    client = _client
     if client is None or not _events_supported:
         return
     sent = events.redact(event)
@@ -685,7 +681,7 @@ def log_decision(reasoning: str, action: Optional[str] = None):
     }
     run.decisions.append(entry)
 
-    client = _get_client()
+    client = _client
     sent = events.redact({"type": "decision", "reasoning": reasoning, "action": action}) if client else None
     if sent and sent.get("reasoning"):
         _decisions.put(("decision", client, {"run_id": run.run_id, "iteration": run.iterations,
