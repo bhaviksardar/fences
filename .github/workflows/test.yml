@@ -18,3 +18,5 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install ./sdk
       - run: python tests/test_local.py
+      - run: pip install openai anthropic
+      - run: python tests/test_instrument.py

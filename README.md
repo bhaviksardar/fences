@@ -122,6 +122,32 @@ def my_agent(query: str):
 
 A governed async generator (a streaming agent) stays governed until the stream is exhausted. Concurrent agents in one event loop and nested `@governed` calls each get their own run.
 
+## Evidence: tool calls and model calls
+
+On-call can only explain what was recorded. Fences records two kinds of call on the run automatically, alongside your `log_decision()` entries.
+
+**Tool calls.** Decorate your agent's tools:
+
+```python
+@agentfences.tool
+def web_search(query: str, limit: int = 5) -> list: ...
+
+@agentfences.tool(name="fetch")
+async def fetch_page(url: str) -> str: ...
+```
+
+Each call records the tool's name, a short summary of its arguments (`query='cats', limit=5`), whether it succeeded (and the error if not) and how long it took. Exceptions still reach your code, and outside a governed run the tool is just called.
+
+**Model calls.** Pass `instrument=True` to record every OpenAI and Anthropic call made inside a governed run, with no other code changes:
+
+```python
+agentfences.init(api_key="fc_...", endpoint="https://...", instrument=True)
+```
+
+Each call records the model, tokens (including cache reads and writes), cost, latency, and the error and status code if it failed (a 429 rate limit, say). This is a record only: it doesn't count as a checkpoint or add to the run's spend, so keep calling `checkpoint(response)` where limits should be checked. Streamed calls are recorded without token counts.
+
+Both kinds of call are kept on the run (`get_active_run().events`, newest 1,000) and, in cloud mode, sent to Fences in the background in batches. They pass through the `redact` hook first as `tool_call` (`name`, `args`, `error`) and `llm_call` (`model`, `error`) events. A Fences server that doesn't accept them yet gets a single warning and nothing else changes.
+
 ## Context, errors and redaction
 
 Tag runs so on-call can see which deploy and which customer a run belongs to:
@@ -148,7 +174,7 @@ def redact(event):
 agentfences.init(api_key="fc_...", endpoint="https://...", redact=redact)
 ```
 
-Events have a `type` of `run_start` (`context`), `decision` (`reasoning`, `action`) or `run_end` (`status`, `error`, `exception`). If the hook raises, that event is dropped rather than sent unredacted, and a warning is logged once. Runs still start and end, so limits keep working.
+Events have a `type` of `run_start` (`context`), `decision` (`reasoning`, `action`), `tool_call` (`name`, `args`, `error`), `llm_call` (`model`, `error`) or `run_end` (`status`, `error`, `exception`). If the hook raises, that event is dropped rather than sent unredacted, and a warning is logged once. Runs still start and end, so limits keep working.
 
 ## Modes
 
