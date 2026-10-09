@@ -280,6 +280,7 @@ class RecordingClient:
         self.batches = []
         self.events_supported = self.heartbeat_supported = self.approvals_supported = True
         self.quarantine = False
+        self.start_limits = None  # what run start answers with as the effective limits
         self.heartbeat_commands, self.checkpoint_commands = [], []  # handed out on the next call
         self.beats, self.approval_requests = [], []
 
@@ -287,7 +288,7 @@ class RecordingClient:
         if self.quarantine:
             return {"ok": False, "quarantined": True, "detail": "quarantined"}
         self.sent.append(("start", {"agent_name": agent_name, "context": context}))
-        return {"ok": True}
+        return {"ok": True, "limits": self.start_limits} if self.start_limits else {"ok": True}
 
     def checkpoint(self, *args):
         out, self.checkpoint_commands = self.checkpoint_commands, []
@@ -643,6 +644,19 @@ def check_approvals():
         agentfences.init(local_only=True)
 
 
+def check_server_limits_are_adopted():
+    sent = cloud()
+    sent.start_limits = {"budget_usd": 0.05, "max_iterations": 3, "max_duration_ms": 300000, "max_tokens": 0}
+    try:
+        @governed(budget_usd=10, max_iterations=100)  # the code asks for more than the agent's ceilings allow
+        def agent():
+            run = get_active_run()
+            return run.budget_usd, run.max_iterations
+        assert agent() == (0.05, 3)  # so the offline fallback enforces the server's capped numbers
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_quarantine():
     sent = cloud()
     sent.quarantine = True
@@ -694,7 +708,7 @@ if __name__ == "__main__":
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
         check_tool_calls, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
-        check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals, check_quarantine,
+        check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals, check_server_limits_are_adopted, check_quarantine,
         check_old_server_without_control,
     ]
     for check in checks:

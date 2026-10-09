@@ -404,6 +404,10 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
                                 context=(sent or {}).get("context"))
         if resp.get("quarantined"):  # refused before any agent code runs
             raise AgentQuarantined(agent_name, resp.get("detail"))
+        # The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
+        for k, v in (resp.get("limits") or {}).items():
+            if k in control.LIMIT_FIELDS and isinstance(v, (int, float)):
+                setattr(run, k, v)
         if "network_error" in resp:
             _warn_unreachable(run, resp["network_error"])
     control.register(run)
