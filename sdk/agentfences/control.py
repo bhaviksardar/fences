@@ -182,7 +182,7 @@ def _settle(run, approval_id: str) -> Approval:
     from .core import record_event
     run.awaiting -= 1
     answer = run.approvals.pop(approval_id, None) or Approval(False, note="No answer before the timeout")
-    if answer.granted and answer.amount_usd:
+    if answer.granted and answer.amount_usd and run.budget_usd is not None:  # an unlimited run stays unlimited
         run.budget_usd += answer.amount_usd
     record_event({"type": "approval_answered", "approval_id": approval_id, "granted": answer.granted,
                   "by": answer.by, "note": answer.note, "amount_usd": answer.amount_usd})

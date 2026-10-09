@@ -160,7 +160,7 @@ EVENT_BATCH = 50
 class RunState:
     run_id: str
     agent_name: str
-    budget_usd: float
+    budget_usd: Optional[float]  # None: no budget anywhere, unlimited spend
     max_iterations: int
     max_duration_ms: int
     max_tokens: int
@@ -290,11 +290,14 @@ def _warn_unreachable(run: RunState, err: str):
 
 # ── Decorator ─────────────────────────────────────────────────────────────────
 
+DEFAULT_LIMITS = {"max_iterations": 100, "max_duration_ms": 300_000, "max_tokens": 0}  # when set nowhere
+
+
 def governed(
-    budget_usd: float,
-    max_iterations: int = 100,
-    max_duration_ms: int = 300_000,
-    max_tokens: int = 0,
+    budget_usd: Optional[float] = None,
+    max_iterations: Optional[int] = None,
+    max_duration_ms: Optional[int] = None,
+    max_tokens: Optional[int] = None,
 ):
     """
     Decorator that applies governance policy to an agent function.
@@ -305,6 +308,10 @@ def governed(
         max_iterations: Maximum number of checkpoint() calls allowed.
         max_duration_ms: Maximum wall-clock duration in milliseconds.
         max_tokens: Maximum total tokens (input + output) allowed. 0 = no limit.
+
+    Every limit is optional. In cloud mode a limit left out here comes from the agent's
+    page in the Fences dashboard. Limits set nowhere default to 100 steps, 5 minutes and
+    no token limit, and no budget: the run is unlimited in spend and Fences warns about it.
 
     checkpoint() never raises: a crossed limit comes back as a CheckpointResult with
     breached=True, so the agent can wrap up gracefully.
@@ -385,29 +392,47 @@ def _outcome(run: RunState, exc: Optional[BaseException]):
     return "error", f"{e['type']}: {e['message']}" if e["message"] else e["type"]
 
 
+_noticed: set = set()  # (agent, code) pairs already logged by this process
+
+
+def _notice(agent_name: str, code: str, message: str):
+    """Log a server or SDK notice about an agent once per process, e.g. that it has no budget."""
+    if (agent_name, code) not in _noticed:
+        _noticed.add((agent_name, code))
+        log.warning("agentfences: %s", message)
+
+
 def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens) -> RunState:
     run_id = str(uuid.uuid4())
+    in_code = {"max_iterations": max_iterations, "max_duration_ms": max_duration_ms, "max_tokens": max_tokens}
     run = RunState(
         run_id=run_id,
         agent_name=agent_name,
         budget_usd=budget_usd,
-        max_iterations=max_iterations,
-        max_duration_ms=max_duration_ms,
-        max_tokens=max_tokens,
+        **{k: DEFAULT_LIMITS[k] if v is None else v for k, v in in_code.items()},
         context=events.current_context(),
     )
     client = _client
+    if not client and budget_usd is None:
+        _notice(agent_name, "no_budget", f"{agent_name} has no budget, so its spend isn't capped. "
+                                         f"Set one with @governed(budget_usd=...).")
     if client:
         # The run must start even if redaction drops its context: limits depend on it
         sent = events.redact({"type": "run_start", "agent_name": agent_name, "context": dict(run.context)}) if run.context else None
+        # Limits left out in code go as null: the server fills them from the agent's dashboard settings
         resp = client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens,
                                 context=(sent or {}).get("context"))
         if resp.get("quarantined"):  # refused before any agent code runs
             raise AgentQuarantined(agent_name, resp.get("detail"))
         # The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
         for k, v in (resp.get("limits") or {}).items():
-            if k in control.LIMIT_FIELDS and isinstance(v, (int, float)):
-                setattr(run, k, v)
+            if k == "budget_usd" and v is None or k in control.LIMIT_FIELDS and isinstance(v, (int, float)):
+                setattr(run, k, v)  # a null budget means the run is unlimited in spend
+        for n in resp.get("notices") or ():
+            _notice(agent_name, n.get("code", ""), n.get("message", "") + (f" {n['url']}" if n.get("url") else ""))
+        if "limits" not in resp and run.budget_usd is None and "network_error" not in resp:
+            _notice(agent_name, "no_budget", f"{agent_name} has no budget, so its spend isn't capped. "
+                                             f"Set one on its page in the Fences dashboard.")
         if "network_error" in resp:
             _warn_unreachable(run, resp["network_error"])
     control.register(run)
@@ -427,7 +452,7 @@ def _end_run(run: RunState, status: str, error: Optional[str] = None):
 
 def _local_breach(run: RunState) -> Optional[str]:
     # Limits trip only once exceeded, same rule as the backend.
-    if round(run.cost_usd, 9) > run.budget_usd:  # round away float drift (0.02*5 != 0.10)
+    if run.budget_usd is not None and round(run.cost_usd, 9) > run.budget_usd:  # round away float drift (0.02*5 != 0.10)
         return "budget_exceeded"
     if run.iterations > run.max_iterations:
         return "iteration_limit"
@@ -484,7 +509,7 @@ def _breach(run: RunState) -> CheckpointResult:
     result = _make_breach_result(
         run.last_breach,
         spent=run.cost_usd,
-        limit=run.budget_usd,
+        limit=run.budget_usd or 0,  # None (no budget) can't be formatted; only budget breaches show it
         iterations=run.iterations,
         tokens_used=run.tokens_used,
         duration_ms=run.duration_ms,
