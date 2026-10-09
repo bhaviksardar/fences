@@ -98,7 +98,7 @@
 </style>
 </head>
 <body>
-<div style="background:var(--ink);color:var(--paper);text-align:center;font:13px/1.5 var(--sans);padding:8px 16px">Fences Cloud (dashboard, stored audit trail, team sign-in) is coming soon. The SDK is free and works today in local mode: <a href="#quickstart" style="color:inherit">quickstart</a>.</div>
+<div style="background:var(--ink);color:var(--paper);text-align:center;font:13px/1.5 var(--sans);padding:8px 16px">Fences Cloud (dashboard, alerts, stored audit trail, team sign-in) is coming soon. The SDK is free and works today in local mode: <a href="#quickstart" style="color:inherit">quickstart</a>.</div>
 <nav class="top">
   <div class="wrap">
     <a class="logo" href="../">(|=|) Fences<small>docs</small></a>
@@ -114,6 +114,7 @@
     <a href="#connect">Connect to the dashboard</a>
     <b>Guides</b>
     <a href="#limits">Limits</a>
+    <a href="#costs">Cost tracking</a>
     <a href="#breaches">Handling a breach</a>
     <a href="#llm">Real LLM loops</a>
     <a href="#agent-shapes">Sync, streaming &amp; concurrent</a>
@@ -132,7 +133,7 @@
     <div id="overview">
       <p class="eyebrow">Documentation</p>
       <h1>Put <em>fences</em> around your agents.</h1>
-      <p class="lead">Fences caps what an AI agent can spend, how many steps it takes, how long it runs and how many tokens it burns. It also records why the agent took each step, and shows every run live in a dashboard.</p>
+      <p class="lead">Fences is on-call for AI agents. It shows every run live, records what the agent decided and why, lets you stop any run in one click, and enforces limits on spend, steps, time and tokens that the agent can't raise itself.</p>
       <div class="grid2">
         <div class="card"><b>The SDK</b><code>agentfences</code> on PyPI. One decorator on your agent function, one <code>checkpoint()</code> call after each model call.</div>
         <div class="card"><b>The dashboard</b>Live runs, the decision trail behind each one, and limits you can raise mid-run to let a stopped agent continue.</div>
@@ -237,16 +238,29 @@ agentfences.init(
       <ul>
         <li><strong>A limit trips only once it is exceeded.</strong> <code>budget_usd=0.10</code> lets the run spend exactly $0.10, and <code>max_iterations=5</code> allows five full checkpoints; the sixth trips.</li>
         <li><strong>One iteration = one <code>checkpoint()</code> call.</strong> Call it once per model call (or once per loop turn) so the count means something.</li>
-        <li><strong><code>cost_delta_usd</code> and <code>tokens_used</code> are amounts for that step</strong>, not running totals. Fences adds them up.</li>
+        <li><strong>Each checkpoint reports one step.</strong> Pass that step's model response, or its <code>cost_delta_usd</code> and <code>tokens_used</code>, never running totals. Fences adds them up.</li>
         <li><strong>Limits are checked at checkpoints, not in between.</strong> Fences never interrupts a model call that is already running. A run with a 5-minute limit that makes one 10-minute call finds out at the next checkpoint.</li>
         <li>If several limits are exceeded at once, the order is spend, then steps, then time, then tokens.</li>
       </ul>
-      <p>Fences does not know model prices; you pass the cost of each step. A small helper works well:</p>
-<div class="code"><pre><code><span class="c"># Your model's price per token, in USD. Check your provider's pricing page.</span>
-PRICE_IN, PRICE_OUT = <span class="k">2.50</span> / <span class="k">1_000_000</span>, <span class="k">10.00</span> / <span class="k">1_000_000</span>
+      <p>You don't need to know what a call costs: pass the response and Fences prices it. See <a href="#costs">Cost tracking</a>.</p>
+    </section>
 
-<span class="k">def</span> cost_of(input_tokens: int, output_tokens: int) -> float:
-    <span class="k">return</span> input_tokens * PRICE_IN + output_tokens * PRICE_OUT</code></pre></div>
+    <!-- Costs -->
+    <section id="costs">
+      <p class="eyebrow">Guide</p>
+      <h2>Cost tracking <span class="tag">0.1.7</span></h2>
+      <p>Pass the model's response to <code>checkpoint()</code> and Fences works out what the call cost. It reads the model name and token usage, including cache reads and writes and reasoning tokens, and prices them from a built-in table of current list prices. You never look up a price.</p>
+<div class="code"><pre><code>response = client.chat.completions.create(model=<span class="s">"gpt-4o"</span>, messages=messages)
+result = <span class="k">await</span> checkpoint(response)
+print(result.spent_usd)   <span class="c"># the run's total so far</span></code></pre></div>
+      <ul>
+        <li><strong>Supported responses:</strong> OpenAI (Chat Completions and Responses), Anthropic, Gemini and LangChain messages, or any object or dict with the same usage fields. If a gateway such as OpenRouter reports the billed cost, that is used instead.</li>
+        <li><strong>Built-in prices:</strong> about 290 models from OpenAI, Anthropic, Google, Mistral, DeepSeek, xAI and Groq, including long-context pricing, from <a href="https://github.com/BerriAI/litellm">LiteLLM's price list</a>. They're refreshed with each release.</li>
+        <li><strong>Other models:</strong> a model missing from the table still has its tokens counted, and Fences logs a warning once, because <code>budget_usd</code> can't stop a model it can't price. Add prices in USD per 1M tokens: <code>agentfences.init(..., prices={"my-finetune": {"input": 2.0, "output": 6.0}})</code>.</li>
+        <li><strong>Extra costs:</strong> add a paid tool call or anything else to the step with <code>checkpoint(response, cost_delta_usd=0.01)</code>. Without a response, <code>cost_delta_usd</code> and <code>tokens_used</code> are the step's whole cost and tokens.</li>
+        <li><strong>Streaming:</strong> pass the final message, or the last chunk once it carries usage (OpenAI: <code>stream_options={"include_usage": True}</code>).</li>
+        <li>Prices are standard list prices: batch, priority and flex discounts aren't applied.</li>
+      </ul>
     </section>
 
     <!-- Breaches -->
@@ -254,7 +268,7 @@ PRICE_IN, PRICE_OUT = <span class="k">2.50</span> / <span class="k">1_000_000</s
       <p class="eyebrow">Guide</p>
       <h2>Handling a breach</h2>
       <p>By default <code>checkpoint()</code> never raises. It returns a <code>CheckpointResult</code> that your agent reads, so it can stop cleanly instead of crashing halfway through a task.</p>
-<div class="code"><pre><code>result = <span class="k">await</span> checkpoint(cost_delta_usd=<span class="k">0.02</span>, tokens_used=<span class="k">450</span>)
+<div class="code"><pre><code>result = <span class="k">await</span> checkpoint(response)
 
 result.ok             <span class="c"># True while within every limit</span>
 result.breached       <span class="c"># True once a limit is exceeded</span>
@@ -268,19 +282,6 @@ result.system_prompt  <span class="c"># instruction you can give the model so it
 <div class="code"><pre><code><span class="k">if</span> result.breached:
     messages.append({<span class="s">"role"</span>: <span class="s">"system"</span>, <span class="s">"content"</span>: result.system_prompt})
     <span class="k">return</span> call_llm(messages)   <span class="c"># this final call isn't counted; there is no checkpoint after it</span></code></pre></div>
-      <h3>Option 3: raise exceptions</h3>
-      <p>Pass <code>raise_on_breach=True</code> to get an exception instead. All of them subclass <code>FencesError</code>.</p>
-<div class="code"><pre><code><span class="k">from</span> agentfences <span class="k">import</span> governed, checkpoint, FencesError
-
-@governed(budget_usd=<span class="k">0.50</span>, raise_on_breach=<span class="k">True</span>)
-<span class="k">async def</span> my_agent():
-    ...
-    <span class="k">await</span> checkpoint(cost_delta_usd=<span class="k">0.02</span>)   <span class="c"># raises BudgetExceeded, IterationLimitReached, ...</span>
-
-<span class="k">try</span>:
-    <span class="k">await</span> my_agent()
-<span class="k">except</span> FencesError <span class="k">as</span> e:
-    print(<span class="s">"stopped:"</span>, e)                      <span class="c"># e.g. "Run exceeded budget: spent $0.5200 of $0.5000 limit"</span></code></pre></div>
       <h3>What happens to the run</h3>
       <p>The run is marked <code>breached</code> the moment a limit trips. Further checkpoints in that run keep returning the breach, unless someone raises the limit in the dashboard (see <a href="#dashboard">Raise limits and resume</a>). When the function returns, the run ends with status <code>breached</code>, <code>success</code> or <code>error</code> (an exception other than a Fences one was raised).</p>
     </section>
@@ -302,12 +303,7 @@ client = AsyncOpenAI()
     <span class="k">while True</span>:
         log_decision(reasoning=<span class="s">"asking the model for the next step"</span>, action=<span class="s">"llm_call"</span>)
         resp = <span class="k">await</span> client.chat.completions.create(model=MODEL, messages=messages, tools=TOOLS)
-        u = resp.usage
-
-        result = <span class="k">await</span> checkpoint(
-            cost_delta_usd=cost_of(u.prompt_tokens, u.completion_tokens),
-            tokens_used=u.total_tokens,
-        )
+        result = <span class="k">await</span> checkpoint(resp)   <span class="c"># Fences reads the usage and prices the call</span>
         <span class="k">if</span> result.breached:
             messages.append({<span class="s">"role"</span>: <span class="s">"system"</span>, <span class="s">"content"</span>: result.system_prompt})
             final = <span class="k">await</span> client.chat.completions.create(model=MODEL, messages=messages)
@@ -318,15 +314,10 @@ client = AsyncOpenAI()
             <span class="k">return</span> msg.content
         messages += [msg, *<span class="k">await</span> run_tools(msg.tool_calls)]</code></pre></div>
       <h3>Anthropic messages</h3>
-      <p>The same loop; only the usage field names differ.</p>
+      <p>The same loop. Pass the response as it is; Fences reads Anthropic's usage, including cache reads and writes.</p>
 <div class="code"><pre><code>resp = <span class="k">await</span> client.messages.create(model=MODEL, max_tokens=<span class="k">1024</span>, messages=messages, tools=TOOLS)
-u = resp.usage
-
-result = <span class="k">await</span> checkpoint(
-    cost_delta_usd=cost_of(u.input_tokens, u.output_tokens),
-    tokens_used=u.input_tokens + u.output_tokens,
-)</code></pre></div>
-      <p class="muted"><code>MODEL</code>, <code>TOOLS</code>, <code>run_tools</code> and <code>cost_of</code> are yours; <code>cost_of</code> is the helper from <a href="#limits">Limits</a>.</p>
+result = <span class="k">await</span> checkpoint(resp)</code></pre></div>
+      <p class="muted"><code>MODEL</code>, <code>TOOLS</code> and <code>run_tools</code> are yours.</p>
     </section>
 
     <!-- Agent shapes -->
@@ -340,7 +331,7 @@ result = <span class="k">await</span> checkpoint(
 @governed(budget_usd=<span class="k">0.25</span>)
 <span class="k">def</span> classify(ticket: str) -> str:
     resp = llm.invoke(ticket)
-    result = checkpoint_sync(cost_delta_usd=<span class="k">0.01</span>, tokens_used=<span class="k">300</span>)
+    result = checkpoint_sync(resp)
     <span class="k">return</span> result.message <span class="k">if</span> result.breached <span class="k">else</span> resp</code></pre></div>
       <h3>Streaming agents <span class="tag">0.1.6</span></h3>
       <p>Decorate an async generator and the whole stream is one run. If the caller stops reading early, the run still ends cleanly.</p>
@@ -389,7 +380,7 @@ result = <span class="k">await</span> checkpoint(
       <p>This only helps an agent that is still calling <code>checkpoint()</code> after a breach, for example one that waits or retries instead of returning straight away. Runs that already ended can't be changed.</p>
       <p>Only a logged-in dashboard user can raise limits. The API key your agent holds can't, so an agent can never unfence itself.</p>
       <h3 id="ceilings">Key governance</h3>
-      <p>The limits in <code>@governed(...)</code> live in the agent's own code, so on their own they can't stop an agent that asks for more. Each API key carries its own rules, set in the dashboard and changeable only there:</p>
+      <p>The limits in <code>@governed(...)</code> live in the agent's own code, so on their own they can't stop an agent that asks for more. Add each agent on the dashboard's <b>Agent limits</b> page (<b>Add agent</b>): it gets its own API key that only it can use, and that key carries the agent's rules, changeable only there:</p>
       <ul>
         <li><b>Per-run ceilings</b> (max spend, steps, minutes and tokens): every run started with the key is capped at them, whatever it asks for. <code>/api/runs/start</code> returns the limits the run actually got.</li>
         <li><b>Daily and monthly spend caps</b> across all of the key's runs (UTC), so ending a run and starting a fresh one doesn't reset anything. Crossing one fences the run with <code>key_daily_budget</code> or <code>key_monthly_budget</code>.</li>
@@ -435,16 +426,16 @@ result = <span class="k">await</span> checkpoint(
       <h2>Python SDK</h2>
       <p>Everything is importable from <code>agentfences</code>. The latest release is on <a href="https://pypi.org/project/agentfences/">PyPI</a>.</p>
 
-      <h3><code>init(api_key=None, endpoint="http://localhost:8000", local_only=False, fail_closed=False)</code></h3>
-      <p>Call once at startup, before any governed function runs. Pass either <code>local_only=True</code>, or an <code>api_key</code> and <code>endpoint</code>. Calling a governed function before <code>init()</code> raises <code>RuntimeError</code>. <code>fail_closed</code> is new in 0.1.6.</p>
+      <h3><code>init(api_key=None, endpoint="http://localhost:8000", local_only=False, fail_closed=False, prices=None)</code></h3>
+      <p>Call once at startup, before any governed function runs. Pass either <code>local_only=True</code>, or an <code>api_key</code> and <code>endpoint</code>. Calling a governed function before <code>init()</code> raises <code>RuntimeError</code>. <code>fail_closed</code> is new in 0.1.6. <code>prices</code> (0.1.7) adds or overrides model prices, in USD per 1M tokens; see <a href="#costs">Cost tracking</a>.</p>
 
-      <h3><code>@governed(budget_usd, max_iterations=100, max_duration_ms=300_000, max_tokens=0, raise_on_breach=False)</code></h3>
+      <h3><code>@governed(budget_usd, max_iterations=100, max_duration_ms=300_000, max_tokens=0)</code></h3>
       <p>Makes each call of the decorated function a run with these limits. Works on async functions, and (from 0.1.6) on sync functions and async generators. The run is named after the function.</p>
 
-      <h3><code>await checkpoint(cost_delta_usd=0.0, tokens_used=0) → CheckpointResult</code></h3>
-      <p>Records one step's cost and tokens, counts one iteration, and checks every limit. Outside a governed function it does nothing and returns an OK result.</p>
+      <h3><code>await checkpoint(response=None, cost_delta_usd=0.0, tokens_used=0) → CheckpointResult</code></h3>
+      <p>Records one step, counts one iteration, and checks every limit. Pass the model's <code>response</code> (0.1.7) and Fences prices it; <code>cost_delta_usd</code> and <code>tokens_used</code> add extra amounts, or are the whole step without a response. Outside a governed function it does nothing and returns an OK result.</p>
 
-      <h3><code>checkpoint_sync(cost_delta_usd=0.0, tokens_used=0) → CheckpointResult</code> <span class="tag">0.1.6</span></h3>
+      <h3><code>checkpoint_sync(response=None, cost_delta_usd=0.0, tokens_used=0) → CheckpointResult</code> <span class="tag">0.1.6</span></h3>
       <p>The same, for synchronous code.</p>
 
       <h3><code>log_decision(reasoning, action=None)</code></h3>
@@ -462,24 +453,13 @@ result = <span class="k">await</span> checkpoint(
         <tbody>
           <tr><td><code>ok</code></td><td>bool</td><td><code>not breached</code></td></tr>
           <tr><td><code>breached</code></td><td>bool</td><td>A limit has been exceeded</td></tr>
-          <tr><td><code>breach_type</code></td><td>str | None</td><td>See <a href="#limits">Limits</a>; also <code>fences_unreachable</code> when failing closed</td></tr>
+          <tr><td><code>breach_type</code></td><td>str | None</td><td>See <a href="#limits">Limits</a>; from the server also <code>stopped_by_user</code>, <code>key_daily_budget</code> and <code>key_monthly_budget</code>; <code>fences_unreachable</code> when failing closed</td></tr>
           <tr><td><code>message</code></td><td>str</td><td>First-person text for the user</td></tr>
           <tr><td><code>system_prompt</code></td><td>str</td><td>Instruction telling the model to stop and summarise</td></tr>
+          <tr><td><code>spent_usd</code></td><td>float</td><td>The run's total spend so far (0.1.7)</td></tr>
         </tbody>
       </table></div>
 
-      <h3>Exceptions</h3>
-      <p>Raised only with <code>raise_on_breach=True</code>. Each carries the numbers as attributes.</p>
-      <div class="table"><table>
-        <thead><tr><th>Exception</th><th>Attributes</th></tr></thead>
-        <tbody>
-          <tr><td><code>FencesError</code></td><td>Base class for all of the below</td></tr>
-          <tr><td><code>BudgetExceeded</code></td><td><code>spent_usd</code>, <code>budget_usd</code></td></tr>
-          <tr><td><code>IterationLimitReached</code></td><td><code>iterations</code>, <code>max_iterations</code></td></tr>
-          <tr><td><code>TimeLimitReached</code></td><td><code>duration_ms</code>, <code>max_duration_ms</code></td></tr>
-          <tr><td><code>TokenLimitReached</code></td><td><code>tokens_used</code>, <code>max_tokens</code></td></tr>
-        </tbody>
-      </table></div>
     </section>
 
     <!-- REST -->
@@ -491,7 +471,7 @@ result = <span class="k">await</span> checkpoint(
         <thead><tr><th>Endpoint</th><th>Body</th><th>Returns</th></tr></thead>
         <tbody>
           <tr><td><span class="method">POST</span> <code>/api/runs/start</code></td><td><code>run_id</code> (you choose, unique), <code>agent_name</code>, <code>budget_usd</code>, optional <code>max_iterations</code>, <code>max_duration_ms</code>, <code>max_tokens</code></td><td><code>{"ok": true, "limits": {...}}</code>, capped at the key's ceilings; 409 if the <code>run_id</code> exists</td></tr>
-          <tr><td><span class="method">POST</span> <code>/api/runs/{id}/checkpoint</code></td><td><code>cost_delta_usd</code> and <code>tokens_used</code> for this step; <code>iterations</code> and <code>duration_ms</code> so far</td><td>See below. On a fenced run: <code>{"ok": false, "breach": ...}</code> again, with the reason; 409 if the run has ended</td></tr>
+          <tr><td><span class="method">POST</span> <code>/api/runs/{id}/checkpoint</code></td><td><code>cost_delta_usd</code> and <code>tokens_used</code> for this step. The server counts steps and measures time itself (<code>iterations</code> and <code>duration_ms</code> are accepted but ignored)</td><td>See below. On a fenced run: <code>{"ok": false, "breach": ...}</code> again, with the reason; 409 if the run has ended</td></tr>
           <tr><td><span class="method">POST</span> <code>/api/runs/{id}/decisions</code></td><td><code>iteration</code>, <code>reasoning</code>, optional <code>action</code></td><td><code>{"ok": true}</code></td></tr>
           <tr><td><span class="method">POST</span> <code>/api/runs/{id}/end</code></td><td><code>status</code> (<code>success</code> or <code>error</code>), optional <code>error</code></td><td><code>{"ok": true}</code>. A breached run stays <code>breached</code></td></tr>
           <tr><td><span class="method">GET</span> <code>/api/runs</code></td><td></td><td><code>{"runs": [...]}</code>, newest first</td></tr>

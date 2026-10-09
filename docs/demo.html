@@ -117,8 +117,9 @@
   .trail-graph .lane { font: 11px var(--mono); fill: var(--gray); }
   .trail-graph .tick { font: 10px var(--mono); fill: #898781; }
   .trail-graph .grid { stroke: #ecebe6; stroke-width: 1; }
-  .trail-graph .dot { fill: var(--cobalt); stroke: var(--white); stroke-width: 2; }
-  .trail-graph .dot.fence { fill: var(--red); }
+  .trail-graph .dot { stroke: var(--white); stroke-width: 2; }  /* 2px surface ring keeps overlapping dots legible */
+  .graph-note { margin-top: 4px; font-size: 11px; color: var(--gray); }
+  .chip .sw { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
   .tip { position: absolute; z-index: 2; pointer-events: none; max-width: 280px; padding: 8px 10px; border-radius: 8px; background: var(--ink); color: var(--white); font-size: 12px; line-height: 1.4; }
   .tip b { display: block; font: 500 12px var(--mono); }
   .tip span { color: #c3c2b7; }
@@ -153,7 +154,8 @@
   .reason { margin: -6px 0 12px; font-size: 13px; color: var(--red); }
     .ceilings label { display: grid; gap: 3px; font-size: 12px; color: var(--gray); }
   .limit-cards { display: grid; gap: 16px; max-width: 900px; }
-  .limit-card h4 { justify-content: flex-start; gap: 10px; }
+  .limit-card h4 { justify-content: flex-start; gap: 10px; font-size: 15px; }
+  .limit-card .sub { font-size: 12px; color: var(--gray); margin: -6px 0 12px; }
   .limit-card .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
   .intro { max-width: 760px; margin: -8px 0 20px; color: var(--gray); }
   .account { max-width: 720px; padding: 16px; border: 1px solid #f0c9bf; border-radius: 12px; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
@@ -196,7 +198,7 @@
   <nav>
     <a href="#runs">Runs <span class="tag" id="nav-running" hidden></span></a>
     <a href="#agents">Agents</a>
-    <a href="#limits" id="nav-limits" hidden>Limits</a>
+    <a href="#limits" id="nav-limits" hidden>Agent limits</a>
     <a href="#keys" id="nav-keys" hidden>API keys</a>
   </nav>
   <div class="foot">
@@ -215,14 +217,27 @@
   </div>
 </div>
 
+<!-- Page level, not inside a view: a dialog under a hidden section can't be shown -->
+<dialog id="key-dialog">
+  <h3 id="kd-label"></h3>
+  <div class="newkey" id="kd-key"></div>
+  <p class="muted" id="kd-note"></p>
+  <p><a href="#limits" id="kd-limits" onclick="this.closest('dialog').close()">Edit this agent's limits →</a></p>
+  <div class="row">
+    <button class="btn ghost" id="kd-show">Show</button>
+    <button class="btn ghost" id="kd-copy">Copy</button>
+    <button class="btn" onclick="this.closest('dialog').close()">Close</button>
+  </div>
+</dialog>
+
 <main>
   <section data-view="runs">
     <header class="top"><h1 id="runs-title">Runs</h1><span class="live" id="status"></span></header>
     <div class="steps" id="setup" hidden>
       <div class="step" id="step-key"><b>1</b><div>
-        <h3>Create an API key</h3>
-        <p>Your agents use it to report each step to Fences.</p>
-        <button class="btn" id="setup-key">Create API key</button>
+        <h3>Add your agent</h3>
+        <p>Name it, and Fences creates an API key that only this agent can use. You can set its limits later in Agent limits.</p>
+        <form class="keyform" id="setup-agent"><input id="setup-name" placeholder="Agent name, e.g. support-bot" maxlength="128" required><button class="btn">Add agent</button></form>
         <div id="setup-newkey"></div>
       </div></div>
       <div class="step"><b>2</b><div>
@@ -282,21 +297,20 @@ async def my_agent(task):
   </section>
 
   <section data-view="limits" hidden>
-    <header class="top"><h1>Limits</h1></header>
-    <p class="intro">Rules each API key's agents can't change. Per-run limits cap every run, whatever the agent asks for. Daily and monthly caps cover all of a key's runs together. An agent name stops a key reporting as any other agent. Leave a field empty for no limit.</p>
+    <header class="top"><h1>Agent limits</h1><button class="btn" id="add-agent-btn">Add agent</button></header>
+    <p class="intro">Rules your agents can't change. Each agent gets its own API key that only it can use, and these limits apply to every run it starts. Per-run limits cap each run, whatever the agent's code asks for; daily and monthly caps cover all of its runs together. Leave a field empty for no limit.</p>
+    <form class="panel limit-card" id="add-agent" hidden>
+      <h4>Add an agent</h4>
+      <p class="sub">Fences creates an API key that only this agent can use, and shows it once. Limits are optional and can be changed any time.</p>
+      <div class="ceilings"></div>
+      <div class="row"><button class="btn sm">Add agent</button><button type="button" class="btn ghost sm" id="add-agent-cancel">Cancel</button><span class="err"></span></div>
+    </form>
     <div class="limit-cards" id="limit-cards"></div>
   </section>
 
   <section data-view="keys" hidden>
     <header class="top"><h1>API keys</h1></header>
-    <form id="newkey-form">
-      <div class="keyform">
-        <input id="key-label" placeholder="Label, e.g. prod-agent" maxlength="64" required>
-        <button class="btn">Create key</button>
-      </div>
-      <p class="muted" style="font-size:12px;margin-top:6px">Set what each key's agents may spend and do in <a href="#limits">Limits</a>.</p>
-    </form>
-    <div id="newkey"></div>
+    <p class="intro">Every key belongs to one agent, so its limits, runs and access stay separate. To get a new key, <a href="#limits" data-add-agent>add an agent</a>.</p>
     <h2>Your keys</h2>
     <div class="table">
       <table>
@@ -304,17 +318,6 @@ async def my_agent(task):
         <tbody id="keys"></tbody>
       </table>
     </div>
-    <dialog id="key-dialog">
-      <h3 id="kd-label"></h3>
-      <div class="newkey" id="kd-key"></div>
-      <p class="muted" id="kd-note"></p>
-      <p><a href="#limits" id="kd-limits" onclick="this.closest('dialog').close()">Edit this key's limits →</a></p>
-      <div class="row">
-        <button class="btn ghost" id="kd-show">Show</button>
-        <button class="btn ghost" id="kd-copy">Copy</button>
-        <button class="btn" onclick="this.closest('dialog').close()">Close</button>
-      </div>
-    </dialog>
     <h2>Connect an agent</h2>
 <pre>pip install agentfences
 
@@ -574,13 +577,16 @@ function drawTrail(id) {
   if (!t.data) { el('.trail').innerHTML = '<p class="muted">Loading…</p>'; return; }
   const counts = {};
   for (const x of t.data) counts[cat(x)] = (counts[cat(x)] || 0) + 1;
+  // Colours and step durations come from the whole trail, so filtering never repaints or resizes a dot
+  const colorOf = palette(Object.keys(counts));
+  const dtOf = stepDurations(t.data);
   const from = new Date(t.from).getTime() / 1000, to = new Date(t.to).getTime() / 1000;
   const shown = t.data.filter(x => (!t.actions.size || t.actions.has(cat(x)))
     && (!t.from || x.timestamp >= from) && (!t.to || x.timestamp <= to));
   el('.trail-chips').innerHTML = Object.entries(counts).map(([a, n]) =>
-    `<button type="button" class="chip ${t.actions.has(a) ? 'on' : ''}" data-action="${esc(a)}">${esc(a)}<small>${n}</small></button>`).join('');
+    `<button type="button" class="chip ${t.actions.has(a) ? 'on' : ''}" data-action="${esc(a)}"><i class="sw" style="background:${colorOf(a)}"></i>${esc(a)}<small>${n}</small></button>`).join('');
   el('.trail-count').textContent = `${shown.length} of ${t.data.length} · newest first`;
-  drawGraph(el('.trail-graph'), shown.filter(x => x.timestamp));
+  drawGraph(el('.trail-graph'), shown.filter(x => x.timestamp), Object.keys(counts), colorOf, dtOf);
   el('.trail').innerHTML = shown.slice(-200).reverse().map(x => `<div class="decision ${x.action === 'fence' ? 'fence' : ''}">
       <small>#${x.iteration}</small>
       <div>${x.action ? `<em>${esc(x.action)}</em>` : ''}${esc(x.reasoning)}</div>
@@ -590,51 +596,72 @@ function drawTrail(id) {
 
 const cat = x => x.action || 'none';
 
-// Swimlane timeline of the filtered trail: x = time, one lane per category. Loops read as dense rows of dots.
-function drawGraph(box, shown) {
+// Categorical colours in fixed order (dataviz reference palette, validated on white; red is kept for
+// Fences stop events). Past seven categories, the rest share gray: lanes and labels still name them.
+const CAT_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7'];
+function palette(categories) {
+  const order = categories.filter(a => a !== 'fence');
+  return a => a === 'fence' ? 'var(--red)' : CAT_COLORS[order.indexOf(a)] || '#9a9993';
+}
+
+// Time each step took: until the next decision. The latest step has none yet.
+function stepDurations(data) {
+  const sorted = data.filter(x => x.timestamp).sort((a, b) => a.timestamp - b.timestamp), dt = new Map();
+  sorted.forEach((x, i) => dt.set(x, i + 1 < sorted.length ? sorted[i + 1].timestamp - x.timestamp : null));
+  return x => dt.get(x);
+}
+const secs = s => s == null ? 'latest step' : s < 60 ? `took ${s < 10 ? s.toFixed(1) : Math.round(s)}s` : `took ${dur(s * 1000)}`;
+
+// Swimlane timeline: x = time, lane + colour = category, dot area = time the step took.
+// Loops read as dense rows of small dots; slow steps stand out as big ones.
+function drawGraph(box, shown, categories, colorOf, dtOf) {
   box.hidden = !shown.length;
   if (!shown.length) return;
-  const W = box.clientWidth || 600, LABEL = 116, PAD = 14, LANE = 24, AXIS = 22;
-  const lanes = [...new Set(shown.map(cat))];
+  const W = box.clientWidth || 600, LABEL = 120, PAD = 14, LANE = 28, AXIS = 22;
+  const lanes = categories.filter(a => shown.some(x => cat(x) === a));
   const t0 = Math.min(...shown.map(x => x.timestamp)), t1 = Math.max(...shown.map(x => x.timestamp)), span = t1 - t0 || 1;
   const H = lanes.length * LANE + AXIS;
   const xOf = t => LABEL + (t - t0) / span * (W - LABEL - PAD);
   const yOf = a => lanes.indexOf(a) * LANE + LANE / 2;
+  const maxDt = Math.max(0, ...shown.map(x => dtOf(x) || 0));
+  const rOf = x => maxDt ? 4 + 6 * Math.sqrt((dtOf(x) || 0) / maxDt) : 4;  // area grows with time; r >= 4 keeps the smallest a real dot
   const fmt = t => span < 86400 ? new Date(t * 1000).toLocaleTimeString() : new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   const n = W - LABEL < 360 ? 1 : 3;  // narrow: just start and end, so time labels don't collide
   const ticks = Array.from({ length: n + 1 }, (_, i) => t0 + span * i / n);
-  box._points = shown.map(x => ({ x: xOf(x.timestamp), y: yOf(cat(x)), d: x }));
+  // Big dots first, so small ones on top stay visible
+  box._points = shown.map(x => ({ x: xOf(x.timestamp), y: yOf(cat(x)), r: rOf(x), d: x, dt: dtOf(x) })).sort((a, b) => b.r - a.r);
   box.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="Timeline of ${shown.length} decisions across ${lanes.length} categories">
     ${lanes.map(a => `<line class="grid" x1="${LABEL}" x2="${W - PAD}" y1="${yOf(a)}" y2="${yOf(a)}"/>
-      <text class="lane" x="0" y="${yOf(a) + 4}"><title>${esc(a)}</title>${esc(a.length > 15 ? a.slice(0, 14) + '…' : a)}</text>`).join('')}
+      <circle cx="4" cy="${yOf(a)}" r="4" fill="${colorOf(a)}"/>
+      <text class="lane" x="14" y="${yOf(a) + 4}"><title>${esc(a)}</title>${esc(a.length > 14 ? a.slice(0, 13) + '…' : a)}</text>`).join('')}
     ${ticks.map((t, i) => `<line class="grid" x1="${xOf(t)}" x2="${xOf(t)}" y1="0" y2="${H - AXIS + 4}"/>
       <text class="tick" x="${xOf(t)}" y="${H - 4}" text-anchor="${i === 0 ? 'start' : i === n ? 'end' : 'middle'}">${fmt(t)}</text>`).join('')}
-    ${box._points.map(p => `<circle class="dot ${p.d.action === 'fence' ? 'fence' : ''}" cx="${p.x}" cy="${p.y}" r="4"/>`).join('')}
-  </svg><div class="tip" hidden></div>`;
+    ${box._points.map(p => `<circle class="dot" cx="${p.x}" cy="${p.y}" r="${p.r.toFixed(1)}" data-r="${p.r.toFixed(1)}" fill="${colorOf(cat(p.d))}"/>`).join('')}
+  </svg><p class="graph-note">Colour = category · dot size = time until the next step (bigger = slower)</p><div class="tip" hidden></div>`;
 }
 
-// Nearest dot within 24px gets a tooltip; the dot itself is only 8px, too small to aim at
+// Nearest dot within 24px gets a tooltip; small dots are too small to aim at
 $('runs').onpointermove = e => {
   const box = e.target.closest('.trail-graph');
   document.querySelectorAll('#runs .trail-graph').forEach(g => {
-    g.querySelectorAll('circle').forEach(c => c.setAttribute('r', 4));
+    g.querySelectorAll('circle.dot').forEach(c => c.setAttribute('r', c.dataset.r));
     if (g !== box) g.querySelector('.tip')?.setAttribute('hidden', '');
   });
   const tip = box?.querySelector('.tip');
   if (!tip) return;
-  const r = box.getBoundingClientRect(), dots = box.querySelectorAll('circle');
+  const r = box.getBoundingClientRect(), dots = box.querySelectorAll('circle.dot');
   let best = null, bestD = 24;
   for (const [i, p] of (box._points || []).entries()) {
-    const dist = Math.hypot(p.x - (e.clientX - r.left), p.y - (e.clientY - r.top));
+    const dist = Math.hypot(p.x - (e.clientX - r.left), p.y - (e.clientY - r.top)) - p.r;
     if (dist < bestD) { best = i; bestD = dist; }
   }
   tip.hidden = best === null;
   if (best === null) return;
   const p = box._points[best];
-  dots[best].setAttribute('r', 6);
+  dots[best].setAttribute('r', (p.r + 2).toFixed(1));
   tip.replaceChildren();
   const head = document.createElement('b'), act = document.createElement('span'), why = document.createElement('div');
-  head.textContent = `#${p.d.iteration} · ${new Date(p.d.timestamp * 1000).toLocaleTimeString()}`;
+  head.textContent = `#${p.d.iteration} · ${new Date(p.d.timestamp * 1000).toLocaleTimeString()} · ${secs(p.dt)}`;
   act.textContent = cat(p.d);
   why.textContent = p.d.reasoning.length > 140 ? p.d.reasoning.slice(0, 140) + '…' : p.d.reasoning;
   tip.append(head, act, why);
@@ -737,13 +764,12 @@ $('agents').onclick = async e => {
 };
 
 // ── First-run setup ──
-$('setup-key').onclick = async () => {
-  const k = await api('/api/keys', { label: 'first-agent' });
-  fullKeys[k.prefix] = k.key;
+$('setup-agent').onsubmit = async e => {
+  e.preventDefault();
+  const k = await addAgent($('setup-name').value.trim());
   $('setup-keyval').textContent = k.key;
   $('setup-newkey').innerHTML = `<div class="newkey">${esc(k.key)}<br><span class="muted">Copy this now — it won't be shown again. It's also filled into step 3.</span></div>`;
-  $('setup-key').hidden = true; $('step-key').classList.add('done');
-  loadKeys();
+  $('setup-agent').hidden = true; $('step-key').classList.add('done');
 };
 
 document.addEventListener('click', e => {
@@ -760,23 +786,25 @@ const fullKeys = {};
 let keyList = [];
 
 // A key's governance settings; time is entered in minutes, stored in ms. unit 0 = text.
-const CEILINGS = [['max_budget_usd', 'Max $ per run', 0.01, 1], ['max_iterations', 'Max steps per run', 1, 1],
+const CEILINGS = [['agent_name', 'Agent name', 0, 0],
+                  ['max_budget_usd', 'Max $ per run', 0.01, 1], ['max_iterations', 'Max steps per run', 1, 1],
                   ['max_duration_ms', 'Max minutes per run', 1, 60000], ['max_tokens', 'Max tokens per run', 1, 1],
-                  ['daily_budget_usd', 'Daily $ cap', 0.01, 1], ['monthly_budget_usd', 'Monthly $ cap', 0.01, 1],
-                  ['agent_name', 'Only agent name', 0, 0]];
+                  ['daily_budget_usd', 'Daily $ cap', 0.01, 1], ['monthly_budget_usd', 'Monthly $ cap', 0.01, 1]];
 const ceilingInputs = (k = {}) => CEILINGS.map(([name, label, step, unit]) => unit
   ? `<label>${label}<input name="${name}" type="number" min="${step}" step="${step}" placeholder="no limit" value="${k[name] ? k[name] / unit : ''}"></label>`
-  : `<label>${label}<input name="${name}" maxlength="128" placeholder="any" value="${esc(k[name] || '')}"></label>`).join('');
+  : `<label>${label}<input name="${name}" maxlength="128" required placeholder="e.g. billing-bot" value="${esc(k[name] || '')}"></label>`).join('');
 function readCeilings(form, emptyAs) {
   const out = {};
   for (const [name, , , unit] of CEILINGS) {
+    if (!form.elements[name]) continue;
     const v = form.elements[name].value.trim();
-    if (v !== '') out[name] = unit ? Number(v) * unit : v; else if (emptyAs !== undefined) out[name] = emptyAs;
+    if (v !== '') out[name] = unit ? Number(v) * unit : v;
+    else if (emptyAs !== undefined && unit) out[name] = emptyAs;  // a blank limit clears it; a blank agent name is never sent
   }
   return out;
 }
 function ceilingSummary(k) {
-  const parts = [k.agent_name && `only ${esc(k.agent_name)}`, k.max_budget_usd && `${money(k.max_budget_usd)}/run`,
+  const parts = [k.max_budget_usd && `${money(k.max_budget_usd)}/run`,
                  k.max_iterations && `${num(k.max_iterations)} steps`, k.max_duration_ms && `${+(k.max_duration_ms / 60000).toFixed(1)} min`,
                  k.max_tokens && `${num(k.max_tokens)} tokens`, k.daily_budget_usd && `${money(k.daily_budget_usd)}/day`,
                  k.monthly_budget_usd && `${money(k.monthly_budget_usd)}/mo`].filter(Boolean);
@@ -791,15 +819,17 @@ async function loadKeys() {
   renderLimits();
 }
 
-// ── Limits: one card per active key ───────────────────────────────────────────
+// ── Agent limits: one card per active key, titled by the agent it belongs to ──
 function renderLimits() {
   $('limit-cards').innerHTML = keyList.filter(k => !k.revoked).map(k => `
     <form class="panel limit-card" data-prefix="${esc(k.prefix)}">
-      <h4>${esc(k.label)} <span class="muted mono">${esc(k.prefix)}…</span></h4>
-      <p class="muted" style="font-size:12px">Now: ${ceilingSummary(k)}</p>
+      <h4>${k.agent_name ? esc(k.agent_name) : `${esc(k.label)} <span class="tag">not tied to an agent</span>`}</h4>
+      <p class="sub">Key ${esc(k.label)} · <span class="mono">${esc(k.prefix)}…</span> · now: ${ceilingSummary(k)}</p>
+      ${k.agent_name ? '' : '<p class="sub">This key was made before every key needed an agent. Name the agent that uses it to save its limits: from then on only that agent can use it, and its runs are always reported under that name.</p>'}
       <div class="ceilings">${ceilingInputs(k)}</div>
       <div class="row"><button class="btn sm">Save limits</button><span class="muted saved"></span><span class="err"></span></div>
-    </form>`).join('') || '<p class="muted">No API keys yet. <a href="#keys">Create one</a>, then set its limits here.</p>';
+    </form>`).join('') || '<p class="muted">No agents yet. Add your first one above.</p>';
+  if (!keyList.some(k => !k.revoked) && $('add-agent').hidden) showAddAgent(true, false);
 }
 
 $('limit-cards').onsubmit = async e => {
@@ -814,14 +844,33 @@ $('limit-cards').onsubmit = async e => {
   } catch (e2) { err.textContent = e2.message; }
 };
 
-$('newkey-form').onsubmit = async e => {
-  e.preventDefault();
-  const k = await api('/api/keys', { label: $('key-label').value });
-  e.target.reset();
+// ── Add agent: a key tied to one agent name, with optional limits ─────────────
+async function addAgent(name, limits = {}) {
+  const k = await api('/api/keys', { ...limits, label: name.slice(0, 64), agent_name: name });
   fullKeys[k.prefix] = k.key;
-  $('key-label').value = '';
-  $('newkey').innerHTML = `<div class="newkey">${esc(k.key)}<br><span class="muted">Copy this now — it won't be shown again.</span></div>`;
-  loadKeys();
+  await loadKeys();
+  return k;
+}
+
+function showAddAgent(open = true, focus = true) {
+  $('add-agent').hidden = !open;
+  if (!open) return;
+  $('add-agent').querySelector('.ceilings').innerHTML = ceilingInputs();
+  $('add-agent').querySelector('.err').textContent = '';
+  if (focus) $('add-agent').elements.agent_name.focus();
+}
+$('add-agent-btn').onclick = () => showAddAgent();
+$('add-agent-cancel').onclick = () => showAddAgent(false);
+document.addEventListener('click', e => { if (e.target.matches('[data-add-agent]')) showAddAgent(); });
+
+$('add-agent').onsubmit = async e => {
+  e.preventDefault();
+  const { agent_name, ...limits } = readCeilings(e.target);
+  try {
+    const k = await addAgent(agent_name, limits);
+    showAddAgent(false);
+    openKey(k.prefix, agent_name);  // the one time the full key can be shown
+  } catch (err) { e.target.querySelector('.err').textContent = err.message; }
 };
 
 function openKey(prefix, label) {
