@@ -102,6 +102,8 @@ print(asyncio.run(my_agent("hello")))
 
 A limit trips once it is exceeded, not when it is reached: a $0.10 budget allows exactly $0.10 of spend.
 
+Every limit is optional. On Fences Cloud, a limit left out of `@governed(...)` comes from the agent's page in the dashboard, so `@governed()` on its own works. Limits set nowhere default to 100 steps, 5 minutes and no token limit, and no budget: the run still starts, but its spend isn't capped, and Fences logs a warning once per agent (and flags the agent in the dashboard).
+
 On Fences Cloud a run can also stop with `stopped_by_user` (someone pressed Stop in the dashboard), `paused` (paused and not resumed in time), `key_daily_budget` or `key_monthly_budget` (the agent's daily or monthly cap across all its runs). With `init(fail_closed=True)`, an unreachable backend stops it with `fences_unreachable`. Each comes with its own `message` and `system_prompt`.
 
 ## Sync agents and streaming

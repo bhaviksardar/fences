@@ -281,14 +281,20 @@ class RecordingClient:
         self.events_supported = self.heartbeat_supported = self.approvals_supported = True
         self.quarantine = False
         self.start_limits = None  # what run start answers with as the effective limits
+        self.start_notices = None
         self.heartbeat_commands, self.checkpoint_commands = [], []  # handed out on the next call
         self.beats, self.approval_requests = [], []
 
     def start_run(self, run_id, agent_name, *limits, context=None):
         if self.quarantine:
             return {"ok": False, "quarantined": True, "detail": "quarantined"}
-        self.sent.append(("start", {"agent_name": agent_name, "context": context}))
-        return {"ok": True, "limits": self.start_limits} if self.start_limits else {"ok": True}
+        self.sent.append(("start", {"agent_name": agent_name, "context": context, "limits": limits}))
+        resp = {"ok": True}
+        if self.start_limits:
+            resp["limits"] = self.start_limits
+        if self.start_notices:
+            resp["notices"] = self.start_notices
+        return resp
 
     def checkpoint(self, *args):
         out, self.checkpoint_commands = self.checkpoint_commands, []
@@ -657,6 +663,77 @@ def check_server_limits_are_adopted():
         agentfences.init(local_only=True)
 
 
+def warnings_during(fn):
+    seen = []
+    handler = logging.Handler()
+    handler.emit = lambda record: seen.append(record.getMessage())
+    logging.getLogger("agentfences").addHandler(handler)
+    try:
+        return fn(), seen
+    finally:
+        logging.getLogger("agentfences").removeHandler(handler)
+
+
+def check_no_budget_runs_but_warns():
+    agentfences.core._noticed.clear()
+
+    @governed()  # no limits in code at all
+    def unlimited_agent():
+        run = get_active_run()
+        for _ in range(50):
+            assert checkpoint_sync(cost_delta_usd=1000).ok  # spend isn't capped...
+        return run.budget_usd, run.max_iterations, run.max_duration_ms, run.max_tokens
+
+    (limits, seen) = warnings_during(lambda: [unlimited_agent(), unlimited_agent()])
+    assert limits[0] == (None, 100, 300_000, 0), limits  # ...the other limits take their defaults
+    nudges = [m for m in seen if "unlimited_agent has no budget" in m]
+    assert len(nudges) == 1 and "@governed(budget_usd=...)" in nudges[0], seen  # once per agent, not per run
+
+    @governed()
+    def looping_agent():
+        for _ in range(1000):
+            r = checkpoint_sync(cost_delta_usd=1)
+            if r.breached:
+                return r
+    r = looping_agent()  # with no budget, the step limit still stops it, and its message still formats
+    assert r.breach_type == "iteration_limit" and "101 steps" in r.message, r
+
+
+def check_dashboard_owned_limits():
+    agentfences.core._noticed.clear()
+    sent = cloud()
+    try:
+        sent.start_limits = {"budget_usd": 2.5, "max_iterations": 40, "max_duration_ms": 60_000, "max_tokens": 0}
+
+        @governed(max_iterations=50)  # only some limits in code: the rest come from the dashboard
+        def owned():
+            r = get_active_run()
+            return r.budget_usd, r.max_iterations
+        assert owned() == (2.5, 40)
+        assert sent.of("start")[-1]["limits"] == (None, 50, None, None), "unset limits go as null"
+
+        sent.start_limits = {"budget_usd": None, "max_iterations": 100, "max_duration_ms": 300_000, "max_tokens": 0}
+        sent.start_notices = [{"code": "no_budget", "message": "free_agent has no budget, so its spend isn't capped.",
+                               "url": "https://fences.example/agents/free_agent"}]
+
+        @governed()
+        def free_agent():
+            return get_active_run().budget_usd
+        result, seen = warnings_during(lambda: [free_agent(), free_agent()])
+        assert result == [None, None]
+        assert seen.count("agentfences: free_agent has no budget, so its spend isn't capped. https://fences.example/agents/free_agent") == 1, seen
+
+        sent.start_limits = sent.start_notices = None  # an older server: no limits in the reply
+
+        @governed()
+        def old_server_agent():
+            return get_active_run().budget_usd
+        result, seen = warnings_during(old_server_agent)
+        assert result is None and any("old_server_agent has no budget" in m and "dashboard" in m for m in seen), seen
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_quarantine():
     sent = cloud()
     sent.quarantine = True
@@ -708,7 +785,8 @@ if __name__ == "__main__":
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
         check_tool_calls, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
-        check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals, check_server_limits_are_adopted, check_quarantine,
+        check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
+        check_quarantine,
         check_old_server_without_control,
     ]
     for check in checks:
