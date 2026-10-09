@@ -124,6 +124,41 @@ def my_agent(query: str):
 
 A governed async generator (a streaming agent) stays governed until the stream is exhausted. Concurrent agents in one event loop and nested `@governed` calls each get their own run.
 
+## Frameworks: LangChain, LangGraph and the OpenAI Agents SDK
+
+Agents built on a framework need no decorators. Each model call is recorded with its tokens and cost and checkpointed, so limits apply, and each tool call is recorded. Limits work as in `@governed` and are all optional.
+
+Callbacks and hooks can't hand a result back to the agent, so when a limit is crossed these integrations raise `FencesStop`. It carries the same `breach_type`, `message` and `system_prompt` as a breached `checkpoint()`.
+
+**LangChain and LangGraph** (needs `langchain-core`):
+
+```python
+from agentfences import FencesStop
+from agentfences.langchain import FencesCallbackHandler
+
+try:
+    graph.invoke(inputs, config={"callbacks": [FencesCallbackHandler(budget_usd=2)]})
+except FencesStop as stop:
+    answer = stop.message
+```
+
+The outermost run becomes a Fences run named after it (or `agent_name=...`), and joins the run if it's already inside `@governed`. Sync and async graphs both work. LangChain logs its own "Error in FencesCallbackHandler.on_llm_end callback" line when the handler stops a graph; that's expected.
+
+**OpenAI Agents SDK** (needs `openai-agents`, Python 3.10+):
+
+```python
+from agentfences import FencesStop, openai_agents
+
+try:
+    result = await openai_agents.run(agent, "Research cats", budget_usd=2)   # Runner.run, governed
+except FencesStop as stop:
+    answer = stop.message
+```
+
+Already inside `@governed`? Use `Runner.run(agent, input, hooks=openai_agents.FencesRunHooks())`.
+
+With a framework integration, don't also pass `instrument=True` or decorate tools with `@agentfences.tool`: each call would be recorded twice.
+
 ## Live control
 
 In cloud mode the SDK keeps a heartbeat with Fences, so whoever is on call can act on a run while it's going:

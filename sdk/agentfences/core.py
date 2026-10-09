@@ -12,7 +12,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
-from .exceptions import AgentQuarantined
+from .exceptions import AgentQuarantined, FencesStop
 from .client import GovClient
 from .pricing import cost_of, set_custom_prices
 from . import events, control
@@ -387,6 +387,8 @@ def _outcome(run: RunState, exc: Optional[BaseException]):
     """(status, error) to report when the governed function exits."""
     if exc is None or isinstance(exc, GeneratorExit):  # GeneratorExit: consumer stopped a stream early
         return ("breached" if run.last_breach else "success"), None
+    if isinstance(exc, FencesStop):  # a framework integration halted the agent on a breach
+        return "breached", None
     run.exception = events.exception_info(exc)  # includes cancellation
     e = run.exception
     return "error", f"{e['type']}: {e['message']}" if e["message"] else e["type"]
