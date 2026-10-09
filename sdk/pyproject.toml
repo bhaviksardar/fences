@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentfences"
-version = "0.1.6"
+version = "0.1.7"
 description = "Runtime governance for AI agents — budget limits, loop protection, token limits, audit trail"
 readme = "README.md"
 authors = [{ name = "Bhavik Sardar" }]
