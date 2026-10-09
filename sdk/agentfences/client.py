@@ -48,9 +48,10 @@ class GovClient:
         """Report live runs; the reply may carry commands for them."""
         return self._post("/api/heartbeat", {"runs": runs}, optional=True)
 
-    def request_approval(self, run_id: str, approval_id: str, reason: str, amount_usd: Optional[float]) -> dict:
-        return self._post(f"/api/runs/{run_id}/approvals",
-                          {"approval_id": approval_id, "reason": reason, "amount_usd": amount_usd}, optional=True)
+    def request_approval(self, run_id: str, approval_id: str, reason: str, amount_usd: Optional[float],
+                         timeout_s: float) -> dict:
+        return self._post(f"/api/runs/{run_id}/approvals", {"approval_id": approval_id, "reason": reason,
+                          "amount_usd": amount_usd, "timeout_s": timeout_s}, optional=True)
 
     def end_run(self, run_id: str, status: str, error: Optional[str] = None, exception: Optional[dict] = None) -> dict:
         payload = {"status": status, "error": error}
