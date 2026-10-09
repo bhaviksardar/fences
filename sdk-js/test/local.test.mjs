@@ -113,8 +113,11 @@ test("prices each response shape", async () => {
   assert.ok(close(spent, priced("gpt-4o", { inp: 200, read: 300, write: 500, out: 200 })), "OpenAI Responses");
   [spent, tokens] = await step({ model: "claude-sonnet-4-5-20250929", usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 1000, cache_creation_input_tokens: 500 } });
   assert.ok(close(spent, priced("claude-sonnet-4-5", { inp: 100, read: 1000, write: 500, out: 50 })) && tokens === 1650, "Anthropic");
-  [spent] = await step({ model: "claude-sonnet-4-5", usage: { input_tokens: 250000, output_tokens: 1000 } });
-  assert.ok(spent > priced("claude-sonnet-4-5", { inp: 200000, out: 1000 }) * 1.25, "long-context tier");
+  const { PRICES } = await import("../dist/prices.generated.js");
+  const tiered = Object.keys(PRICES).sort().find((m) => PRICES[m].above !== undefined);  // any model with long-context pricing
+  const over = PRICES[tiered].above + 50000;
+  [spent] = await step({ model: tiered, usage: { input_tokens: over, output_tokens: 1000 } });
+  assert.ok(close(spent, over * PRICES[tiered].tier.in + 1000 * PRICES[tiered].tier.out), `long-context tier (${tiered})`);
   [spent, tokens] = await step({ modelVersion: "gemini-2.5-flash", usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 100, thoughtsTokenCount: 300 } });
   assert.ok(close(spent, priced("gemini-2.5-flash", { inp: 1000, out: 400 })) && tokens === 1400, "Gemini (thinking billed as output)");
   [spent, tokens] = await step({ response: { modelId: "gpt-4o" }, usage: { inputTokens: 1000, outputTokens: 200, totalTokens: 1200, cachedInputTokens: 400 } });

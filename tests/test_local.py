@@ -202,11 +202,15 @@ def check_prices_each_response_shape():
     spent, tokens = step(anthropic)
     assert close(spent, priced("claude-sonnet-4-5", inp=100, cache_read=1000, cache_write=500, out=50)) and tokens == 1650
 
-    long_context = NS(model="claude-sonnet-4-5", usage=NS(
-        input_tokens=250_000, output_tokens=1000, cache_read_input_tokens=None, cache_creation_input_tokens=None))
+    from agentfences.pricing import _prices
+    tiered = next(m for m, p in sorted(_prices().items()) if "above" in p)  # any model with long-context pricing
+    over = price_of(tiered)["above"] + 50_000
+    long_context = NS(model=tiered, usage=NS(
+        input_tokens=over, output_tokens=1000, cache_read_input_tokens=None, cache_creation_input_tokens=None))
     spent, _ = step(long_context)
-    assert close(spent, priced("claude-sonnet-4-5", inp=250_000, out=1000))
-    assert spent > priced("claude-sonnet-4-5", inp=200_000, out=1000) * 1.25  # the long-context tier applied
+    assert close(spent, priced(tiered, inp=over, out=1000))
+    p = price_of(tiered)
+    assert close(spent, over * p["tier"]["in"] + 1000 * p["tier"]["out"]), tiered  # the long-context tier applied
 
     gemini = NS(model_version="gemini-2.5-flash", usage_metadata=NS(
         prompt_token_count=1000, candidates_token_count=100, thoughts_token_count=300, cached_content_token_count=None))
