@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentfences"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Runtime governance for AI agents — budget limits, loop protection, token limits, audit trail"
 readme = "README.md"
 authors = [{ name = "Bhavik Sardar" }]
@@ -24,6 +24,9 @@ Homepage = "https://github.com/bhaviksardar/fences"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agentfences*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "agentfences.__version__" }
 
 [tool.setuptools.package-data]
 agentfences = ["prices.json"]

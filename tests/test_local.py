@@ -734,6 +734,14 @@ def check_dashboard_owned_limits():
         agentfences.init(local_only=True)
 
 
+def check_version_is_sent():
+    from importlib.metadata import version
+    from agentfences.client import GovClient
+    assert version("agentfences") == agentfences.__version__  # the package build reads the one version
+    headers = GovClient("fc_x", "http://fences.invalid").headers
+    assert headers["X-Fences-SDK"] == f"python/{agentfences.__version__}" and headers["X-API-Key"] == "fc_x"
+
+
 def check_quarantine():
     sent = cloud()
     sent.quarantine = True
@@ -786,7 +794,7 @@ if __name__ == "__main__":
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
         check_tool_calls, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
         check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
-        check_quarantine,
+        check_version_is_sent, check_quarantine,
         check_old_server_without_control,
     ]
     for check in checks:

@@ -1,10 +1,14 @@
 import requests
+
+from . import __version__
 from typing import Optional
 
 
 class GovClient:
     def __init__(self, api_key: str, endpoint: str, timeout: float = 3.0):
         self.api_key = api_key
+        # The server uses the SDK version to warn about old SDKs and to skip commands they don't understand
+        self.headers = {"X-API-Key": api_key, "X-Fences-SDK": f"python/{__version__}"}
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
 
@@ -60,7 +64,7 @@ class GovClient:
         {"unsupported": True} and no error raises, not even a rejected key.
         """
         try:
-            resp = requests.post(f"{self.endpoint}{path}", json=payload, headers={"X-API-Key": self.api_key}, timeout=self.timeout)
+            resp = requests.post(f"{self.endpoint}{path}", json=payload, headers=self.headers, timeout=self.timeout)
         except requests.RequestException as e:
             return {"network_error": str(e)}
         try:
