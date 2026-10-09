@@ -12,10 +12,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
-from .exceptions import FencesError, BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached
+from .exceptions import FencesError, BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached, AgentQuarantined
 from .client import GovClient
 from .pricing import cost_of, set_custom_prices
-from . import events
+from . import events, control
 
 log = logging.getLogger("agentfences")
 
@@ -84,6 +84,7 @@ def _make_breach_result(breach_type: str, **kwargs) -> CheckpointResult:
             "I can't reach Fences to confirm I'm within my limits, so I'm stopping to be safe. "
             "I'll summarize what I found so far."
         ),
+        "paused": "I was paused from the Fences dashboard and not resumed in time. I'll summarize what I found so far.",
     }
 
     system_prompts = {
@@ -126,6 +127,10 @@ def _make_breach_result(breach_type: str, **kwargs) -> CheckpointResult:
             "Your governance service can't be reached and you are configured to stop when that happens. "
             "Stop your current task immediately and summarize what you have found or completed so far."
         ),
+        "paused": (
+            "A person paused this run from the Fences dashboard and it was not resumed in time. Stop your current "
+            "task and summarize what you have found or completed so far. Tell the user the run was paused by an operator."
+        ),
     }
 
     msg = messages.get(breach_type, "Governance limit reached.")
@@ -140,6 +145,12 @@ def _make_breach_result(breach_type: str, **kwargs) -> CheckpointResult:
 
 
 # ── RunState ──────────────────────────────────────────────────────────────────
+
+def _set_event() -> threading.Event:
+    e = threading.Event()
+    e.set()  # not paused
+    return e
+
 
 MAX_EVENTS_PER_RUN = 1000
 EVENT_BATCH = 50
@@ -165,6 +176,13 @@ class RunState:
     # Tool and model calls, newest kept. ponytail: capped per run so a runaway agent can't eat memory
     events: deque = field(default_factory=lambda: deque(maxlen=MAX_EVENTS_PER_RUN))
     exception: Optional[dict] = None             # type, message and stack if the run raised
+    # Live control from the dashboard (see control.py)
+    stopped: bool = False
+    paused: bool = False
+    pause_expired: bool = False
+    resumed: threading.Event = field(default_factory=lambda: _set_event())
+    approvals: dict = field(default_factory=dict)  # approval_id -> Approval, or None while waiting
+    awaiting: int = 0
 
     @property
     def duration_ms(self) -> int:
@@ -201,6 +219,8 @@ def init(
     release: Optional[str] = None,
     redact: Optional[Callable[[dict], Optional[dict]]] = None,
     instrument: bool = False,
+    heartbeat_s: float = 15.0,
+    pause_timeout_s: float = 3600.0,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -226,6 +246,10 @@ def init(
 
     instrument=True records every OpenAI and Anthropic model call made inside a governed
     run (model, tokens, cost, latency, errors) without changing your code.
+
+    In cloud mode a background heartbeat reports live runs every heartbeat_s seconds and
+    brings back dashboard commands (stop, pause, resume, limits, approval answers). A paused
+    run waits at its next checkpoint, for up to pause_timeout_s seconds.
     """
     global _client, _local_only, _fail_closed
     set_custom_prices(prices)
@@ -238,6 +262,7 @@ def init(
 
     if local_only:
         _client = None
+        control.configure(None, heartbeat_s, pause_timeout_s)
         return
 
     if not api_key:
@@ -247,6 +272,7 @@ def init(
         )
     _client = GovClient(api_key=api_key, endpoint=endpoint)
     _start_decision_worker()
+    control.configure(_client, heartbeat_s, pause_timeout_s)
 
 
 def _get_client() -> Optional[GovClient]:
@@ -385,12 +411,16 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
         sent = events.redact({"type": "run_start", "agent_name": agent_name, "context": dict(run.context)}) if run.context else None
         resp = client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens,
                                 context=(sent or {}).get("context"))
+        if resp.get("quarantined"):  # refused before any agent code runs
+            raise AgentQuarantined(agent_name, resp.get("detail"))
         if "network_error" in resp:
             _warn_unreachable(run, resp["network_error"])
+    control.register(run)
     return run
 
 
 def _end_run(run: RunState, status: str, error: Optional[str] = None):
+    control.unregister(run)
     client = _get_client()
     if client:
         # The run must end even if redaction drops its error details
@@ -439,6 +469,7 @@ def _decide(run: RunState, resp: Optional[dict]) -> CheckpointResult:
                 return _breach(run)
         run.last_breach = _local_breach(run)
     else:
+        control.apply(run, resp.get("commands"))
         # Backend is authoritative: adopt its totals and (on a breach) its current limits
         run.cost_usd = resp.get("spent_usd", run.cost_usd)
         run.iterations = resp.get("iterations", run.iterations)
@@ -451,6 +482,14 @@ def _decide(run: RunState, resp: Optional[dict]) -> CheckpointResult:
             run.last_breach = None
         else:  # a fresh breach, or a 409 because the run is still fenced from an earlier one
             run.last_breach = resp.get("breach") or run.last_breach or "limit_reached"
+    return _result(run)
+
+
+def _result(run: RunState) -> CheckpointResult:
+    if run.stopped:  # a stop from the dashboard sticks, whatever a later response says
+        run.last_breach = "stopped_by_user"
+    elif run.pause_expired:
+        run.last_breach = "paused"
     return _breach(run) if run.last_breach else CheckpointResult(spent_usd=run.cost_usd)
 
 
@@ -523,7 +562,11 @@ async def checkpoint(response=None, cost_delta_usd: float = 0.0, tokens_used: in
     cost, tokens = _measure(response, cost_delta_usd, tokens_used)
     run = _record_step(cost, tokens)
     resp = await asyncio.to_thread(_server_check, run, cost, tokens) if _client else None
-    return _decide(run, resp)
+    result = _decide(run, resp)
+    if run.paused and not result.breached:  # paused from the dashboard: wait here until resumed
+        await control.wait_if_paused_async(run)
+        result = _result(run)
+    return result
 
 
 def checkpoint_sync(response=None, cost_delta_usd: float = 0.0, tokens_used: int = 0) -> CheckpointResult:
@@ -532,7 +575,11 @@ def checkpoint_sync(response=None, cost_delta_usd: float = 0.0, tokens_used: int
         return CheckpointResult()
     cost, tokens = _measure(response, cost_delta_usd, tokens_used)
     run = _record_step(cost, tokens)
-    return _decide(run, _server_check(run, cost, tokens) if _client else None)
+    result = _decide(run, _server_check(run, cost, tokens) if _client else None)
+    if run.paused and not result.breached:
+        control.wait_if_paused(run)
+        result = _result(run)
+    return result
 
 
 # ── Decision trail ────────────────────────────────────────────────────────────

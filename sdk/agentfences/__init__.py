@@ -2,10 +2,12 @@ from .core import init, governed, checkpoint, checkpoint_sync, log_decision, flu
 from .events import context
 from .tools import tool
 from .instrument import instrument
-from .exceptions import FencesError, BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached
+from .control import request_approval, request_approval_sync, Approval
+from .exceptions import FencesError, BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached, AgentQuarantined
 
 __all__ = [
     "init", "governed", "checkpoint", "checkpoint_sync", "log_decision", "flush", "get_active_run", "context", "tool", "instrument",
+    "request_approval", "request_approval_sync", "Approval",
     "CheckpointResult",
-    "FencesError", "BudgetExceeded", "IterationLimitReached", "TimeLimitReached", "TokenLimitReached",
+    "FencesError", "BudgetExceeded", "IterationLimitReached", "TimeLimitReached", "TokenLimitReached", "AgentQuarantined",
 ]

@@ -297,12 +297,33 @@ class RecordingClient:
     """Stands in for the backend client and keeps every payload the SDK would send."""
     def __init__(self):
         self.sent = []
+        self.batches = []
+        self.events_supported = self.heartbeat_supported = self.approvals_supported = True
+        self.quarantine = False
+        self.heartbeat_commands, self.checkpoint_commands = [], []  # handed out on the next call
+        self.beats, self.approval_requests = [], []
 
     def start_run(self, run_id, agent_name, *limits, context=None):
+        if self.quarantine:
+            return {"ok": False, "quarantined": True, "detail": "quarantined"}
         self.sent.append(("start", {"agent_name": agent_name, "context": context}))
         return {"ok": True}
 
     def checkpoint(self, *args):
+        out, self.checkpoint_commands = self.checkpoint_commands, []
+        return {"ok": True, "commands": out}
+
+    def heartbeat(self, runs):
+        if not self.heartbeat_supported:
+            return {"unsupported": True}
+        self.beats.append(runs)
+        out, self.heartbeat_commands = self.heartbeat_commands, []
+        return {"commands": out}
+
+    def request_approval(self, run_id, approval_id, reason, amount_usd):
+        if not self.approvals_supported:
+            return {"unsupported": True}
+        self.approval_requests.append({"run_id": run_id, "approval_id": approval_id, "reason": reason, "amount_usd": amount_usd})
         return {"ok": True}
 
     def log_decision(self, run_id, iteration, reasoning, action):
@@ -310,9 +331,6 @@ class RecordingClient:
 
     def end_run(self, run_id, status, error=None, exception=None):
         self.sent.append(("end", {"status": status, "error": error, "exception": exception}))
-
-    events_supported = True
-    batches = []
 
     def log_events(self, run_id, events):
         if not self.events_supported:
@@ -328,7 +346,7 @@ class RecordingClient:
 def cloud(**init_args):
     """Cloud-mode init with the network replaced by a RecordingClient."""
     agentfences.init(api_key="fc_test", endpoint="http://fences.invalid", **init_args)
-    agentfences.core._client = recorder = RecordingClient()
+    agentfences.core._client = agentfences.control._client = recorder = RecordingClient()
     return recorder
 
 
@@ -526,6 +544,165 @@ def check_old_server_without_events():
         logging.getLogger("agentfences").removeHandler(handler)
 
 
+def wait_for(condition, timeout=3.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting"
+        time.sleep(0.01)
+
+
+def background(fn):
+    import threading
+    t = threading.Thread(target=fn, daemon=True)
+    t.start()
+    return t
+
+
+def check_heartbeat_stop_and_limits():
+    sent = cloud(heartbeat_s=0.05)
+    try:
+        @governed(budget_usd=1)
+        async def agent():
+            run = get_active_run()
+            for step in range(1000):
+                result = await checkpoint(cost_delta_usd=0.001)
+                if result.breached:
+                    return step, result, run.budget_usd
+                await asyncio.sleep(0.02)
+
+        def operator():
+            wait_for(lambda: sent.beats)  # the heartbeat reports the live run...
+            run_id = sent.beats[-1][0]["run_id"]
+            assert set(sent.beats[-1][0]) == {"run_id", "iterations", "spent_usd", "tokens_used", "paused"}
+            sent.heartbeat_commands = [{"run_id": run_id, "type": "limits", "budget_usd": 5.0}]
+            wait_for(lambda: not sent.heartbeat_commands)
+            sent.heartbeat_commands = [{"run_id": run_id, "type": "stop"}]  # ...and brings back commands
+        background(operator)
+        steps, result, budget = asyncio.run(agent())
+        assert result.breach_type == "stopped_by_user" and budget == 5.0, (result, budget)
+        assert steps < 200, "stopped promptly by heartbeat, even though every checkpoint response said ok"
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_pause_resume_and_timeout():
+    import time
+    sent = cloud(heartbeat_s=0.05)
+    try:
+        @governed(budget_usd=1)
+        async def agent():
+            started = time.monotonic()
+            sent.checkpoint_commands = [{"type": "pause"}]  # a checkpoint response can carry commands too
+            result = await checkpoint(cost_delta_usd=0.01)
+            return result, time.monotonic() - started
+
+        def operator():
+            wait_for(lambda: sent.beats and sent.beats[-1] and sent.beats[-1][0]["paused"])  # heartbeat says it's paused
+            time.sleep(0.3)
+            sent.heartbeat_commands = [{"run_id": sent.beats[-1][0]["run_id"], "type": "resume"}]
+        background(operator)
+        result, waited = asyncio.run(agent())
+        assert result.ok and waited >= 0.3, (result, waited)
+
+        @governed(budget_usd=1)
+        def sync_agent():
+            sent.checkpoint_commands = [{"type": "pause"}]
+            return checkpoint_sync(cost_delta_usd=0.01)
+        background(operator)
+        assert sync_agent().ok, "synchronous agents wait and resume too"
+
+        agentfences.init(api_key="fc_test", endpoint="http://fences.invalid", heartbeat_s=0.05, pause_timeout_s=0.3)
+        agentfences.core._client = sent = RecordingClient()
+        agentfences.control._client = sent
+
+        @governed(budget_usd=1)
+        def forgotten():
+            sent.checkpoint_commands = [{"type": "pause"}]
+            return checkpoint_sync(cost_delta_usd=0.01)
+        result = forgotten()  # paused and never resumed
+        assert result.breach_type == "paused" and "not resumed in time" in result.message, result
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_approvals():
+    import time
+    @governed(budget_usd=1)
+    async def ask(timeout_s=600):
+        approval = await agentfences.request_approval("Refund $240 to order 1182?", amount_usd=240, timeout_s=timeout_s)
+        return approval, get_active_run().budget_usd
+
+    approval, _ = asyncio.run(ask())  # local mode: no one to ask, so denied at once
+    assert not approval.granted and "Local mode" in approval.note
+    assert not asyncio.run(agentfences.request_approval("outside a run")).granted
+
+    sent = cloud(heartbeat_s=0.05)
+    try:
+        def approver():
+            wait_for(lambda: sent.approval_requests)
+            req = sent.approval_requests[-1]
+            assert req["reason"] == "Refund $240 to order 1182?" and req["amount_usd"] == 240
+            time.sleep(0.1)
+            sent.heartbeat_commands = [{"run_id": req["run_id"], "type": "approval", "approval_id": req["approval_id"],
+                                        "granted": True, "by": "dana@example.com", "note": "ok, loyal customer", "amount_usd": 240}]
+        background(approver)
+        approval, budget = asyncio.run(ask())
+        assert approval.granted and approval.by == "dana@example.com" and budget == 241, (approval, budget)
+
+        @governed(budget_usd=1)
+        def ask_sync():
+            return agentfences.request_approval_sync("Delete the staging DB?", timeout_s=0.3)
+        answer = ask_sync()  # nobody answers
+        assert not answer.granted and "timeout" in answer.note
+
+        sent.approvals_supported = False
+        approval, _ = asyncio.run(ask())
+        assert not approval.granted and "doesn't support approvals" in approval.note
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_quarantine():
+    sent = cloud()
+    sent.quarantine = True
+    ran = []
+    try:
+        @governed(budget_usd=1)
+        def agent():
+            ran.append(True)
+        try:
+            agent()
+        except agentfences.AgentQuarantined as e:
+            assert e.agent_name == "agent" and "quarantined" in str(e)
+        else:
+            raise AssertionError("a quarantined agent must not run")
+        assert not ran, "no agent code runs"
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_old_server_without_control():
+    seen = []
+    handler = logging.Handler()
+    handler.emit = lambda record: seen.append(record.getMessage())
+    logging.getLogger("agentfences").addHandler(handler)
+    sent = cloud(heartbeat_s=0.05)
+    sent.heartbeat_supported = False
+    try:
+        @governed(budget_usd=1)
+        async def agent():
+            for _ in range(10):
+                await asyncio.sleep(0.03)
+                assert (await checkpoint(cost_delta_usd=0.01)).ok
+            return "done"
+        assert asyncio.run(agent()) == "done"
+        assert len([m for m in seen if "doesn't support the heartbeat" in m]) == 1, seen
+    finally:
+        agentfences.init(local_only=True)
+        logging.getLogger("agentfences").removeHandler(handler)
+
+
 if __name__ == "__main__":
     check_requires_init()
     check_breach_messages()
@@ -537,6 +714,8 @@ if __name__ == "__main__":
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
         check_tool_calls, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
+        check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals, check_quarantine,
+        check_old_server_without_control,
     ]
     for check in checks:
         check()

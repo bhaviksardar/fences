@@ -102,7 +102,7 @@ print(asyncio.run(my_agent("hello")))
 
 A limit trips once it is exceeded, not when it is reached: a $0.10 budget allows exactly $0.10 of spend.
 
-On Fences Cloud a run can also stop with `stopped_by_user` (someone pressed Stop in the dashboard), `key_daily_budget` or `key_monthly_budget` (the agent's daily or monthly cap across all its runs). With `init(fail_closed=True)`, an unreachable backend stops it with `fences_unreachable`. Each comes with its own `message` and `system_prompt`.
+On Fences Cloud a run can also stop with `stopped_by_user` (someone pressed Stop in the dashboard), `paused` (paused and not resumed in time), `key_daily_budget` or `key_monthly_budget` (the agent's daily or monthly cap across all its runs). With `init(fail_closed=True)`, an unreachable backend stops it with `fences_unreachable`. Each comes with its own `message` and `system_prompt`.
 
 ## Sync agents and streaming
 
@@ -121,6 +121,27 @@ def my_agent(query: str):
 ```
 
 A governed async generator (a streaming agent) stays governed until the stream is exhausted. Concurrent agents in one event loop and nested `@governed` calls each get their own run.
+
+## Live control
+
+In cloud mode the SDK keeps a heartbeat with Fences, so whoever is on call can act on a run while it's going:
+
+- **Stop:** the run's next `checkpoint()` returns `breach_type="stopped_by_user"` with its message, so the agent wraps up gracefully. A stop sticks, whatever later responses say.
+- **Pause and resume:** a paused run waits inside its next `checkpoint()` until it's resumed, then carries on. If no one resumes it within `pause_timeout_s` (default one hour), the checkpoint returns `breach_type="paused"`.
+- **Change limits:** new limits apply to the run immediately.
+- **Quarantine:** calling a governed function for a quarantined agent raises `AgentQuarantined` before any of its code runs.
+
+An agent can also ask a person before doing something risky:
+
+```python
+approval = await agentfences.request_approval("Refund $240 to order 1182?", amount_usd=240, timeout_s=600)
+if not approval.granted:
+    return f"I didn't issue the refund: {approval.note}"
+```
+
+The answer has `granted`, `by`, `note` and `amount_usd`; an approved amount raises the run's budget by that much. `request_approval_sync()` does the same for synchronous agents. It never hangs and never raises: in local mode, outside a run, or when the server can't take requests it returns denied right away, and with no answer it returns denied after `timeout_s`.
+
+The heartbeat reports live runs every 15 seconds (`init(heartbeat_s=...)`), and every 2 seconds while a run is paused or waiting for approval. A Fences server without these features gets one warning: stops still apply at the next checkpoint, and approval requests are denied.
 
 ## Evidence: tool calls and model calls
 

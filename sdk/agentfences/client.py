@@ -41,16 +41,28 @@ class GovClient:
             return {}
 
     def log_events(self, run_id: str, events: list) -> dict:
-        """Returns {"unsupported": True} if the server has no events endpoint (older servers)."""
+        return self._post_optional(f"/api/runs/{run_id}/events", {"events": events})
+
+    def heartbeat(self, runs: list) -> dict:
+        """Report live runs; the reply may carry commands for them."""
+        return self._post_optional("/api/heartbeat", {"runs": runs})
+
+    def request_approval(self, run_id: str, approval_id: str, reason: str, amount_usd: Optional[float]) -> dict:
+        return self._post_optional(f"/api/runs/{run_id}/approvals",
+                                   {"approval_id": approval_id, "reason": reason, "amount_usd": amount_usd})
+
+    def _post_optional(self, path: str, payload: dict) -> dict:
+        """POST to an endpoint older servers may not have: {"unsupported": True} if the route is missing."""
         try:
-            resp = requests.post(f"{self.endpoint}/api/runs/{run_id}/events", json={"events": events},
-                                 headers={"X-API-Key": self.api_key}, timeout=self.timeout)
+            resp = requests.post(f"{self.endpoint}{path}", json=payload, headers={"X-API-Key": self.api_key}, timeout=self.timeout)
         except requests.RequestException as e:
             return {"network_error": str(e)}
-        if resp.status_code in (404, 405) and resp.headers.get("content-type", "").startswith("application/json") \
-                and resp.json().get("detail") in ("Not Found", "Method Not Allowed"):  # the route itself is missing
+        is_json = resp.headers.get("content-type", "").startswith("application/json")
+        if resp.status_code in (404, 405) and is_json and resp.json().get("detail") in ("Not Found", "Method Not Allowed"):
             return {"unsupported": True}
-        return {"ok": resp.ok}
+        if not resp.ok:
+            return {"ok": False, "status": resp.status_code}
+        return resp.json() if is_json else {"ok": True}
 
     def end_run(self, run_id: str, status: str, error: Optional[str] = None, exception: Optional[dict] = None) -> dict:
         payload = {"status": status, "error": error}
@@ -68,6 +80,8 @@ class GovClient:
             )
             if resp.status_code in (401, 403):
                 raise PermissionError(f"Fences API key rejected: {resp.text}")
+            if resp.status_code == 423:  # the agent is quarantined: the run must not start
+                return {"ok": False, "quarantined": True, "detail": resp.json().get("detail", "")}
             if resp.status_code == 409:  # e.g. checkpoint on a run the server already fenced
                 return {"ok": False, "conflict": resp.json().get("detail", "")}
             resp.raise_for_status()
