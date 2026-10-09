@@ -319,11 +319,11 @@ class RecordingClient:
     def end_run(self, run_id, status, error=None, exception=None):
         self.sent.append(("end", {"status": status, "error": error, "exception": exception}))
 
-    def log_events(self, run_id, events):
+    def log_spans(self, run_id, spans):
         if not self.events_supported:
             return {"unsupported": True}
-        self.batches.append(len(events))
-        self.sent.extend(("event", e) for e in events)
+        self.batches.append(len(spans))
+        self.sent.extend(("event", e) for e in spans)
         return {"ok": True}
 
     def of(self, kind):
@@ -467,15 +467,24 @@ def check_tool_calls():
         return list(get_active_run().events)
 
     calls = asyncio.run(agent())
-    assert [(c["name"], c["ok"]) for c in calls] == [("web_search", True), ("fetch", True), ("web_search", False)], calls
-    assert calls[0]["args"] == "query='cats', limit=2" and calls[0]["type"] == "tool_call"
-    assert len(calls[1]["args"]) <= 300 and calls[1]["latency_ms"] >= 10
-    assert calls[2]["error"] == "PermissionError: 403 from search API"
+    a = [c["attributes"] for c in calls]
+    assert [(c["name"], c["status"]) for c in calls] == [
+        ("execute_tool web_search", "ok"), ("execute_tool fetch", "ok"), ("execute_tool web_search", "error")], calls
+    assert a[0]["gen_ai.operation.name"] == "execute_tool" and a[0]["gen_ai.tool.name"] == "web_search"
+    assert a[0]["gen_ai.tool.call.arguments"] == "query='cats', limit=2" and a[0]["fences.iteration"] == 0
+    assert len(a[1]["gen_ai.tool.call.arguments"]) <= 300 and calls[1]["end_ts"] - calls[1]["start_ts"] >= 0.01
+    assert a[2]["error.type"] == "PermissionError" and a[2]["fences.error.message"] == "PermissionError: 403 from search API"
 
 
 def check_events_are_sent_batched_and_redacted():
-    sent = cloud(redact=lambda e: None if e.get("name") == "secret_tool" else
-                 dict(e, args=e["args"].replace("hunter2", "***")) if e["type"] == "tool_call" else e)
+    def scrub(e):
+        if e["type"] != "span":
+            return e
+        if e["attributes"]["gen_ai.tool.name"] == "secret_tool":
+            return None
+        args = e["attributes"]["gen_ai.tool.call.arguments"].replace("hunter2", "***")
+        return dict(e, attributes={**e["attributes"], "gen_ai.tool.call.arguments": args})
+    sent = cloud(redact=scrub)
     try:
         @agentfences.tool
         def login(password):
@@ -495,7 +504,8 @@ def check_events_are_sent_batched_and_redacted():
         assert agent() == 31  # everything is kept on the run locally, even what's not sent
         agentfences.flush()
         tool_events = sent.of("event")
-        assert len(tool_events) == 30 and all(e["args"] == "password='***'" for e in tool_events)
+        assert len(tool_events) == 30 and all(e["attributes"]["gen_ai.tool.call.arguments"] == "password='***'" for e in tool_events)
+        assert all("type" not in e for e in tool_events), "the redact-only type key isn't sent"
         assert sum(sent.batches) == 30 and len(sent.batches) < 30, sent.batches  # sent in batches, not one by one
         assert "hunter2" not in repr(sent.sent) and sent.of("decision")
     finally:
@@ -636,6 +646,10 @@ def check_approvals():
         background(approver)
         approval, budget = asyncio.run(ask())
         assert approval.granted and approval.by == "dana@example.com" and budget == 241, (approval, budget)
+        agentfences.flush()
+        span = [e for e in sent.of("event") if e["name"] == "fences.approval"][-1]  # request and answer as one span
+        assert span["attributes"]["fences.approval.reason"] == "Refund $240 to order 1182?"
+        assert span["attributes"]["fences.approval.granted"] is True and span["end_ts"] - span["start_ts"] >= 0.1
 
         @governed(budget_usd=1)
         def ask_sync():

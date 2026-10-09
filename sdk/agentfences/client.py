@@ -41,8 +41,8 @@ class GovClient:
             "action": action,
         })
 
-    def log_events(self, run_id: str, events: list) -> dict:
-        return self._post(f"/api/runs/{run_id}/events", {"events": events}, optional=True)
+    def log_spans(self, run_id: str, spans: list) -> dict:
+        return self._post(f"/api/runs/{run_id}/spans", {"spans": spans}, optional=True)
 
     def heartbeat(self, runs: list) -> dict:
         """Report live runs; the reply may carry commands for them."""

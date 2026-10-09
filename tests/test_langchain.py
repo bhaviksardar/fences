@@ -101,12 +101,13 @@ def check_graph_stops_on_budget():
         agentfences.flush()
         assert [p["agent_name"] for p in sent.of("start")] == ["research_graph"]
         assert sent.of("end")[-1]["status"] == "breached", sent.of("end")
-        events = sent.of("event")
-        llm = [e for e in events if e["type"] == "llm_call"]
-        tools = [e for e in events if e["type"] == "tool_call"]
-        assert len(llm) == 4 and all(math.isclose(e["cost_usd"], PER_CALL) for e in llm), llm  # the 4th call trips 3.5x
-        assert llm[0]["model"] == "gpt-4o" and llm[0]["cache_read_tokens"] == 400
-        assert len(tools) == 3 and tools[0]["name"] == "lookup" and tools[0]["args"] == "query='q1'" and tools[0]["ok"]
+        spans = [e["attributes"] for e in sent.of("event")]
+        llm = [a for a in spans if a["gen_ai.operation.name"] == "chat"]
+        tools = [a for a in spans if a["gen_ai.operation.name"] == "execute_tool"]
+        assert len(llm) == 4 and all(math.isclose(a["fences.cost_usd"], PER_CALL) for a in llm), llm  # the 4th call trips 3.5x
+        assert llm[0]["gen_ai.response.model"] == "gpt-4o" and llm[0]["gen_ai.usage.cache_read.input_tokens"] == 400
+        assert llm[0]["fences.integration"] == "langchain"
+        assert len(tools) == 3 and tools[0]["gen_ai.tool.name"] == "lookup" and tools[0]["gen_ai.tool.call.arguments"] == "query='q1'"
     finally:
         agentfences.init(local_only=True)
 
@@ -118,8 +119,9 @@ def check_success_and_tool_errors():
         assert out["steps"] == 3
         agentfences.flush()
         assert sent.of("end")[-1]["status"] == "success"
-        failed = [e for e in sent.of("event") if e["type"] == "tool_call"]
-        assert failed and not failed[0]["ok"] and failed[0]["error"] == "PermissionError: 403 from search API", failed
+        failed = [e for e in sent.of("event") if e["attributes"]["gen_ai.operation.name"] == "execute_tool"]
+        assert failed and failed[0]["status"] == "error", failed
+        assert failed[0]["attributes"]["fences.error.message"] == "PermissionError: 403 from search API"
     finally:
         agentfences.init(local_only=True)
 
@@ -129,9 +131,9 @@ def check_joins_a_governed_run():
     def agent():
         build_graph(max_steps=2).invoke(START, {**CONFIG, "callbacks": [FencesCallbackHandler()]})
         run = get_active_run()
-        return run.iterations, math.isclose(run.cost_usd, PER_CALL * 2), [e["type"] for e in run.events]
+        return run.iterations, math.isclose(run.cost_usd, PER_CALL * 2), [e["attributes"]["gen_ai.operation.name"] for e in run.events]
     iterations, spent_right, kinds = agent()
-    assert iterations == 2 and spent_right and kinds == ["llm_call", "tool_call", "llm_call"], (iterations, kinds)
+    assert iterations == 2 and spent_right and kinds == ["chat", "execute_tool", "chat"], (iterations, kinds)
 
 
 def check_async_graph():
