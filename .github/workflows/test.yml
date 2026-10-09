@@ -24,3 +24,19 @@ jobs:
       - run: python tests/test_langchain.py
       - if: matrix.python != '3.9'  # the OpenAI Agents SDK needs Python 3.10+
         run: pip install openai-agents && python tests/test_openai_agents.py
+
+  sdk-js:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["18", "20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+        working-directory: sdk-js
+      - run: npm test
+        working-directory: sdk-js

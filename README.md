@@ -258,7 +258,8 @@ agentfences.init(api_key="fc_...", endpoint="https://...", fail_closed=True)
 ```
 fences/
 ├── docs/       landing page
-└── sdk/        agentfences Python package
+├── sdk/        agentfences Python package
+└── sdk-js/     agentfences TypeScript package (npm)
     └── agentfences/
 ```
 
