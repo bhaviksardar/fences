@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fences — Control and visibility for AI agents</title>
+<title>Fences — On-call for AI agents</title>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -109,22 +109,22 @@
 </style>
 </head>
 <body>
-<div style="background:var(--ink);color:var(--paper);text-align:center;font:13px/1.5 var(--sans);padding:8px 16px">Fences Cloud (dashboard, stored audit trail, team sign-in) is coming soon. The SDK is free and works today in local mode: <a href="docs/#quickstart" style="color:inherit">quickstart</a>.</div>
+<div style="background:var(--ink);color:var(--paper);text-align:center;font:13px/1.5 var(--sans);padding:8px 16px">Fences Cloud (dashboard, alerts, stored audit trail, team sign-in) is coming soon. The SDK is free and works today in local mode: <a href="docs/#quickstart" style="color:inherit">quickstart</a>.</div>
 
 <nav>
   <div class="wrap">
     <a class="logo" href="./">(|=|) Fences</a>
-    <div class="links"><a href="#limits">Limits</a><a href="#how">How it works</a><a href="#features">Features</a><a href="#faq">FAQ</a><a href="docs/">Docs</a></div>
+    <div class="links"><a href="#workflow">Workflow</a><a href="#how">How it works</a><a href="#features">Features</a><a href="#faq">FAQ</a><a href="docs/">Docs</a></div>
     <div class="ctas"><a class="btn ghost" href="https://github.com/bhaviksardar/fences">GitHub</a><a class="btn solid" href="docs/#quickstart">Get started</a></div>
   </div>
 </nav>
 
 <header class="hero">
   <div class="wrap">
-    <p class="eyebrow">Runtime governance for AI agents</p>
-    <h1 style="margin-top:20px">See what your agents do.<br>Decide what they <em>can</em>.</h1>
-    <p class="lead">Fences sits in every agent loop: hard limits on spend, steps, time and tokens, a live view of every run, and a decision trail you can actually read.</p>
-    <div class="ctas"><a class="btn solid big" href="docs/#quickstart">Start fencing — free</a><a class="btn ghost big" href="#how">See the code</a></div>
+    <p class="eyebrow">On-call for AI agents</p>
+    <h1 style="margin-top:20px">When an agent goes off the rails,<br>see why and <em>stop it</em>.</h1>
+    <p class="lead">Fences sits inside every agent loop. Watch runs live, read what the agent decided and why, stop any run in one click, and set hard limits it can't raise itself.</p>
+    <div class="ctas"><a class="btn solid big" href="docs/#quickstart">Get started</a><a class="btn ghost big" href="#how">See the code</a></div>
   </div>
   <div class="pickets"></div>
   <div class="wrap">
@@ -135,16 +135,16 @@
   </div>
 </header>
 
-<section id="limits">
+<section id="workflow">
   <div class="wrap">
-    <p class="eyebrow">What gets fenced</p>
-    <h2>Four limits. <em>Zero</em> runaway loops.</h2>
-    <p class="lead">Set any combination per run. The first one crossed stops the agent, and it tells you which.</p>
+    <p class="eyebrow">The 3am workflow</p>
+    <h2>See it. Understand it. <em>Stop</em> it.</h2>
+    <p class="lead">Everything you need when an agent misbehaves, in one place, from the first odd step to the fix.</p>
     <div class="limits">
-      <div><b>Spend</b><code>budget_usd</code><p>Dollar cap across every model call in the run.</p></div>
-      <div><b>Iterations</b><code>max_iterations</code><p>Catches the agent that keeps retrying the same tool.</p></div>
-      <div><b>Time</b><code>max_duration_ms</code><p>Wall-clock ceiling, so nothing runs overnight by accident.</p></div>
-      <div><b>Tokens</b><code>max_tokens</code><p>Context and output budget, independent of price.</p></div>
+      <div><b>See</b><code>live runs</code><p>Every run streams in as it works: spend, steps, tokens and status, per agent.</p></div>
+      <div><b>Understand</b><code>decision trail</code><p>What the agent did and why, step by step, on a timeline where retry loops stand out.</p></div>
+      <div><b>Stop</b><code>one click</code><p>Stop any run from the dashboard. The agent's next step is refused and it wraps up cleanly.</p></div>
+      <div><b>Prevent</b><code>agent limits</code><p>Per-run, daily and monthly caps the agent can't raise, so the next one stops itself.</p></div>
     </div>
   </div>
 </section>
@@ -152,27 +152,27 @@
 <section>
   <div class="wrap">
     <p class="eyebrow">Before and after</p>
-    <h2>Same agent. <em>One</em> line different.</h2>
+    <h2>Same bad night. <em>Different</em> morning.</h2>
     <div class="compare">
       <div class="card bad">
         <span class="tag">Without Fences</span>
         <div class="log">
-          <div><span>research-agent · step 1,204</span><span class="hot">$212.40</span></div>
-          <div><span>research-agent · step 2,871</span><span class="hot">$506.18</span></div>
-          <div><span>research-agent · step 3,412</span><span class="hot">$1,284.07</span></div>
+          <div><span>03:12 · support-triage · step 1,204</span><span class="hot">$212.40</span></div>
+          <div><span>05:40 · support-triage · step 2,871</span><span class="hot">$506.18</span></div>
+          <div><span>08:55 · support-triage · step 3,412</span><span class="hot">$1,284.07</span></div>
           <div><span>status</span><span class="hot">still running</span></div>
         </div>
-        <p class="note">You find out from the invoice. No record of what it was doing or why it never stopped.</p>
+        <p class="note">A customer tells you. You grep logs to guess what it was doing, then kill the pod.</p>
       </div>
       <div class="card good">
         <span class="tag">With Fences</span>
         <div class="log">
-          <div><span>research-agent · step 186</span><span>$4.97</span></div>
-          <div><span>research-agent · step 187</span><span class="cool">$5.00 / $5.00</span></div>
-          <div><span>breach</span><span class="cool">budget_exceeded</span></div>
-          <div><span>status</span><span class="cool">halted · summarised</span></div>
+          <div><span>03:12 · support-triage · step 186</span><span>$19.97</span></div>
+          <div><span>03:13 · daily cap</span><span class="cool">$20.04 / $20.00</span></div>
+          <div><span>stopped</span><span class="cool">key_daily_budget</span></div>
+          <div><span>timeline</span><span class="cool">search_tickets ×41 in 2 min</span></div>
         </div>
-        <p class="note">The agent gets a clean signal, writes up what it found, and stops. Every decision is on the record.</p>
+        <p class="note">The agent stops itself at its cap and explains why. In the morning the timeline shows the retry loop, so the fix is obvious.</p>
       </div>
     </div>
   </div>
@@ -213,14 +213,14 @@ agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="
 <section id="features">
   <div class="wrap">
     <p class="eyebrow">The platform</p>
-    <h2>Built on every <em>checkpoint</em>.</h2>
+    <h2>Built for the <em>incident</em>, not the demo.</h2>
     <div class="features">
-      <div class="feature"><span class="num">01</span><h3>Enforced server-side</h3><p>Limits live on the Fences backend, not in agent memory. A crashed or restarted worker can't reset its own budget.</p><div class="chips"><span>checkpoint</span><span>breach</span></div></div>
-      <div class="feature"><span class="num">02</span><h3>Watch runs live</h3><p>Every run streams to the dashboard as it checks in: spend, iterations, tokens, status.</p><div class="chips"><span>websocket</span><span>dashboard</span></div></div>
-      <div class="feature"><span class="num">03</span><h3>Raise limits mid-run</h3><p>A run hit its fence but was close? Raise the limit and it resumes on the next checkpoint. No redeploy.</p><div class="chips"><span>PATCH /limits</span></div></div>
-      <div class="feature"><span class="num">04</span><h3>Decision audit trail</h3><p>Every <code>log_decision</code> is stored with its step and action, so you can replay why an agent did what it did.</p><div class="chips"><span>log_decision</span><span>audit</span></div></div>
-      <div class="feature"><span class="num">05</span><h3>Graceful, not fatal</h3><p>Breaches return a ready-made system prompt, so the agent can summarise and exit instead of crashing your pipeline.</p><div class="chips"><span>system_prompt</span></div></div>
-      <div class="feature"><span class="num">06</span><h3>Your team, your keys</h3><p>Sign in with Google, GitHub, Microsoft or company SSO. Per-user API keys, revocable, isolated per account.</p><div class="chips"><span>SSO</span><span>API keys</span></div></div>
+      <div class="feature"><span class="num">01</span><h3>One-click stop</h3><p>Stop a misbehaving run from the dashboard. Its next checkpoint is refused with a clear reason, so the agent winds down instead of crashing.</p><div class="chips"><span>stop</span><span>stopped_by_user</span></div></div>
+      <div class="feature"><span class="num">02</span><h3>Decision trail and timeline</h3><p>Every step's action and reasoning, filterable by category and time, on a timeline where loops and slow steps stand out.</p><div class="chips"><span>log_decision</span><span>timeline</span></div></div>
+      <div class="feature"><span class="num">03</span><h3>Watch runs live</h3><p>Spend, steps, tokens and status for every run as it checks in, grouped by agent.</p><div class="chips"><span>live</span><span>agents</span></div></div>
+      <div class="feature"><span class="num">04</span><h3>Limits agents can't change</h3><p>Per-run ceilings plus daily and monthly spend caps, enforced on the server and set only from the dashboard.</p><div class="chips"><span>agent limits</span><span>server-side</span></div></div>
+      <div class="feature"><span class="num">05</span><h3>Raise and resume</h3><p>A run hit its fence but should finish? Raise the limit and it carries on at the next checkpoint. No redeploy.</p><div class="chips"><span>resume</span></div></div>
+      <div class="feature"><span class="num">06</span><h3>One key per agent</h3><p>Each agent gets its own key, so one runaway can't spend another's budget, read its runs or report as it.</p><div class="chips"><span>add agent</span><span>isolation</span></div></div>
     </div>
   </div>
 </section>
@@ -231,7 +231,7 @@ agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="
     <h2>Questions.</h2>
     <div class="faq">
       <details><summary>Does Fences call my LLM or see my prompts?</summary><p>No. Your agent reports cost, tokens and an optional short reasoning note at each checkpoint. Prompts and completions never leave your infrastructure.</p></details>
-      <details><summary>What happens when a limit is crossed?</summary><p>The checkpoint returns <code>breached</code> with the reason (<code>budget_exceeded</code>, <code>iteration_limit</code>, <code>time_limit</code> or <code>token_limit</code>), the run is marked breached, and further checkpoints are refused until you raise the limit.</p></details>
+      <details><summary>What happens when a limit is crossed?</summary><p>The checkpoint returns <code>breached</code> with the reason: a run limit (<code>budget_exceeded</code>, <code>iteration_limit</code>, <code>time_limit</code>, <code>token_limit</code>), the agent's daily or monthly cap, or <code>stopped_by_user</code> when someone stopped it. The agent gets a ready-made message to wrap up with, and further checkpoints are refused until you raise the limit.</p></details>
       <details><summary>Which frameworks does it work with?</summary><p>Anything with a loop. Fences doesn't care whether you use raw API calls, LangChain or your own orchestrator. You call <code>checkpoint()</code> where a step ends.</p></details>
       <details><summary>Can I try it without an account?</summary><p>Yes. <code>agentfences.init(local_only=True)</code> enforces limits in-process with no key. Add an API key when you want the dashboard and the stored audit trail.</p></details>
       <details><summary>How do I sign in?</summary><p>Google, GitHub, Microsoft, Apple, email and password, or your company's SAML/OIDC SSO.</p></details>
@@ -241,8 +241,8 @@ agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="
 
 <section class="final">
   <div class="wrap">
-    <h2>See it. Steer it. <em>Fence</em> it.</h2>
-    <p class="lead">One decorator gets you limits today, and the data for everything after.</p>
+    <h2>Be ready for the <em>3am</em> agent.</h2>
+    <p class="lead">One decorator: see every run, understand every decision, stop anything.</p>
     <a class="btn solid big" href="docs/#quickstart">Get started</a>
   </div>
 </section>
@@ -251,7 +251,7 @@ agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="
   <div class="wrap">
     <div><span class="logo">(|=|) Fences</span><p style="margin-top:8px">© 2026 Fences</p></div>
     <div class="cols">
-      <div><b>Product</b><a href="#limits">Limits</a><a href="#how">How it works</a><a href="#features">Features</a><a href="docs/">Docs</a></div>
+      <div><b>Product</b><a href="#workflow">Workflow</a><a href="#how">How it works</a><a href="#features">Features</a><a href="docs/">Docs</a></div>
       <div><b>Code</b><a href="https://github.com/bhaviksardar/fences">GitHub</a><a href="https://pypi.org/project/agentfences/">PyPI</a><a href="docs/">Docs</a></div>
     </div>
   </div>
