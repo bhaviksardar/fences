@@ -119,6 +119,8 @@
     <a href="#llm">Real LLM loops</a>
     <a href="#agent-shapes">Sync, streaming &amp; concurrent</a>
     <a href="#decisions">Decision trail</a>
+    <a href="#evidence">Tool and model calls</a>
+    <a href="#context">Context &amp; redaction</a>
     <a href="#dashboard">Dashboard</a>
     <a href="#reliability">Reliability</a>
     <b>Reference</b>
@@ -365,6 +367,62 @@ result = <span class="k">await</span> checkpoint(resp)</code></pre></div>
       </ul>
     </section>
 
+    <!-- Evidence -->
+    <section id="evidence">
+      <p class="eyebrow">Guide</p>
+      <h2>Tool and model calls <span class="tag">0.2.0</span></h2>
+      <p>On-call can only explain what was recorded. Alongside your <code>log_decision()</code> entries, Fences records every tool call and model call on the run, so a run that went wrong shows exactly what the agent did.</p>
+      <h3>Tool calls</h3>
+<div class="code"><pre><code>@agentfences.tool
+<span class="k">def</span> web_search(query: str, limit: int = <span class="k">5</span>) -> list: ...
+
+@agentfences.tool(name=<span class="s">"fetch"</span>)
+<span class="k">async def</span> fetch_page(url: str) -> str: ...</code></pre></div>
+      <p>Each call records the tool's name, a short summary of its arguments (<code>query='cats', limit=5</code>), whether it succeeded and the error if not (<code>PermissionError: 403 from search API</code>), and how long it took. Exceptions still reach your code, and outside a governed run the tool is just called.</p>
+      <h3>Model calls</h3>
+<div class="code"><pre><code>agentfences.init(api_key=..., endpoint=..., instrument=<span class="k">True</span>)</code></pre></div>
+      <p>With <code>instrument=True</code>, every OpenAI (Chat Completions and Responses) and Anthropic call made inside a governed run is recorded, sync or async, with no other code changes: the model, tokens including cache reads and writes, cost, latency, and the error and status code if it failed (a 429 rate limit, say).</p>
+      <ul>
+        <li>This is a record only. It doesn't count as a checkpoint or add to the run's spend, so keep calling <code>checkpoint(response)</code> where limits should be checked.</li>
+        <li>Streamed calls are recorded without token counts.</li>
+        <li>Both kinds of call are kept on the run (<code>get_active_run().events</code>, newest 1,000) and, in cloud mode, sent to Fences in the background in batches.</li>
+      </ul>
+    </section>
+
+    <!-- Context -->
+    <section id="context">
+      <p class="eyebrow">Guide</p>
+      <h2>Context, errors and redaction <span class="tag">0.2.0</span></h2>
+      <h3>Run context</h3>
+      <p>Tag runs so on-call can see which deploy and which customer a run belongs to:</p>
+<div class="code"><pre><code>agentfences.init(api_key=..., endpoint=..., environment=<span class="s">"prod"</span>, release=<span class="s">"v1.4.2"</span>)
+
+<span class="k">with</span> agentfences.context(user_id=<span class="s">"u_123"</span>, session_id=<span class="s">"s_9"</span>, trace_id=span_id):
+    <span class="k">await</span> support_agent(question)   <span class="c"># every run started in here carries these values</span></code></pre></div>
+      <p>Blocks nest and inner values win. <code>get_active_run().context</code> shows a run's values from inside the agent. Up to 32 keys, 256 characters per value.</p>
+      <h3>Errors</h3>
+      <p>When a governed run raises, Fences records the exception's type, message and last 15 stack frames with the run, and the run's error reads <code>ValueError: page 7 returned 403</code> rather than just the message. The exception still reaches your code as usual.</p>
+      <h3>Redaction</h3>
+      <p>Everything that leaves your process passes through an optional <code>redact</code> hook first. Return the event, changed or not, or <code>None</code> to drop it:</p>
+<div class="code"><pre><code><span class="k">def</span> redact(event):
+    <span class="k">if</span> event[<span class="s">"type"</span>] == <span class="s">"decision"</span>:
+        event[<span class="s">"reasoning"</span>] = EMAIL.sub(<span class="s">"[email]"</span>, event[<span class="s">"reasoning"</span>])
+    <span class="k">return</span> event
+
+agentfences.init(api_key=..., endpoint=..., redact=redact)</code></pre></div>
+      <div class="table"><table>
+        <thead><tr><th><code>type</code></th><th>Fields you can change</th></tr></thead>
+        <tbody>
+          <tr><td><code>run_start</code></td><td><code>context</code></td></tr>
+          <tr><td><code>decision</code></td><td><code>reasoning</code>, <code>action</code></td></tr>
+          <tr><td><code>tool_call</code></td><td><code>name</code>, <code>args</code>, <code>error</code></td></tr>
+          <tr><td><code>llm_call</code></td><td><code>model</code>, <code>error</code></td></tr>
+          <tr><td><code>run_end</code></td><td><code>error</code>, <code>exception</code></td></tr>
+        </tbody>
+      </table></div>
+      <p>If the hook raises or returns something other than a dict or <code>None</code>, that event is dropped rather than sent unredacted, a warning is logged once, and the agent carries on. Runs still start and end, so limits keep working.</p>
+    </section>
+
     <!-- Dashboard -->
     <section id="dashboard">
       <p class="eyebrow">Guide</p>
@@ -426,8 +484,8 @@ result = <span class="k">await</span> checkpoint(resp)</code></pre></div>
       <h2>Python SDK</h2>
       <p>Everything is importable from <code>agentfences</code>. The latest release is on <a href="https://pypi.org/project/agentfences/">PyPI</a>.</p>
 
-      <h3><code>init(api_key=None, endpoint="http://localhost:8000", local_only=False, fail_closed=False, prices=None)</code></h3>
-      <p>Call once at startup, before any governed function runs. Pass either <code>local_only=True</code>, or an <code>api_key</code> and <code>endpoint</code>. Calling a governed function before <code>init()</code> raises <code>RuntimeError</code>. <code>fail_closed</code> is new in 0.1.6. <code>prices</code> (0.1.7) adds or overrides model prices, in USD per 1M tokens; see <a href="#costs">Cost tracking</a>.</p>
+      <h3><code>init(api_key=None, endpoint="http://localhost:8000", local_only=False, fail_closed=False, prices=None, environment=None, release=None, redact=None, instrument=False)</code></h3>
+      <p>Call once at startup, before any governed function runs. Pass either <code>local_only=True</code>, or an <code>api_key</code> and <code>endpoint</code>. Calling a governed function before <code>init()</code> raises <code>RuntimeError</code>. <code>fail_closed</code> is new in 0.1.6. <code>prices</code> (0.1.7) adds or overrides model prices, in USD per 1M tokens; see <a href="#costs">Cost tracking</a>. <code>environment</code>, <code>release</code>, <code>redact</code> and <code>instrument</code> (0.2.0) are covered in <a href="#context">Context &amp; redaction</a> and <a href="#evidence">Tool and model calls</a>.</p>
 
       <h3><code>@governed(budget_usd, max_iterations=100, max_duration_ms=300_000, max_tokens=0)</code></h3>
       <p>Makes each call of the decorated function a run with these limits. Works on async functions, and (from 0.1.6) on sync functions and async generators. The run is named after the function.</p>
@@ -441,11 +499,20 @@ result = <span class="k">await</span> checkpoint(resp)</code></pre></div>
       <h3><code>log_decision(reasoning, action=None)</code></h3>
       <p>Adds an entry to the run's decision trail. See <a href="#decisions">Decision trail</a>.</p>
 
+      <h3><code>@tool</code> / <code>@tool(name=...)</code> <span class="tag">0.2.0</span></h3>
+      <p>Records each call of the decorated function as a tool call on the active run. See <a href="#evidence">Tool and model calls</a>.</p>
+
+      <h3><code>instrument() → list</code> <span class="tag">0.2.0</span></h3>
+      <p>Patches the installed OpenAI and Anthropic clients to record model calls; the same as <code>init(instrument=True)</code>. Safe to call more than once; returns what it patched.</p>
+
+      <h3><code>with context(**values)</code> <span class="tag">0.2.0</span></h3>
+      <p>Tags every run started inside the block. See <a href="#context">Context &amp; redaction</a>.</p>
+
       <h3><code>flush(timeout=5.0)</code> <span class="tag">0.1.6</span></h3>
       <p>Waits up to <code>timeout</code> seconds for queued decisions to reach the backend.</p>
 
       <h3><code>get_active_run() → RunState | None</code></h3>
-      <p>The current run, if any. Useful for reading <code>run_id</code>, <code>cost_usd</code>, <code>iterations</code>, <code>tokens_used</code> and <code>duration_ms</code> from inside the agent.</p>
+      <p>The current run, if any. Useful for reading <code>run_id</code>, <code>cost_usd</code>, <code>iterations</code>, <code>tokens_used</code>, <code>duration_ms</code>, and (0.2.0) <code>context</code>, <code>events</code> and <code>exception</code> from inside the agent.</p>
 
       <h3><code>CheckpointResult</code></h3>
       <div class="table"><table>
