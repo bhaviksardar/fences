@@ -12,7 +12,6 @@ from types import SimpleNamespace as NS
 import agentfences
 from agentfences import (
     governed, checkpoint, checkpoint_sync, log_decision, get_active_run,
-    BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached,
 )
 from agentfences.pricing import price_of
 
@@ -88,35 +87,23 @@ def check_time_limit():
     assert asyncio.run(slow()) == "time_limit"
 
 
-def check_raise_on_breach():
-    cases = [
-        (dict(budget_usd=0.05), dict(cost_delta_usd=0.02), BudgetExceeded),
-        (dict(budget_usd=99, max_iterations=2), {}, IterationLimitReached),
-        (dict(budget_usd=99, max_tokens=10), dict(tokens_used=6), TokenLimitReached),
-    ]
-    for limits, step, expected in cases:
-        @governed(raise_on_breach=True, **limits)
-        async def agent():
-            for _ in range(100):
-                await checkpoint(**step)
-        try:
-            asyncio.run(agent())
-        except expected:
-            pass
-        else:
-            raise AssertionError(f"expected {expected.__name__}")
-
-    @governed(budget_usd=99, max_duration_ms=50, raise_on_breach=True)
-    async def slow():
-        while True:
-            await asyncio.sleep(0.03)
-            await checkpoint()
+def check_removed_apis_fail_loudly():
     try:
-        asyncio.run(slow())
-    except TimeLimitReached as e:
-        assert e.duration_ms > e.max_duration_ms == 50
+        governed(budget_usd=1, raise_on_breach=True)  # removed in 0.3: checkpoint() never raises
+    except TypeError:
+        pass
     else:
-        raise AssertionError("expected TimeLimitReached")
+        raise AssertionError("raise_on_breach should no longer be accepted")
+
+    @governed(budget_usd=1)
+    def agent():
+        checkpoint_sync(0.02, 450)  # removed in 0.3: positional cost and tokens
+    try:
+        agent()
+    except TypeError:
+        pass  # a number isn't a model response, so it can't be priced
+    else:
+        raise AssertionError("positional cost should no longer be accepted")
 
 
 def check_sync_agent():
@@ -239,13 +226,6 @@ def check_extra_costs_and_old_calls():
     resp = NS(model="gpt-4o", usage=NS(prompt_tokens=1000, completion_tokens=0, prompt_tokens_details=None))
     spent, tokens = step(resp, cost_delta_usd=0.01, tokens_used=5)  # e.g. a paid tool call on top
     assert close(spent, priced("gpt-4o", inp=1000) + 0.01) and tokens == 1005
-
-    @governed(budget_usd=1)
-    def old_style():
-        checkpoint_sync(0.02, 450)  # pre-0.1.7 positional form still works
-        run = get_active_run()
-        return run.cost_usd, run.tokens_used
-    assert old_style() == (0.02, 450)
 
 
 def check_budget_stops_on_real_usage():
@@ -709,7 +689,7 @@ if __name__ == "__main__":
     agentfences.init(local_only=True)
     checks = [
         check_readme_quickstart, check_limits_trip_once_exceeded, check_time_limit,
-        check_raise_on_breach, check_sync_agent, check_streaming_agent,
+        check_removed_apis_fail_loudly, check_sync_agent, check_streaming_agent,
         check_concurrent_runs_are_independent, check_nested_runs, check_outside_a_run,
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
