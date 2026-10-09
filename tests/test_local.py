@@ -293,6 +293,140 @@ def check_breach_messages():
         assert "governance limit has been reached" not in result.system_prompt, breach
 
 
+class RecordingClient:
+    """Stands in for the backend client and keeps every payload the SDK would send."""
+    def __init__(self):
+        self.sent = []
+
+    def start_run(self, run_id, agent_name, *limits, context=None):
+        self.sent.append(("start", {"agent_name": agent_name, "context": context}))
+        return {"ok": True}
+
+    def checkpoint(self, *args):
+        return {"ok": True}
+
+    def log_decision(self, run_id, iteration, reasoning, action):
+        self.sent.append(("decision", {"reasoning": reasoning, "action": action}))
+
+    def end_run(self, run_id, status, error=None, exception=None):
+        self.sent.append(("end", {"status": status, "error": error, "exception": exception}))
+
+    def of(self, kind):
+        return [payload for k, payload in self.sent if k == kind]
+
+
+def cloud(**init_args):
+    """Cloud-mode init with the network replaced by a RecordingClient."""
+    agentfences.init(api_key="fc_test", endpoint="http://fences.invalid", **init_args)
+    agentfences.core._client = recorder = RecordingClient()
+    return recorder
+
+
+def check_run_context():
+    sent = cloud(environment="prod", release="v1.4.2")
+    try:
+        @governed(budget_usd=1)
+        async def agent():
+            return dict(get_active_run().context)
+
+        with agentfences.context(user_id="u_1", session_id="s_1"):
+            with agentfences.context(session_id="s_2", trace_id=None):  # inner wins; None is left out
+                inner = asyncio.run(agent())
+            outer = asyncio.run(agent())
+        bare = asyncio.run(agent())
+        assert inner == {"environment": "prod", "release": "v1.4.2", "user_id": "u_1", "session_id": "s_2"}, inner
+        assert outer == {"environment": "prod", "release": "v1.4.2", "user_id": "u_1", "session_id": "s_1"}, outer
+        assert bare == {"environment": "prod", "release": "v1.4.2"}
+        assert [p["context"] for p in sent.of("start")] == [inner, outer, bare]  # and that's what the backend got
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_exception_capture():
+    sent = cloud()
+    try:
+        def fetch_page():
+            raise ValueError("page 7 returned 403")
+
+        @governed(budget_usd=1)
+        def agent():
+            fetch_page()
+        try:
+            agent()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("the agent's exception must propagate")
+        end = sent.of("end")[-1]
+        assert end["status"] == "error" and end["error"] == "ValueError: page 7 returned 403", end
+        e = end["exception"]
+        assert e["type"] == "ValueError" and e["message"] == "page 7 returned 403"
+        assert e["stack"][-1].endswith("in fetch_page") and any(f.endswith("in agent") for f in e["stack"]), e["stack"]
+
+        @governed(budget_usd=1)
+        def ok_agent():
+            return "fine"
+        ok_agent()
+        assert sent.of("end")[-1] == {"status": "success", "error": None, "exception": None}
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_redaction():
+    def scrub(event):
+        if event.get("action") == "internal":
+            return None  # drop this decision entirely
+        if event["type"] == "decision":
+            event["reasoning"] = event["reasoning"].replace("alice@example.com", "[email]")
+        if event["type"] == "run_start":
+            event["context"] = {k: v for k, v in event["context"].items() if k != "user_id"}
+        if event["type"] == "run_end" and event["exception"]:
+            event["error"] = event["exception"]["type"]
+            event["exception"] = dict(event["exception"], message="[redacted]")
+        return event
+
+    sent = cloud(redact=scrub, environment="prod")
+    try:
+        @governed(budget_usd=1)
+        def agent():
+            log_decision("emailing alice@example.com the report", action="send_email")
+            log_decision("checking the internal admin panel", action="internal")
+            raise RuntimeError("SMTP rejected alice@example.com")
+        with agentfences.context(user_id="alice"):
+            try:
+                agent()
+            except RuntimeError:
+                pass
+        agentfences.flush()
+        assert sent.of("start")[-1]["context"] == {"environment": "prod"}
+        assert sent.of("decision") == [{"reasoning": "emailing [email] the report", "action": "send_email"}]
+        end = sent.of("end")[-1]
+        assert end["error"] == "RuntimeError" and end["exception"]["message"] == "[redacted]"
+        assert "alice" not in repr(sent.sent)
+    finally:
+        agentfences.init(local_only=True)
+
+    seen = []
+    handler = logging.Handler()
+    handler.emit = lambda record: seen.append(record.getMessage())
+    logging.getLogger("agentfences").addHandler(handler)
+    for broken in (lambda event: 1 / 0, lambda event: "not a dict"):
+        sent = cloud(redact=broken)
+        try:
+            @governed(budget_usd=1)
+            def leaky():
+                log_decision("secret plans")  # must not crash the agent, and must not be sent
+                return "done"
+            assert leaky() == "done"
+            agentfences.flush()
+            assert sent.of("decision") == [], sent.sent
+            assert sent.of("start") and sent.of("end"), "runs still start and end"
+        finally:
+            agentfences.init(local_only=True)
+    logging.getLogger("agentfences").removeHandler(handler)
+    assert len([m for m in seen if "redact hook failed" in m]) == 2, seen  # once per init
+
+
 if __name__ == "__main__":
     check_requires_init()
     check_breach_messages()
@@ -302,7 +436,7 @@ if __name__ == "__main__":
         check_raise_on_breach, check_sync_agent, check_streaming_agent,
         check_concurrent_runs_are_independent, check_nested_runs, check_outside_a_run,
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
-        check_unknown_model_warns_and_custom_prices,
+        check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
     ]
     for check in checks:
         check()

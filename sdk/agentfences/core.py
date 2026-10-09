@@ -14,6 +14,7 @@ from typing import Optional, Callable
 from .exceptions import FencesError, BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached
 from .client import GovClient
 from .pricing import cost_of, set_custom_prices
+from . import events
 
 log = logging.getLogger("agentfences")
 
@@ -155,6 +156,8 @@ class RunState:
     decisions: list = field(default_factory=list)
     last_breach: Optional[str] = None   # breach from the latest checkpoint; cleared once limits are raised
     warned: bool = False
+    context: dict = field(default_factory=dict)  # environment, release and agentfences.context() values
+    exception: Optional[dict] = None             # type, message and stack if the run raised
 
     @property
     def duration_ms(self) -> int:
@@ -187,6 +190,9 @@ def init(
     local_only: bool = False,
     fail_closed: bool = False,
     prices: Optional[dict] = None,
+    environment: Optional[str] = None,
+    release: Optional[str] = None,
+    redact: Optional[Callable[[dict], Optional[dict]]] = None,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -203,9 +209,16 @@ def init(
     checkpoint(response) prices most OpenAI, Anthropic, Gemini, Mistral, DeepSeek, xAI
     and Groq models itself. Add or override others in USD per 1M tokens:
         agentfences.init(local_only=True, prices={"my-model": {"input": 1.0, "output": 3.0}})
+
+    environment and release tag every run, e.g. environment="prod", release="v1.4.2".
+
+    redact(event) sees every event before it leaves the process (run start context,
+    decisions, run errors) and returns it, changed or not, or None to drop it. If it
+    raises, the event is dropped rather than sent unredacted.
     """
     global _client, _local_only, _fail_closed
     set_custom_prices(prices)
+    events.configure(environment, release, redact)
     _local_only = local_only
     _fail_closed = fail_closed
 
@@ -335,7 +348,9 @@ def _outcome(run: RunState, exc: Optional[BaseException]):
         return ("breached" if run.last_breach else "success"), None
     if isinstance(exc, FencesError):
         return "breached", None
-    return "error", str(exc) or type(exc).__name__  # includes cancellation
+    run.exception = events.exception_info(exc)  # includes cancellation
+    e = run.exception
+    return "error", f"{e['type']}: {e['message']}" if e["message"] else e["type"]
 
 
 def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens, raise_on_breach) -> RunState:
@@ -348,10 +363,14 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
         max_duration_ms=max_duration_ms,
         max_tokens=max_tokens,
         raise_on_breach=raise_on_breach,
+        context=events.current_context(),
     )
     client = _get_client()
     if client:
-        resp = client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens)
+        # The run must start even if redaction drops its context: limits depend on it
+        sent = events.redact({"type": "run_start", "agent_name": agent_name, "context": dict(run.context)}) if run.context else None
+        resp = client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens,
+                                context=(sent or {}).get("context"))
         if "network_error" in resp:
             _warn_unreachable(run, resp["network_error"])
     return run
@@ -360,7 +379,9 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
 def _end_run(run: RunState, status: str, error: Optional[str] = None):
     client = _get_client()
     if client:
-        client.end_run(run.run_id, status=status, error=error)
+        # The run must end even if redaction drops its error details
+        sent = events.redact({"type": "run_end", "status": status, "error": error, "exception": run.exception}) if error else None
+        client.end_run(run.run_id, status=status, error=(sent or {}).get("error"), exception=(sent or {}).get("exception"))
 
 
 # ── Checkpoint ────────────────────────────────────────────────────────────────
@@ -558,5 +579,7 @@ def log_decision(reasoning: str, action: Optional[str] = None):
     run.decisions.append(entry)
 
     client = _get_client()
-    if client:
-        _decisions.put((client, {"run_id": run.run_id, "iteration": run.iterations, "reasoning": reasoning, "action": action}))
+    sent = events.redact({"type": "decision", "reasoning": reasoning, "action": action}) if client else None
+    if sent and sent.get("reasoning"):
+        _decisions.put((client, {"run_id": run.run_id, "iteration": run.iterations,
+                                 "reasoning": sent["reasoning"], "action": sent.get("action")}))
