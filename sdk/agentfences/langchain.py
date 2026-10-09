@@ -20,16 +20,12 @@ from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-from . import core, events
+from . import core
 from .exceptions import FencesStop
-from .pricing import read_usage, cost_of
-from .tools import MAX_ARGS
+from .pricing import read_usage
+from .spans import record_llm_call, record_tool_call
 
 log = logging.getLogger("agentfences")
-
-
-def _error_text(e: BaseException) -> str:
-    return (f"{type(e).__qualname__}: {e}" if str(e) else type(e).__qualname__)[:1000]
 
 
 def _response_of(result) -> Any:
@@ -132,7 +128,8 @@ class FencesCallbackHandler(BaseCallbackHandler):
             else:
                 self._enter(run_id, parent_run_id, "")
             params = kwargs.get("invocation_params") or {}
-            self._started[run_id] = ("llm", params.get("model") or params.get("model_name"), None, time.perf_counter())
+            provider = (kwargs.get("metadata") or {}).get("ls_provider") or "langchain"  # e.g. "openai", "anthropic"
+            self._started[run_id] = ("llm", params.get("model") or params.get("model_name"), provider, time.perf_counter())
         self._safely(go)
 
     def on_chat_model_start(self, serialized, messages, *, run_id, parent_run_id=None, **kwargs):
@@ -143,17 +140,9 @@ class FencesCallbackHandler(BaseCallbackHandler):
 
     def on_llm_end(self, response, *, run_id, **kwargs):
         def record(run):
-            _, model, _, t0 = self._started.pop(run_id, ("llm", None, None, time.perf_counter()))
+            _, model, provider, t0 = self._started.pop(run_id, ("llm", None, "langchain", time.perf_counter()))
             source = _response_of(response)
-            event = {"type": "llm_call", "provider": "langchain", "model": model,
-                     "latency_ms": int((time.perf_counter() - t0) * 1000), "ok": True}
-            usage = read_usage(source) if source is not None else None
-            if usage:
-                event["model"] = usage["model"] or model
-                event.update(input_tokens=usage["input"], cache_read_tokens=usage["cache_read"],
-                             cache_write_tokens=usage["cache_write"], output_tokens=usage["output"],
-                             cost_usd=cost_of(source)[0])
-            core.record_event(event)
+            record_llm_call(provider, model, t0, source, integration="langchain")
             # The model call is the step: count it, price it, check limits
             result = core.checkpoint_sync(source) if source is not None else core.checkpoint_sync()
             if result.breached:
@@ -166,10 +155,8 @@ class FencesCallbackHandler(BaseCallbackHandler):
 
     def on_llm_error(self, error, *, run_id, **kwargs):
         def record(run):
-            _, model, _, t0 = self._started.pop(run_id, ("llm", None, None, time.perf_counter()))
-            core.record_event({"type": "llm_call", "provider": "langchain", "model": model, "ok": False,
-                               "latency_ms": int((time.perf_counter() - t0) * 1000),
-                               "error": _error_text(error), "status": getattr(error, "status_code", None)})
+            _, model, provider, t0 = self._started.pop(run_id, ("llm", None, "langchain", time.perf_counter()))
+            record_llm_call(provider, model, t0, error=error, integration="langchain")
         self._safely(lambda: self._with_run(run_id, record))
         if self._root.get(run_id) == run_id:
             self._safely(lambda: self._exit(run_id, error))
@@ -181,7 +168,7 @@ class FencesCallbackHandler(BaseCallbackHandler):
             self._enter(run_id, parent_run_id, "")
             args = ", ".join(f"{k}={v!r}" for k, v in inputs.items()) if isinstance(inputs, dict) else str(input_str)
             name = kwargs.get("name") or (serialized or {}).get("name") or "tool"
-            self._started[run_id] = ("tool", name, args if len(args) <= MAX_ARGS else args[:MAX_ARGS - 1] + "…", time.perf_counter())
+            self._started[run_id] = ("tool", name, args, time.perf_counter())
         self._safely(go)
 
     def _tool_end(self, run_id, error):
@@ -190,9 +177,7 @@ class FencesCallbackHandler(BaseCallbackHandler):
             if started is None:
                 return
             _, name, args, t0 = started
-            core.record_event({"type": "tool_call", "name": name, "args": args, "ok": error is None,
-                               "error": None if error is None else _error_text(error),
-                               "latency_ms": int((time.perf_counter() - t0) * 1000)})
+            record_tool_call(name, args, t0, error, integration="langchain")
         self._safely(lambda: self._with_run(run_id, record))
 
     def on_tool_end(self, output, *, run_id, **kwargs):

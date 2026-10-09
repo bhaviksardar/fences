@@ -613,7 +613,7 @@ def _send(item, more: list):
     batch = [event]
     while more and more[0][0] == "event" and more[0][2] == run_id and len(batch) < EVENT_BATCH:
         batch.append(more.pop(0)[3])
-    if _events_supported and client.log_events(run_id, batch).get("unsupported"):
+    if _events_supported and client.log_spans(run_id, batch).get("unsupported"):
         _events_supported = False
         log.warning("agentfences: this Fences server doesn't accept tool and model call events yet; "
                     "they're kept on the run locally but not sent")
@@ -655,21 +655,31 @@ def flush(timeout: float = 5.0):
         time.sleep(0.02)
 
 
-def record_event(event: dict):
+def record_span(name: str, elapsed_s: float, attributes: dict, error: Optional[BaseException] = None):
     """
-    Add a tool or model call to the active run's evidence: kept on the run, and sent to
-    the backend (through the redact hook) in cloud mode. Does nothing outside a run.
+    Add a tool or model call to the active run's evidence as an OpenTelemetry-shaped span
+    (GenAI semantic conventions): kept on the run, and sent to the backend through the
+    redact hook in cloud mode. Does nothing outside a run.
     """
     run = get_active_run()
     if run is None:
         return
-    event = {"ts": time.time(), "iteration": run.iterations, **event}
-    run.events.append(event)
+    end = time.time()
+    attrs = {k: v for k, v in attributes.items() if v is not None}
+    attrs["fences.iteration"] = run.iterations
+    if error is not None:
+        attrs["error.type"] = type(error).__qualname__
+        attrs["fences.error.message"] = events.error_text(error)
+        if isinstance(getattr(error, "status_code", None), int):  # e.g. 429 rate limit, 529 overloaded
+            attrs["http.response.status_code"] = error.status_code
+    span = {"name": name, "start_ts": end - elapsed_s, "end_ts": end, "status": "error" if error else "ok", "attributes": attrs}
+    run.events.append(span)
     client = _client
     if client is None or not _events_supported:
         return
-    sent = events.redact(event)
+    sent = events.redact({"type": "span", **span})
     if sent:
+        sent.pop("type", None)
         _decisions.put(("event", client, run.run_id, sent))
 
 

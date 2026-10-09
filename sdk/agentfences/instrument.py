@@ -8,8 +8,8 @@ import importlib
 import time
 from typing import List, Optional
 
-from .core import record_event, get_active_run
-from .pricing import cost_of, read_usage
+from .core import get_active_run
+from .spans import record_llm_call
 
 # (provider, module, class) whose `create` is patched. Async classes return awaitables.
 TARGETS = [
@@ -23,26 +23,7 @@ TARGETS = [
 
 
 def _record(provider: str, kwargs: dict, started: float, response=None, error: Optional[BaseException] = None):
-    event = {
-        "type": "llm_call",
-        "provider": provider,
-        "model": kwargs.get("model"),
-        "latency_ms": int((time.perf_counter() - started) * 1000),
-        "ok": error is None,
-    }
-    if error is not None:
-        event["error"] = (f"{type(error).__qualname__}: {error}" if str(error) else type(error).__qualname__)[:1000]
-        event["status"] = getattr(error, "status_code", None)  # e.g. 429 rate limit, 529 overloaded
-    elif kwargs.get("stream"):
-        event["stream"] = True  # usage arrives with the stream; pass the final message to checkpoint()
-    else:
-        usage = read_usage(response)
-        if usage:
-            event["model"] = usage["model"] or event["model"]
-            event.update(input_tokens=usage["input"], cache_read_tokens=usage["cache_read"],
-                         cache_write_tokens=usage["cache_write"], output_tokens=usage["output"])
-            event["cost_usd"] = cost_of(response)[0]
-    record_event(event)
+    record_llm_call(provider, kwargs.get("model"), started, response, error, stream=bool(kwargs.get("stream")))
 
 
 def _wrap(create, provider: str, is_async: bool):

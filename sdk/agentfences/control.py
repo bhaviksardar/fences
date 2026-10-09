@@ -24,6 +24,7 @@ _client = None
 _interval = 15.0
 pause_timeout_s = 3600.0
 _supported = {"heartbeat": True, "approvals": True}
+_asked: dict = {}              # approval_id -> (perf_counter at request, reason, amount_usd)
 
 
 @dataclass
@@ -152,7 +153,7 @@ async def wait_if_paused_async(run):
 
 def _ask(reason: str, amount_usd: Optional[float]):
     """Send the request; returns (run, approval_id) to wait on, or an Approval already decided."""
-    from .core import get_active_run, record_event
+    from .core import get_active_run
     run = get_active_run()
     if run is None:
         return Approval(False, note="request_approval() was called outside a governed run")
@@ -161,8 +162,10 @@ def _ask(reason: str, amount_usd: Optional[float]):
     if not _supported["approvals"]:
         return Approval(False, note="This Fences server doesn't support approvals")
     approval_id = str(uuid.uuid4())
-    record_event({"type": "approval_requested", "approval_id": approval_id, "reason": reason, "amount_usd": amount_usd})
+    _asked[approval_id] = (time.perf_counter(), reason, amount_usd)
     resp = _client.request_approval(run.run_id, approval_id, reason, amount_usd)
+    if resp.get("unsupported") or "network_error" in resp:
+        _asked.pop(approval_id, None)
     if resp.get("unsupported"):
         _unsupported("approvals", "approval requests", "they are denied")
         return Approval(False, note="This Fences server doesn't support approvals")
@@ -179,13 +182,17 @@ def _waiting(run, approval_id: str, deadline: float) -> bool:
 
 
 def _settle(run, approval_id: str) -> Approval:
-    from .core import record_event
+    from .core import record_span
     run.awaiting -= 1
     answer = run.approvals.pop(approval_id, None) or Approval(False, note="No answer before the timeout")
     if answer.granted and answer.amount_usd and run.budget_usd is not None:  # an unlimited run stays unlimited
         run.budget_usd += answer.amount_usd
-    record_event({"type": "approval_answered", "approval_id": approval_id, "granted": answer.granted,
-                  "by": answer.by, "note": answer.note, "amount_usd": answer.amount_usd})
+    started, reason, asked_usd = _asked.pop(approval_id, (time.perf_counter(), None, None))
+    record_span("fences.approval", time.perf_counter() - started, {  # one span from request to answer
+        "fences.approval.id": approval_id, "fences.approval.reason": reason,
+        "fences.approval.amount_usd": asked_usd, "fences.approval.granted": answer.granted,
+        "fences.approval.by": answer.by, "fences.approval.note": answer.note,
+        "fences.approval.granted_usd": answer.amount_usd})
     return answer
 
 

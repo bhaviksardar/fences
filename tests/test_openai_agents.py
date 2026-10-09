@@ -72,11 +72,14 @@ def check_stops_on_budget():
         agentfences.flush()
         assert [p["agent_name"] for p in sent.of("start")] == ["research_agent"]
         assert sent.of("end")[-1]["status"] == "breached", sent.of("end")
-        llm = [e for e in sent.of("event") if e["type"] == "llm_call"]
-        tools = [e for e in sent.of("event") if e["type"] == "tool_call"]
-        assert len(llm) == 4 and all(math.isclose(e["cost_usd"], PER_CALL) for e in llm), llm
-        assert llm[0]["model"] == "gpt-4o" and llm[0]["cache_read_tokens"] == 400
-        assert len(tools) == 3 and tools[0]["name"] == "lookup" and tools[0]["args"] == '{"query": "q1"}', tools
+        spans = [e["attributes"] for e in sent.of("event")]
+        llm = [a for a in spans if a["gen_ai.operation.name"] == "chat"]
+        tools = [a for a in spans if a["gen_ai.operation.name"] == "execute_tool"]
+        assert len(llm) == 4 and all(math.isclose(a["fences.cost_usd"], PER_CALL) for a in llm), llm
+        assert llm[0]["gen_ai.request.model"] == "gpt-4o" and llm[0]["gen_ai.provider.name"] == "openai"
+        assert llm[0]["gen_ai.usage.input_tokens"] == 1000 and llm[0]["gen_ai.usage.cache_read.input_tokens"] == 400
+        assert len(tools) == 3 and tools[0]["gen_ai.tool.name"] == "lookup" and tools[0]["gen_ai.tool.call.arguments"] == '{"query": "q1"}'
+        assert tools[0]["gen_ai.tool.call.id"] == "c1", tools[0]
     finally:
         agentfences.init(local_only=True)
 
@@ -88,7 +91,7 @@ def check_success():
         assert result.final_output == "done"
         agentfences.flush()
         assert [p["agent_name"] for p in sent.of("start")] == ["cat_researcher"] and sent.of("end")[-1]["status"] == "success"
-        assert [e["type"] for e in sent.of("event")] == ["llm_call", "tool_call", "llm_call", "tool_call", "llm_call"]
+        assert [e["attributes"]["gen_ai.operation.name"] for e in sent.of("event")] == ["chat", "execute_tool", "chat", "execute_tool", "chat"]
     finally:
         agentfences.init(local_only=True)
 

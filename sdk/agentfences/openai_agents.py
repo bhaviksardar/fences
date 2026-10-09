@@ -20,8 +20,7 @@ from agents.models import get_default_model
 
 from . import core
 from .exceptions import FencesStop
-from .pricing import cost_of, read_usage
-from .tools import MAX_ARGS
+from .spans import record_llm_call, record_tool_call
 
 
 def _model_name(agent) -> str:
@@ -48,14 +47,7 @@ class FencesRunHooks(RunHooks):
             return
         t0 = self._started.pop(("llm", id(agent)), time.perf_counter())
         source = {"model": _model_name(agent), "usage": response.usage}  # Responses-API-shaped usage
-        usage = read_usage(source)
-        event = {"type": "llm_call", "provider": "openai-agents", "model": source["model"], "ok": True,
-                 "latency_ms": int((time.perf_counter() - t0) * 1000)}
-        if usage:
-            event.update(input_tokens=usage["input"], cache_read_tokens=usage["cache_read"],
-                         cache_write_tokens=usage["cache_write"], output_tokens=usage["output"],
-                         cost_usd=cost_of(source)[0])
-        core.record_event(event)
+        record_llm_call("openai", source["model"], t0, source, integration="openai-agents")
         result = await core.checkpoint(source)  # the model call is the step: count it, price it, check limits
         if result.breached:
             raise FencesStop(result)
@@ -67,10 +59,9 @@ class FencesRunHooks(RunHooks):
         if core.get_active_run() is None:
             return
         t0 = self._started.pop(getattr(context, "tool_call_id", None) or ("tool", id(tool)), time.perf_counter())
-        args = str(getattr(context, "tool_arguments", "") or "")
-        core.record_event({"type": "tool_call", "name": getattr(context, "tool_name", None) or getattr(tool, "name", "tool"),
-                           "args": args if len(args) <= MAX_ARGS else args[:MAX_ARGS - 1] + "…", "ok": True,
-                           "error": None, "latency_ms": int((time.perf_counter() - t0) * 1000)})
+        record_tool_call(getattr(context, "tool_name", None) or getattr(tool, "name", "tool"),
+                         str(getattr(context, "tool_arguments", "") or ""), t0,
+                         call_id=getattr(context, "tool_call_id", None), integration="openai-agents")
 
 
 async def run(agent, input: Any, *, agent_name: Optional[str] = None, budget_usd: Optional[float] = None,

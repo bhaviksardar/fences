@@ -79,18 +79,22 @@ def main():
         run = get_active_run()
         return list(run.events), run.cost_usd, run.iterations
 
-    events, spent, iterations = asyncio.run(agent())
-    assert [(e["provider"], e["ok"]) for e in events] == [
-        ("openai", True), ("openai", True), ("anthropic", True), ("anthropic", True), ("openai", False)], events
-    assert all(e["type"] == "llm_call" and e["latency_ms"] >= 0 for e in events)
+    spans, spent, iterations = asyncio.run(agent())
+    a = [s["attributes"] for s in spans]
+    assert [(x["gen_ai.provider.name"], s["status"]) for x, s in zip(a, spans)] == [
+        ("openai", "ok"), ("openai", "ok"), ("anthropic", "ok"), ("anthropic", "ok"), ("openai", "error")], spans
+    assert all(x["gen_ai.operation.name"] == "chat" and s["end_ts"] >= s["start_ts"] for x, s in zip(a, spans))
 
-    chat, resp, msg, amsg, failed = events
-    assert chat["model"] == "gpt-4o-2024-08-06" and (chat["input_tokens"], chat["cache_read_tokens"], chat["output_tokens"]) == (600, 400, 200)
-    assert math.isclose(chat["cost_usd"], cost("gpt-4o", inp=600, cache_read=400, out=200))
-    assert math.isclose(resp["cost_usd"], cost("gpt-4o", inp=500, out=100))
-    assert msg == {**amsg, "ts": msg["ts"], "latency_ms": msg["latency_ms"]}  # sync and async record the same
-    assert math.isclose(msg["cost_usd"], cost("claude-sonnet-4-5", inp=100, cache_read=1000, out=50))
-    assert failed["status"] == 429 and failed["error"].startswith("RateLimitError")
+    chat, resp, msg, amsg, failed = a
+    assert spans[0]["name"] == "chat gpt-4o-2024-08-06" and chat["gen_ai.request.model"] == "gpt-4o"
+    assert (chat["gen_ai.usage.input_tokens"], chat["gen_ai.usage.cache_read.input_tokens"], chat["gen_ai.usage.output_tokens"]) == (1000, 400, 200)
+    assert math.isclose(chat["fences.cost_usd"], cost("gpt-4o", inp=600, cache_read=400, out=200))
+    assert math.isclose(resp["fences.cost_usd"], cost("gpt-4o", inp=500, out=100))
+    assert msg == amsg  # sync and async record the same
+    assert msg["gen_ai.usage.input_tokens"] == 1100  # Anthropic reports cached input separately; OTel totals it
+    assert math.isclose(msg["fences.cost_usd"], cost("claude-sonnet-4-5", inp=100, cache_read=1000, out=50))
+    assert failed["http.response.status_code"] == 429 and failed["error.type"] == "RateLimitError"
+    assert "gen_ai.usage.input_tokens" not in failed and spans[4]["name"] == "chat rate-limited"
     assert (spent, iterations) == (0, 0), "recording doesn't checkpoint or add spend"
     print("instrument checks passed")
 

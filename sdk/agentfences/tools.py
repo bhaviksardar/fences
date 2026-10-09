@@ -8,9 +8,8 @@ import reprlib
 import time
 from typing import Callable, Optional
 
-from .core import record_event, get_active_run
-
-MAX_ARGS = 300
+from .core import get_active_run
+from .spans import MAX_ARGS, record_tool_call
 
 _short = reprlib.Repr()
 _short.maxstring, _short.maxother, _short.maxlist, _short.maxdict = 60, 60, 5, 5
@@ -25,17 +24,6 @@ def args_summary(func: Callable, args: tuple, kwargs: dict) -> str:
         items = [(str(i), v) for i, v in enumerate(args)] + list(kwargs.items())
     text = ", ".join(f"{k}={_short.repr(v)}" for k, v in items)
     return text if len(text) <= MAX_ARGS else text[:MAX_ARGS - 1] + "…"
-
-
-def _record(name: str, args: str, started: float, error: Optional[BaseException]):
-    record_event({
-        "type": "tool_call",
-        "name": name,
-        "args": args,
-        "ok": error is None,
-        "error": None if error is None else (f"{type(error).__qualname__}: {error}" if str(error) else type(error).__qualname__)[:1000],
-        "latency_ms": int((time.perf_counter() - started) * 1000),
-    })
 
 
 def tool(func: Optional[Callable] = None, *, name: Optional[str] = None):
@@ -64,9 +52,9 @@ def tool(func: Optional[Callable] = None, *, name: Optional[str] = None):
                 try:
                     out = await f(*args, **kwargs)
                 except Exception as e:
-                    _record(label, summary, started, e)
+                    record_tool_call(label, summary, started, e)
                     raise
-                _record(label, summary, started, None)
+                record_tool_call(label, summary, started)
                 return out
             return async_wrapper
 
@@ -78,9 +66,9 @@ def tool(func: Optional[Callable] = None, *, name: Optional[str] = None):
             try:
                 out = f(*args, **kwargs)
             except Exception as e:
-                _record(label, summary, started, e)
+                record_tool_call(label, summary, started, e)
                 raise
-            _record(label, summary, started, None)
+            record_tool_call(label, summary, started)
             return out
         return wrapper
 

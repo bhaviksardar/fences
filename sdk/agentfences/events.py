@@ -52,6 +52,11 @@ def current_context() -> dict:
     return {**_process_context, **_context.get()}
 
 
+def error_text(e: BaseException) -> str:
+    """`Type: message`, or just the type when there's no message."""
+    return (f"{type(e).__qualname__}: {e}" if str(e) else type(e).__qualname__)[:MAX_MESSAGE]
+
+
 def exception_info(exc: BaseException) -> dict:
     """Type, message and the last frames of the stack, for the run's error report."""
     frames = traceback.extract_tb(exc.__traceback__)[-MAX_FRAMES:]
