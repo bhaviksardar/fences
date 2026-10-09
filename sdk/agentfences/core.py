@@ -12,7 +12,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
-from .exceptions import FencesError, BudgetExceeded, IterationLimitReached, TimeLimitReached, TokenLimitReached, AgentQuarantined
+from .exceptions import AgentQuarantined
 from .client import GovClient
 from .pricing import cost_of, set_custom_prices
 from . import events, control
@@ -164,7 +164,6 @@ class RunState:
     max_iterations: int
     max_duration_ms: int
     max_tokens: int
-    raise_on_breach: bool
     cost_usd: float = 0.0
     iterations: int = 0
     tokens_used: int = 0
@@ -296,7 +295,6 @@ def governed(
     max_iterations: int = 100,
     max_duration_ms: int = 300_000,
     max_tokens: int = 0,
-    raise_on_breach: bool = False,
 ):
     """
     Decorator that applies governance policy to an agent function.
@@ -307,9 +305,9 @@ def governed(
         max_iterations: Maximum number of checkpoint() calls allowed.
         max_duration_ms: Maximum wall-clock duration in milliseconds.
         max_tokens: Maximum total tokens (input + output) allowed. 0 = no limit.
-        raise_on_breach: If True, raises an exception on breach (legacy behaviour).
-                         If False (default), checkpoint() returns a CheckpointResult
-                         with breached=True so the agent can handle it gracefully.
+
+    checkpoint() never raises: a crossed limit comes back as a CheckpointResult with
+    breached=True, so the agent can wrap up gracefully.
 
     Usage:
         agentfences.init(local_only=True)
@@ -317,7 +315,7 @@ def governed(
         @governed(budget_usd=0.50, max_iterations=20)
         async def run_agent(query: str):
             response = call_llm(query)
-            result = await checkpoint(cost_delta_usd=0.02, tokens_used=response.usage.total_tokens)
+            result = await checkpoint(response)
             if result.breached:
                 messages.append({"role": "system", "content": result.system_prompt})
                 final = call_llm_summarize(messages)
@@ -325,7 +323,7 @@ def governed(
             return response
     """
     def decorator(func: Callable) -> Callable:
-        start = functools.partial(_start_run, func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens, raise_on_breach)
+        start = functools.partial(_start_run, func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens)
 
         if inspect.isasyncgenfunction(func):
             @functools.wraps(func)
@@ -382,14 +380,12 @@ def _outcome(run: RunState, exc: Optional[BaseException]):
     """(status, error) to report when the governed function exits."""
     if exc is None or isinstance(exc, GeneratorExit):  # GeneratorExit: consumer stopped a stream early
         return ("breached" if run.last_breach else "success"), None
-    if isinstance(exc, FencesError):
-        return "breached", None
     run.exception = events.exception_info(exc)  # includes cancellation
     e = run.exception
     return "error", f"{e['type']}: {e['message']}" if e["message"] else e["type"]
 
 
-def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens, raise_on_breach) -> RunState:
+def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens) -> RunState:
     run_id = str(uuid.uuid4())
     run = RunState(
         run_id=run_id,
@@ -398,7 +394,6 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
         max_iterations=max_iterations,
         max_duration_ms=max_duration_ms,
         max_tokens=max_tokens,
-        raise_on_breach=raise_on_breach,
         context=events.current_context(),
     )
     client = _client
@@ -441,14 +436,6 @@ def _local_breach(run: RunState) -> Optional[str]:
 
 def _server_check(run: RunState, cost_delta_usd: float, tokens_delta: int) -> dict:
     return _client.checkpoint(run.run_id, cost_delta_usd, run.iterations, run.duration_ms, tokens_delta)
-
-
-_BREACH_EXCEPTIONS = {
-    "budget_exceeded": lambda r: BudgetExceeded(r.cost_usd, r.budget_usd),
-    "iteration_limit": lambda r: IterationLimitReached(r.iterations, r.max_iterations),
-    "time_limit":      lambda r: TimeLimitReached(r.duration_ms, r.max_duration_ms),
-    "token_limit":     lambda r: TokenLimitReached(r.tokens_used, r.max_tokens),
-}
 
 
 def _decide(run: RunState, resp: Optional[dict]) -> CheckpointResult:
@@ -499,8 +486,6 @@ def _breach(run: RunState) -> CheckpointResult:
         duration_ms=run.duration_ms,
     )
     result.spent_usd = run.cost_usd
-    if run.raise_on_breach:
-        raise _BREACH_EXCEPTIONS.get(run.last_breach, lambda r: FencesError(result.message))(run)
     return result
 
 
@@ -515,9 +500,8 @@ def _record_step(cost_delta_usd: float, tokens_used: int) -> Optional[RunState]:
 
 def _measure(response, cost_delta_usd: float, tokens_used: int):
     """(cost, tokens) for one step: the response's priced usage plus any extra amounts passed."""
-    if isinstance(response, (int, float)) and not isinstance(response, bool):
-        # Before 0.1.7 the first argument was the cost: checkpoint(0.02) or checkpoint(0.02, 450)
-        return float(response), int(cost_delta_usd) + tokens_used
+    if isinstance(response, (int, float)):  # checkpoint(0.02) would otherwise price 0.02 as a "response"
+        raise TypeError("checkpoint() takes the model's response first; pass a cost as checkpoint(cost_delta_usd=...)")
     if response is None:
         return cost_delta_usd, tokens_used
     cost, tokens = cost_of(response)
