@@ -8,6 +8,7 @@ import logging
 import functools
 import threading
 import contextvars
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
@@ -140,6 +141,10 @@ def _make_breach_result(breach_type: str, **kwargs) -> CheckpointResult:
 
 # ── RunState ──────────────────────────────────────────────────────────────────
 
+MAX_EVENTS_PER_RUN = 1000
+EVENT_BATCH = 50
+
+
 @dataclass
 class RunState:
     run_id: str
@@ -157,6 +162,8 @@ class RunState:
     last_breach: Optional[str] = None   # breach from the latest checkpoint; cleared once limits are raised
     warned: bool = False
     context: dict = field(default_factory=dict)  # environment, release and agentfences.context() values
+    # Tool and model calls, newest kept. ponytail: capped per run so a runaway agent can't eat memory
+    events: deque = field(default_factory=lambda: deque(maxlen=MAX_EVENTS_PER_RUN))
     exception: Optional[dict] = None             # type, message and stack if the run raised
 
     @property
@@ -193,6 +200,7 @@ def init(
     environment: Optional[str] = None,
     release: Optional[str] = None,
     redact: Optional[Callable[[dict], Optional[dict]]] = None,
+    instrument: bool = False,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -215,10 +223,16 @@ def init(
     redact(event) sees every event before it leaves the process (run start context,
     decisions, run errors) and returns it, changed or not, or None to drop it. If it
     raises, the event is dropped rather than sent unredacted.
+
+    instrument=True records every OpenAI and Anthropic model call made inside a governed
+    run (model, tokens, cost, latency, errors) without changing your code.
     """
     global _client, _local_only, _fail_closed
     set_custom_prices(prices)
     events.configure(environment, release, redact)
+    if instrument:
+        from .instrument import instrument as patch_clients
+        patch_clients()
     _local_only = local_only
     _fail_closed = fail_closed
 
@@ -523,21 +537,49 @@ def checkpoint_sync(response=None, cost_delta_usd: float = 0.0, tokens_used: int
 
 # ── Decision trail ────────────────────────────────────────────────────────────
 
-# Decisions go to the backend from one background thread, in order, so
-# log_decision() never blocks the agent on a network round trip.
+# Decisions and events go to the backend from one background thread, in order, so
+# log_decision() and recorded calls never block the agent on a network round trip.
+# Items: ("decision", client, payload) or ("event", client, run_id, event).
 _decisions: "queue.Queue" = queue.Queue()
 _worker: Optional[threading.Thread] = None
+_events_supported = True  # off once a server says it has no events endpoint
+
+
+def _send(item, more: list):
+    """Send one item; consecutive events for the same run go in one request."""
+    global _events_supported
+    if item[0] == "decision":
+        item[1].log_decision(**item[2])
+        return
+    _, client, run_id, event = item
+    batch = [event]
+    while more and more[0][0] == "event" and more[0][2] == run_id and len(batch) < EVENT_BATCH:
+        batch.append(more.pop(0)[3])
+    if _events_supported and client.log_events(run_id, batch).get("unsupported"):
+        _events_supported = False
+        log.warning("agentfences: this Fences server doesn't accept tool and model call events yet; "
+                    "they're kept on the run locally but not sent")
 
 
 def _decision_worker():
+    pending: list = []
     while True:
-        client, payload = _decisions.get()
+        if not pending:
+            pending.append(_decisions.get())
+        while True:  # take everything queued so far, so a burst of events goes out together
+            try:
+                pending.append(_decisions.get_nowait())
+            except queue.Empty:
+                break
+        item = pending.pop(0)
+        before = len(pending)
         try:
-            client.log_decision(**payload)
+            _send(item, pending)
         except Exception:
             pass
         finally:
-            _decisions.task_done()
+            for _ in range(1 + before - len(pending)):  # this item plus any batched with it
+                _decisions.task_done()
 
 
 def _start_decision_worker():
@@ -548,11 +590,29 @@ def _start_decision_worker():
 
 
 def flush(timeout: float = 5.0):
-    """Wait up to `timeout` seconds for queued decisions to reach the backend.
+    """Wait up to `timeout` seconds for queued decisions and events to reach the backend.
     Runs automatically at exit; call it yourself in serverless handlers."""
     deadline = time.time() + timeout
     while _decisions.unfinished_tasks and time.time() < deadline:
         time.sleep(0.02)
+
+
+def record_event(event: dict):
+    """
+    Add a tool or model call to the active run's evidence: kept on the run, and sent to
+    the backend (through the redact hook) in cloud mode. Does nothing outside a run.
+    """
+    run = get_active_run()
+    if run is None:
+        return
+    event = {"ts": time.time(), "iteration": run.iterations, **event}
+    run.events.append(event)
+    client = _get_client()
+    if client is None or not _events_supported:
+        return
+    sent = events.redact(event)
+    if sent:
+        _decisions.put(("event", client, run.run_id, sent))
 
 
 atexit.register(flush)
@@ -581,5 +641,5 @@ def log_decision(reasoning: str, action: Optional[str] = None):
     client = _get_client()
     sent = events.redact({"type": "decision", "reasoning": reasoning, "action": action}) if client else None
     if sent and sent.get("reasoning"):
-        _decisions.put((client, {"run_id": run.run_id, "iteration": run.iterations,
-                                 "reasoning": sent["reasoning"], "action": sent.get("action")}))
+        _decisions.put(("decision", client, {"run_id": run.run_id, "iteration": run.iterations,
+                                             "reasoning": sent["reasoning"], "action": sent.get("action")}))

@@ -311,6 +311,16 @@ class RecordingClient:
     def end_run(self, run_id, status, error=None, exception=None):
         self.sent.append(("end", {"status": status, "error": error, "exception": exception}))
 
+    events_supported = True
+    batches = []
+
+    def log_events(self, run_id, events):
+        if not self.events_supported:
+            return {"unsupported": True}
+        self.batches.append(len(events))
+        self.sent.extend(("event", e) for e in events)
+        return {"ok": True}
+
     def of(self, kind):
         return [payload for k, payload in self.sent if k == kind]
 
@@ -427,6 +437,95 @@ def check_redaction():
     assert len([m for m in seen if "redact hook failed" in m]) == 2, seen  # once per init
 
 
+def check_tool_calls():
+    @agentfences.tool
+    def web_search(query, limit=5):
+        if query == "blocked":
+            raise PermissionError("403 from search API")
+        return [query] * limit
+
+    @agentfences.tool(name="fetch")
+    async def fetch_page(url):
+        await asyncio.sleep(0.01)
+        return "<html>"
+
+    assert web_search("outside a run", limit=1) == ["outside a run"]  # no run: just calls through
+
+    @governed(budget_usd=1)
+    async def agent():
+        web_search("cats", limit=2)
+        await fetch_page("https://example.com/" + "x" * 500)
+        try:
+            web_search("blocked")
+        except PermissionError:
+            pass  # the tool's exception still reaches the agent
+        return list(get_active_run().events)
+
+    calls = asyncio.run(agent())
+    assert [(c["name"], c["ok"]) for c in calls] == [("web_search", True), ("fetch", True), ("web_search", False)], calls
+    assert calls[0]["args"] == "query='cats', limit=2" and calls[0]["type"] == "tool_call"
+    assert len(calls[1]["args"]) <= 300 and calls[1]["latency_ms"] >= 10
+    assert calls[2]["error"] == "PermissionError: 403 from search API"
+
+
+def check_events_are_sent_batched_and_redacted():
+    sent = cloud(redact=lambda e: None if e.get("name") == "secret_tool" else
+                 dict(e, args=e["args"].replace("hunter2", "***")) if e["type"] == "tool_call" else e)
+    try:
+        @agentfences.tool
+        def login(password):
+            return True
+
+        @agentfences.tool
+        def secret_tool():
+            return 1
+
+        @governed(budget_usd=1)
+        def agent():
+            for _ in range(30):
+                login("hunter2")
+            secret_tool()
+            log_decision("done logging in")
+            return len(get_active_run().events)
+        assert agent() == 31  # everything is kept on the run locally, even what's not sent
+        agentfences.flush()
+        tool_events = sent.of("event")
+        assert len(tool_events) == 30 and all(e["args"] == "password='***'" for e in tool_events)
+        assert sum(sent.batches) == 30 and len(sent.batches) < 30, sent.batches  # sent in batches, not one by one
+        assert "hunter2" not in repr(sent.sent) and sent.of("decision")
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_old_server_without_events():
+    seen = []
+    handler = logging.Handler()
+    handler.emit = lambda record: seen.append(record.getMessage())
+    logging.getLogger("agentfences").addHandler(handler)
+    sent = cloud()
+    sent.events_supported = False
+    try:
+        @agentfences.tool
+        def ping():
+            return "pong"
+
+        @governed(budget_usd=1)
+        def agent():
+            for _ in range(5):
+                ping()
+                agentfences.flush()
+            log_decision("still logged")
+            return len(get_active_run().events)
+        assert agent() == 5
+        agentfences.flush()
+        assert sent.of("decision"), "decisions still go through"
+        assert len([m for m in seen if "doesn't accept tool and model call events" in m]) == 1, seen
+    finally:
+        agentfences.init(local_only=True)
+        agentfences.core._events_supported = True
+        logging.getLogger("agentfences").removeHandler(handler)
+
+
 if __name__ == "__main__":
     check_requires_init()
     check_breach_messages()
@@ -437,6 +536,7 @@ if __name__ == "__main__":
         check_concurrent_runs_are_independent, check_nested_runs, check_outside_a_run,
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
+        check_tool_calls, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
     ]
     for check in checks:
         check()

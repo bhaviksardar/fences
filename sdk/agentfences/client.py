@@ -40,6 +40,18 @@ class GovClient:
         except Exception:
             return {}
 
+    def log_events(self, run_id: str, events: list) -> dict:
+        """Returns {"unsupported": True} if the server has no events endpoint (older servers)."""
+        try:
+            resp = requests.post(f"{self.endpoint}/api/runs/{run_id}/events", json={"events": events},
+                                 headers={"X-API-Key": self.api_key}, timeout=self.timeout)
+        except requests.RequestException as e:
+            return {"network_error": str(e)}
+        if resp.status_code in (404, 405) and resp.headers.get("content-type", "").startswith("application/json") \
+                and resp.json().get("detail") in ("Not Found", "Method Not Allowed"):  # the route itself is missing
+            return {"unsupported": True}
+        return {"ok": resp.ok}
+
     def end_run(self, run_id: str, status: str, error: Optional[str] = None, exception: Optional[dict] = None) -> dict:
         payload = {"status": status, "error": error}
         if exception:
