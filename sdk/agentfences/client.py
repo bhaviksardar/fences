@@ -8,15 +8,19 @@ class GovClient:
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
 
-    def start_run(self, run_id: str, agent_name: str, budget_usd: float, max_iterations: int, max_duration_ms: int, max_tokens: int) -> dict:
-        return self._post("/api/runs/start", {
+    def start_run(self, run_id: str, agent_name: str, budget_usd: float, max_iterations: int, max_duration_ms: int, max_tokens: int,
+                  context: Optional[dict] = None) -> dict:
+        payload = {
             "run_id": run_id,
             "agent_name": agent_name,
             "budget_usd": budget_usd,
             "max_iterations": max_iterations,
             "max_duration_ms": max_duration_ms,
             "max_tokens": max_tokens,
-        })
+        }
+        if context:
+            payload["context"] = context
+        return self._post("/api/runs/start", payload)
 
     def checkpoint(self, run_id: str, cost_delta_usd: float, iterations: int, duration_ms: int, tokens_used: int) -> dict:
         return self._post(f"/api/runs/{run_id}/checkpoint", {
@@ -36,11 +40,11 @@ class GovClient:
         except Exception:
             return {}
 
-    def end_run(self, run_id: str, status: str, error: Optional[str] = None) -> dict:
-        return self._post(f"/api/runs/{run_id}/end", {
-            "status": status,
-            "error": error,
-        })
+    def end_run(self, run_id: str, status: str, error: Optional[str] = None, exception: Optional[dict] = None) -> dict:
+        payload = {"status": status, "error": error}
+        if exception:
+            payload["exception"] = exception
+        return self._post(f"/api/runs/{run_id}/end", payload)
 
     def _post(self, path: str, payload: dict) -> dict:
         try:

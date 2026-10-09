@@ -120,6 +120,34 @@ def my_agent(query: str):
 
 A governed async generator (a streaming agent) stays governed until the stream is exhausted. Concurrent agents in one event loop and nested `@governed` calls each get their own run.
 
+## Context, errors and redaction
+
+Tag runs so on-call can see which deploy and which customer a run belongs to:
+
+```python
+agentfences.init(api_key="fc_...", endpoint="https://...", environment="prod", release="v1.4.2")
+
+with agentfences.context(user_id="u_123", session_id="s_9", trace_id=span_id):
+    await support_agent(question)   # every run started in here carries these values
+```
+
+Blocks nest (inner values win), and `get_active_run().context` shows a run's values from inside the agent.
+
+When a governed run raises, Fences records the exception type, message and the last 15 stack frames with the run, and its error reads `ValueError: page 7 returned 403` rather than just the message. The exception still reaches your code as usual.
+
+Everything that leaves your process (a run's context, decisions, and a failed run's error) passes through an optional `redact` hook first. Return the event, changed or not, or `None` to drop it:
+
+```python
+def redact(event):
+    if event["type"] == "decision":
+        event["reasoning"] = EMAIL.sub("[email]", event["reasoning"])
+    return event
+
+agentfences.init(api_key="fc_...", endpoint="https://...", redact=redact)
+```
+
+Events have a `type` of `run_start` (`context`), `decision` (`reasoning`, `action`) or `run_end` (`status`, `error`, `exception`). If the hook raises, that event is dropped rather than sent unredacted, and a warning is logged once. Runs still start and end, so limits keep working.
+
 ## Modes
 
 **Local (free)** — governance runs entirely in-process. No account, no backend, no API key.
