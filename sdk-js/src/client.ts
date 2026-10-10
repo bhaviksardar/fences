@@ -18,6 +18,9 @@ export class FencesClient {
   logDecision(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/decisions`, body); }
   endRun(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/end`, body); }
   logSpans(runId: string, spans: unknown[]): Promise<Reply> { return this.post(`/api/runs/${runId}/spans`, { spans }, true); }
+  /** Report live runs; the reply may carry commands for them. */
+  heartbeat(runs: unknown[]): Promise<Reply> { return this.post("/api/heartbeat", { runs }, true); }
+  requestApproval(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/approvals`, body, true); }
 
   /**
    * optional: an endpoint older servers may not have. A missing route returns

@@ -1,0 +1,35 @@
+# Publishes sdk-js to npm when a tag like sdk-js-v0.4.0 is pushed.
+# Uses npm trusted publishing (OIDC): no npm token or 2FA code is stored anywhere.
+# One-time setup on npmjs.com: package agentfences -> Settings -> Trusted publisher ->
+# GitHub Actions, repository bhaviksardar/fences, workflow publish-npm.yml.
+name: publish-npm
+
+on:
+  push:
+    tags: ["sdk-js-v*"]
+
+permissions:
+  contents: read
+  id-token: write  # lets npm verify this workflow's identity
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk-js
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@^11.5.1  # trusted publishing needs npm 11.5.1+
+      - name: Tag matches package.json and VERSION
+        run: |
+          tag="${GITHUB_REF_NAME#sdk-js-v}"
+          test "$tag" = "$(node -p "require('./package.json').version")"
+          grep -q "VERSION = \"$tag\"" src/version.ts
+      - run: npm ci
+      - run: npm test
+      - run: npm publish --provenance --access public
