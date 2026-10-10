@@ -59,6 +59,25 @@ init({ apiKey: process.env.FENCES_API_KEY, endpoint: "https://your-fences-host",
 
 The server is authoritative for limits and sees spend across processes. If it can't be reached, limits are enforced locally; pass `failClosed: true` to stop instead. A rejected key throws `FencesAuthError`; a quarantined agent throws `AgentQuarantined` before any of its code runs. In serverless handlers, `await flush()` before returning so queued decisions and spans are sent.
 
+## Live control
+
+In cloud mode a heartbeat (every 15 seconds, `init({ heartbeatS })`) lets whoever is on call act on a running agent from the dashboard:
+
+- **Stop:** the next `checkpoint()` returns `breachType: "stopped_by_user"`, so the agent wraps up gracefully.
+- **Pause and resume:** a paused run waits inside its next `checkpoint()` until it's resumed; after `pauseTimeoutS` (default one hour) it returns `breachType: "paused"`.
+- **Limits** changed in the dashboard apply to the run immediately. **Quarantine** makes the governed call throw `AgentQuarantined` before any agent code runs.
+
+An agent can ask a person before doing something risky:
+
+```ts
+import { requestApproval } from "agentfences";
+
+const approval = await requestApproval("Refund $240 to order 1182?", { amountUsd: 240, timeoutS: 600 });
+if (!approval.granted) return `I didn't issue the refund: ${approval.note}`;
+```
+
+An approved amount raises the run's budget. It never hangs or throws: in local mode, outside a run, or on a server without approvals it's denied right away, and with no answer it's denied after `timeoutS`. The heartbeat's timer never keeps your process alive on its own.
+
 ## Not yet in the TypeScript SDK
 
-The Python SDK also has live control from the dashboard (pause, approvals), automatic recording of OpenAI/Anthropic calls (`instrument`), and LangGraph / OpenAI Agents integrations. They're next. Everything here follows the same server protocol ([PROTOCOL.md](../PROTOCOL.md)).
+The Python SDK also records OpenAI/Anthropic calls automatically (`instrument`) and integrates with LangGraph and the OpenAI Agents SDK. Everything here follows the same server protocol ([PROTOCOL.md](../PROTOCOL.md)).
