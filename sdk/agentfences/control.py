@@ -107,7 +107,7 @@ def _heartbeat():
     while True:
         with _lock:
             busy = any(r.paused or r.awaiting for r in _live.values())
-        _wake.wait(FAST_S if busy else _interval)
+        _wake.wait(min(FAST_S, _interval) if busy else _interval)  # faster while busy, never slower
         _wake.clear()
         with _lock:
             runs = list(_live.values())

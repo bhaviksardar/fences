@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { FencesClient, type Reply } from "./client.js";
+import * as control from "./control.js";
 import { AgentQuarantined, FencesStop } from "./errors.js";
 import * as events from "./events.js";
 import { costOf, setCustomPrices, type CustomPrice } from "./pricing.js";
@@ -94,6 +95,8 @@ export class Run {
   lastBreach: string | null = null;
   exception?: events.ExceptionInfo;
   warned = false;
+  /** Live control from the dashboard (see control.ts). */
+  readonly control = control.newControl();
 
   constructor(readonly agentName: string, public budgetUsd: number | null, public maxIterations: number,
               public maxDurationMs: number, public maxTokens: number, readonly context: Record<string, string>) {}
@@ -127,6 +130,10 @@ export interface InitOptions {
   release?: string;
   /** Sees every outgoing event and returns it (changed or not), or null to drop it. */
   redact?: events.RedactHook;
+  /** Seconds between heartbeats reporting live runs (cloud mode). Default 15. */
+  heartbeatS?: number;
+  /** How long a paused run waits at its checkpoint before stopping with breach "paused". Default 3600. */
+  pauseTimeoutS?: number;
 }
 
 let client: FencesClient | null = null;
@@ -141,16 +148,16 @@ export function init(options: InitOptions = {}): void {
   failClosed = !!options.failClosed;
   if (localOnly) {
     client = null;
-    return;
-  }
-  if (!options.apiKey) {
+  } else if (!options.apiKey) {
     throw new Error("apiKey is required unless localOnly is set. Use init({ localOnly: true }) for local usage.");
+  } else {
+    client = new FencesClient(options.apiKey, options.endpoint ?? "http://localhost:8000");
   }
-  client = new FencesClient(options.apiKey, options.endpoint ?? "http://localhost:8000");
+  control.configure(client, options.heartbeatS ?? 15, options.pauseTimeoutS ?? 3600);
 }
 
 /** @internal For tests: point the SDK at a fake server client. */
-export function _setClient(c: FencesClient | null): void { client = c; }
+export function _setClient(c: FencesClient | null): void { client = c; control.configure(c, 15, 3600); }
 
 function requireInit(): void {
   if (!localOnly && !client) {
@@ -183,6 +190,7 @@ export function governed<A extends unknown[], R>(
   return async (...args: A): Promise<Awaited<R>> => {
     requireInit();
     const run = await startRun(name, options);
+    control.register(run);
     let error: unknown, failed = false;
     try {
       return await (store.run(run, () => fn(...args)) as Promise<Awaited<R>>);
@@ -241,6 +249,7 @@ function noBudget(agentName: string, how: string): void {
 }
 
 async function endRun(run: Run, status: string, error: string | null): Promise<void> {
+  control.unregister(run);
   if (!client) return;
   // The run must end even if redaction drops its error details
   const sent = error ? events.redact({ type: "run_end", status, error, exception: run.exception }) : null;
@@ -282,7 +291,12 @@ export async function checkpoint(response?: unknown, extra: Extra = {}): Promise
   run.iterations += 1;
   const resp = client ? await client.checkpoint(run.runId, {
     cost_delta_usd: stepCost, tokens_used: stepTokens, iterations: run.iterations, duration_ms: run.durationMs }) : null;
-  return decide(run, resp);
+  const result = decide(run, resp);
+  if (run.control.paused && !result.breached) {  // paused from the dashboard: wait here until resumed
+    await control.waitIfPaused(run);
+    return finalResult(run);
+  }
+  return result;
 }
 
 function localBreach(run: Run): string | null {
@@ -305,6 +319,7 @@ function decide(run: Run, resp: Reply | null): CheckpointResult {
     }
     run.lastBreach = localBreach(run);
   } else {
+    control.apply(run, resp.commands);
     // The server is authoritative: adopt its totals and (on a breach) its current limits
     run.costUsd = resp.spent_usd ?? run.costUsd;
     run.iterations = resp.iterations ?? run.iterations;
@@ -315,6 +330,12 @@ function decide(run: Run, resp: Reply | null): CheckpointResult {
     // A fresh breach, or a 409 because the run is still fenced from an earlier one
     run.lastBreach = resp.ok ? null : (resp.breach ?? run.lastBreach ?? "limit_reached");
   }
+  return finalResult(run);
+}
+
+function finalResult(run: Run): CheckpointResult {
+  if (run.control.stopped) run.lastBreach = "stopped_by_user";  // a stop from the dashboard sticks, whatever a later reply says
+  else if (run.control.pauseExpired) run.lastBreach = "paused";
   return run.lastBreach ? breachResult(run.lastBreach, run) : okResult(run.costUsd);
 }
 
