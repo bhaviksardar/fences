@@ -61,7 +61,7 @@ The server is authoritative for limits and sees spend across processes. If it ca
 
 ## Live control (from 0.4.0)
 
-From version 0.4.0, which isn't on npm yet: in cloud mode a heartbeat (every 15 seconds, `init({ heartbeatS })`) lets whoever is on call act on a running agent from the dashboard:
+From version 0.4.0: in cloud mode a heartbeat (every 15 seconds, `init({ heartbeatS })`) lets whoever is on call act on a running agent from the dashboard:
 
 - **Stop:** the next `checkpoint()` returns `breachType: "stopped_by_user"`, so the agent wraps up gracefully.
 - **Pause and resume:** a paused run waits inside its next `checkpoint()` until it's resumed; after `pauseTimeoutS` (default one hour) it returns `breachType: "paused"`.
