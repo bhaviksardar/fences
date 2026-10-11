@@ -1,4 +1,4 @@
-__version__ = "0.3.0"  # the one place the version lives; pyproject.toml reads it from here
+__version__ = "0.3.1"  # the one place the version lives; pyproject.toml reads it from here
 
 from .core import init, governed, checkpoint, checkpoint_sync, log_decision, flush, get_active_run, CheckpointResult
 from .events import context
