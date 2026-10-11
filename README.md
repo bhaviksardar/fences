@@ -27,6 +27,17 @@ async def run_agent(query: str, messages: list):
             return response
 ```
 
+## Python and TypeScript
+
+This README covers the Python SDK (`pip install agentfences`). There's also a TypeScript SDK for Node 18+ (`npm install agentfences`, see [sdk-js](sdk-js/README.md)). Both talk to Fences the same way ([PROTOCOL.md](PROTOCOL.md)).
+
+| | Python | TypeScript |
+|---|---|---|
+| Limits, cost tracking, decision trail, tool calls, run context, redaction | ✅ 0.3.0 | ✅ 0.3.0 |
+| Live control: stop, pause and approvals from the dashboard | ✅ 0.3.0 | 0.4.0, not on npm yet |
+| Automatic OpenAI/Anthropic recording (`instrument=True`) | ✅ 0.3.0 | not yet |
+| LangChain/LangGraph and OpenAI Agents SDK integrations | ✅ 0.3.0 | not yet |
+
 ## Install
 
 ```bash

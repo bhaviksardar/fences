@@ -59,9 +59,9 @@ init({ apiKey: process.env.FENCES_API_KEY, endpoint: "https://your-fences-host",
 
 The server is authoritative for limits and sees spend across processes. If it can't be reached, limits are enforced locally; pass `failClosed: true` to stop instead. A rejected key throws `FencesAuthError`; a quarantined agent throws `AgentQuarantined` before any of its code runs. In serverless handlers, `await flush()` before returning so queued decisions and spans are sent.
 
-## Live control
+## Live control (from 0.4.0)
 
-In cloud mode a heartbeat (every 15 seconds, `init({ heartbeatS })`) lets whoever is on call act on a running agent from the dashboard:
+From version 0.4.0, which isn't on npm yet: in cloud mode a heartbeat (every 15 seconds, `init({ heartbeatS })`) lets whoever is on call act on a running agent from the dashboard:
 
 - **Stop:** the next `checkpoint()` returns `breachType: "stopped_by_user"`, so the agent wraps up gracefully.
 - **Pause and resume:** a paused run waits inside its next `checkpoint()` until it's resumed; after `pauseTimeoutS` (default one hour) it returns `breachType: "paused"`.
