@@ -53,8 +53,15 @@ class GovClient:
         return self._post(f"/api/runs/{run_id}/approvals", {"approval_id": approval_id, "reason": reason,
                           "amount_usd": amount_usd, "timeout_s": timeout_s}, optional=True)
 
-    def end_run(self, run_id: str, status: str, error: Optional[str] = None, exception: Optional[dict] = None) -> dict:
+    def guard(self, run_id: str, body: dict) -> dict:
+        """Check a guarded tool call before it runs ({"phase": "check"}), or settle it after ({"phase": "settle"})."""
+        return self._post(f"/api/runs/{run_id}/guard", body, optional=True)
+
+    def end_run(self, run_id: str, status: str, error: Optional[str] = None, exception: Optional[dict] = None,
+                breach: Optional[str] = None) -> dict:
         payload = {"status": status, "error": error}
+        if breach:
+            payload["breach"] = breach
         if exception:
             payload["exception"] = exception
         return self._post(f"/api/runs/{run_id}/end", payload)

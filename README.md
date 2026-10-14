@@ -37,6 +37,9 @@ This README covers the Python SDK (`pip install agentfences`). There's also a Ty
 | Live control: stop, pause and approvals from the dashboard | ✅ 0.3.0 | ✅ 0.4.0 |
 | Automatic OpenAI/Anthropic recording (`instrument=True`) | ✅ 0.3.0 | not yet |
 | LangChain/LangGraph and OpenAI Agents SDK integrations | ✅ 0.3.0 | not yet |
+| Budget prechecks before model calls, guarded tools, tool timeouts, cancelling a stuck run after a stop | ✅ 0.4.0 | not yet |
+
+What each part guarantees, and what it can't, is in [ENFORCEMENT.md](ENFORCEMENT.md).
 
 ## Install
 
@@ -137,7 +140,7 @@ A governed async generator (a streaming agent) stays governed until the stream i
 
 ## Frameworks: LangChain, LangGraph and the OpenAI Agents SDK
 
-Agents built on a framework need no decorators. Each model call is recorded with its tokens and cost and checkpointed, so limits apply, and each tool call is recorded. Limits work as in `@governed` and are all optional.
+Agents built on a framework need no decorators. Each model call is prechecked against the budget before it's sent (see "Budgets are prechecked" below; set `max_tokens` on the model for small budgets), then recorded with its tokens and cost and checkpointed, so limits apply, and each tool call is recorded. Limits work as in `@governed` and are all optional.
 
 Callbacks and hooks can't hand a result back to the agent, so when a limit is crossed these integrations raise `FencesStop`. It carries the same `breach_type`, `message` and `system_prompt` as a breached `checkpoint()`.
 
@@ -174,7 +177,7 @@ With a framework integration, don't also pass `instrument=True` or decorate tool
 
 In cloud mode the SDK keeps a heartbeat with Fences, so whoever is on call can act on a run while it's going:
 
-- **Stop:** the run's next `checkpoint()` returns `breach_type="stopped_by_user"` with its message, so the agent wraps up gracefully. A stop sticks, whatever later responses say.
+- **Stop:** the run's next `checkpoint()` returns `breach_type="stopped_by_user"` with its message, so the agent wraps up gracefully. A stop sticks, whatever later responses say. If an async run doesn't reach a checkpoint within `stop_grace_s` (default 30 seconds) of the stop, because it's stuck in a tool say, it's cancelled and the governed call raises `FencesStop`. `init(stop_grace_s=None)` turns that off. A synchronous run can't be interrupted, so it stops at its next checkpoint or guarded tool.
 - **Pause and resume:** a paused run waits inside its next `checkpoint()` until it's resumed, then carries on. If no one resumes it within `pause_timeout_s` (default one hour), the checkpoint returns `breach_type="paused"`.
 - **Change limits:** new limits apply to the run immediately.
 - **Quarantine:** calling a governed function for a quarantined agent raises `AgentQuarantined` before any of its code runs.
@@ -190,6 +193,25 @@ if not approval.granted:
 The answer has `granted`, `by`, `note` and `amount_usd`; an approved amount raises the run's budget by that much. `request_approval_sync()` does the same for synchronous agents. It never hangs and never raises: in local mode, outside a run, or when the server can't take requests it returns denied right away, and with no answer it returns denied after `timeout_s`.
 
 The heartbeat reports live runs every 15 seconds (`init(heartbeat_s=...)`), and every 2 seconds while a run is paused or waiting for approval. A Fences server without these features gets one warning: stops still apply at the next checkpoint, and approval requests are denied.
+
+## Guarded tools
+
+A checkpoint runs after a step, so on its own it notices a limit once it's crossed. For actions with consequences (refunds, payments, writes to production), guard the tool, and it asks Fences **before** it runs:
+
+```python
+@agentfences.tool(cost_usd=lambda order_id, amount: amount, approve=True)
+def issue_refund(order_id: str, amount: float): ...
+
+@agentfences.tool(guard=True, timeout_s=30)
+async def deploy(service: str): ...
+```
+
+- The tool runs only if its run isn't stopped, paused, over a limit or quarantined. Otherwise it raises `ToolBlocked` (with `reason` and `breach_type`) and its code never runs. The model can't talk its way past this: the check is in the tool itself.
+- `cost_usd` (a number, or a function of the tool's arguments) is **reserved** before the call and charged after, so five parallel $40 refunds against a $100 budget can't all go through: two do. A call that raises is released uncharged. One that times out is charged, because it may have happened.
+- `approve=True` asks a person on the dashboard before each call (see `request_approval` above). The dashboard can also require approval for a tool, and the SDK then asks for it.
+- **Guards fail closed:** if Fences can't be reached, or doesn't support guarded tools yet, the tool is blocked. In local mode the SDK applies the same rules itself, and `approve=True` is always denied, as there's no one to ask.
+
+`timeout_s` works on any tool, guarded or not: past it, the call raises `TimeoutError`. An async tool is cancelled; a sync one can't be, so it finishes in a background thread while the agent moves on.
 
 ## Evidence: tool calls and model calls
 
@@ -207,13 +229,24 @@ async def fetch_page(url: str) -> str: ...
 
 Each call records the tool's name, a short summary of its arguments (`query='cats', limit=5`), whether it succeeded (and the error if not) and how long it took. Exceptions still reach your code, and outside a governed run the tool is just called.
 
-**Model calls.** Pass `instrument=True` to record every OpenAI and Anthropic call made inside a governed run, with no other code changes:
+**Model calls.** Pass `instrument=True` to record every OpenAI and Anthropic call made inside a governed run, and precheck it against the budget, with no other code changes:
 
 ```python
 agentfences.init(api_key="fc_...", endpoint="https://...", instrument=True)
 ```
 
-Each call records the model, tokens (including cache reads and writes), cost, latency, and the error and status code if it failed (a 429 rate limit, say). This is a record only: it doesn't count as a checkpoint or add to the run's spend, so keep calling `checkpoint(response)` where limits should be checked. Streamed calls are recorded without token counts.
+Each call records the model, tokens (including cache reads and writes), cost, latency, and the error and status code if it failed (a 429 rate limit, say). It doesn't count as a checkpoint, so keep calling `checkpoint(response)` where limits should be checked. Streamed calls are recorded without token counts.
+
+**Budgets are prechecked.** In a run with a budget, each instrumented call, and each call made through a framework integration, is checked before it's sent. If its worst-case cost could take the run past the budget, it raises `FencesStop` (`budget_exceeded`) and never reaches the provider:
+
+```python
+try:
+    resp = client.chat.completions.create(model="gpt-4o", messages=msgs, max_tokens=1000)
+except agentfences.FencesStop as stop:
+    return stop.message  # "I can't make another model call without risking going over my budget ..."
+```
+
+The worst case is the request's input, estimated high, plus its output cap at the output rate. The cap is `max_tokens` if you set it, otherwise the model's whole output limit (16,384 tokens for gpt-4o), so **set `max_tokens` on calls in runs with small budgets**. Each call's worst case is held while it's in flight, so parallel calls can't overspend together. Calls you make without instrumentation are only checked afterwards, by `checkpoint()`. See [ENFORCEMENT.md](ENFORCEMENT.md).
 
 Both kinds of call are recorded as spans named by the OpenTelemetry GenAI conventions (`chat gpt-4o`, `execute_tool web_search`, with `gen_ai.*` attributes plus Fences' `fences.cost_usd`). They're kept on the run (`get_active_run().events`, newest 1,000) and, in cloud mode, sent to Fences in the background in batches. They pass through the `redact` hook first as `tool_call` (`name`, `args`, `error`) and `llm_call` (`model`, `error`) events. A Fences server that doesn't accept them yet gets a single warning and nothing else changes.
 
@@ -243,7 +276,7 @@ def redact(event):
 agentfences.init(api_key="fc_...", endpoint="https://...", redact=redact)
 ```
 
-Events have a `type` of `run_start` (`context`), `decision` (`reasoning`, `action`), `span` (a tool or model call: change its `attributes`, e.g. `gen_ai.tool.call.arguments` or `fences.error.message`) or `run_end` (`status`, `error`, `exception`). If the hook raises, that event is dropped rather than sent unredacted, and a warning is logged once. Runs still start and end, so limits keep working.
+Events have a `type` of `run_start` (`context`), `decision` (`reasoning`, `action`), `guard` (`tool`, `arguments` of a guarded call: dropping it still lets the check happen, without arguments), `span` (a tool or model call: change its `attributes`, e.g. `gen_ai.tool.call.arguments` or `fences.error.message`) or `run_end` (`status`, `error`, `exception`). If the hook raises, that event is dropped rather than sent unredacted, and a warning is logged once. Runs still start and end, so limits keep working.
 
 ## Modes
 

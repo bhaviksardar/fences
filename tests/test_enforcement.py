@@ -1,0 +1,425 @@
+"""
+The checks behind ENFORCEMENT.md: what Fences still guarantees when things go wrong.
+Parallel calls racing for one budget, an unreachable server, a stop while a tool hangs.
+No network: the server is a stand-in.
+
+    pip install ./sdk && python tests/test_enforcement.py
+"""
+import asyncio
+import contextvars
+import logging
+import math
+import threading
+import time
+
+import agentfences
+from agentfences import governed, checkpoint, checkpoint_sync, get_active_run, tool, ToolBlocked, FencesStop
+from test_local import RecordingClient, wait_for, background  # also blocks the network
+
+
+class Server(RecordingClient):
+    """The stand-in server, with guards: allows a call while spent + held + amount fits the budget."""
+    def __init__(self, budget=1.0):
+        super().__init__()
+        self.budget, self.spent, self.held = budget, 0.0, {}
+        self.guards, self.guard_supported, self.reachable = [], True, True
+        self.needs_approval = False
+        self.lock = threading.Lock()
+
+    def checkpoint(self, *args):
+        if not self.reachable:
+            return {"network_error": "connection refused"}
+        return super().checkpoint(*args)
+
+    def guard(self, run_id, body):
+        if not self.reachable:
+            return {"network_error": "connection refused"}
+        if not self.guard_supported:
+            return {"unsupported": True}
+        self.guards.append(body)
+        with self.lock:
+            if body["phase"] == "settle":
+                self.held.pop(body["guard_id"], None)
+                self.spent += body["cost_usd"]
+                return {"ok": True}
+            if self.needs_approval and not body["approval_id"]:
+                return {"allow": False, "needs_approval": True, "reason": "issue_refund needs approval"}
+            if self.spent + sum(self.held.values()) + body["amount_usd"] > self.budget:
+                return {"allow": False, "reason": "over budget", "breach": "budget_exceeded"}
+            self.held[body["guard_id"]] = body["amount_usd"]
+            return {"allow": True}
+
+
+def cloud(server, **init_args):
+    agentfences.init(api_key="fc_test", endpoint="http://fences.invalid", heartbeat_s=0.05, **init_args)
+    agentfences.core._client = agentfences.control._client = server
+    return server
+
+
+def blocked(fn):
+    """The ToolBlocked fn raises, or None if it ran."""
+    try:
+        fn()
+    except ToolBlocked as e:
+        return e
+    return None
+
+
+# ── Level 3: guarded tools ────────────────────────────────────────────────────
+
+def check_parallel_calls_cannot_overspend():
+    """Five $0.40 refunds at once against a $1 budget: exactly two run, in local mode and against a server."""
+    ran = []
+
+    @tool(cost_usd=lambda amount: amount)
+    async def refund(amount):
+        await asyncio.sleep(0.05)  # all five are in flight together
+        ran.append(amount)
+
+    @governed(budget_usd=1)
+    async def agent():
+        results = await asyncio.gather(*(refund(0.4) for _ in range(5)), return_exceptions=True)
+        run = get_active_run()
+        return [type(r).__name__ for r in results], run.cost_usd, run.reserved_usd
+
+    names, spent, held = asyncio.run(agent())
+    assert sorted(names) == ["NoneType"] * 2 + ["ToolBlocked"] * 3 and len(ran) == 2, names
+    assert round(spent, 9) == 0.8 and held == 0, (spent, held)
+
+    @tool(cost_usd=0.4)
+    def sync_refund():
+        time.sleep(0.05)
+
+    @governed(budget_usd=1)
+    def threaded():  # threads racing in one run
+        outcomes = []
+        ts = [threading.Thread(target=contextvars.copy_context().run, args=(lambda: outcomes.append(blocked(sync_refund)),))
+              for _ in range(5)]
+        for t in ts: t.start()
+        for t in ts: t.join()
+        return sum(o is None for o in outcomes)
+    assert threaded() == 2
+
+    server = cloud(Server(budget=1.0))
+    try:
+        ran.clear()
+        names, _, _ = asyncio.run(agent())
+        assert names.count("ToolBlocked") == 3 and len(ran) == 2
+        assert round(server.spent, 9) == 0.8 and not server.held, (server.spent, server.held)
+        checks = [g for g in server.guards if g["phase"] == "check"]
+        assert {"guard_id", "tool", "arguments", "amount_usd", "approval_id"} <= set(checks[0]) and checks[0]["tool"] == "refund"
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_blocked_tools_never_run():
+    ran = []
+
+    @tool(guard=True)
+    def delete_records():
+        ran.append(1)
+
+    @governed(budget_usd=0.05)
+    def over_budget():
+        checkpoint_sync(cost_delta_usd=0.1)
+        return blocked(delete_records)
+    e = over_budget()
+    assert e and e.breach_type == "budget_exceeded" and not ran, e
+    assert blocked(delete_records) is None and ran, "outside a governed run a guarded tool just runs"
+
+    @tool(approve=True)
+    def wire_money():
+        ran.append("wire")
+
+    @governed(budget_usd=1)
+    def local_approval():
+        return blocked(wire_money)
+    assert "Local mode" in local_approval().reason and "wire" not in ran  # no one to approve locally
+
+
+def check_failed_and_timed_out_calls_are_settled():
+    @tool(cost_usd=0.3)
+    def declined():
+        raise ValueError("card declined")
+
+    @tool(cost_usd=0.3, timeout_s=0.05)
+    async def slow_payment():
+        await asyncio.sleep(5)
+
+    @governed(budget_usd=1)
+    async def agent():
+        run = get_active_run()
+        try:
+            declined()
+        except ValueError:
+            pass
+        assert (run.cost_usd, run.reserved_usd) == (0, 0), "an error releases the reservation, uncharged"
+        try:
+            await slow_payment()
+        except TimeoutError:
+            pass
+        return run.cost_usd, run.reserved_usd
+    assert asyncio.run(agent()) == (0.3, 0), "a timeout may have paid, so it's charged"
+
+
+def check_guard_fails_closed():
+    ran = []
+
+    @tool(cost_usd=0.1)
+    def charge_card():
+        ran.append(1)
+
+    @governed(budget_usd=1)
+    def agent():
+        return blocked(charge_card)
+
+    seen = []
+    handler = logging.Handler()
+    handler.emit = lambda record: seen.append(record.getMessage())
+    logging.getLogger("agentfences").addHandler(handler)
+    server = cloud(Server())
+    try:
+        server.reachable = False
+        assert "couldn't reach Fences" in agent().reason
+        server.reachable, server.guard_supported = True, False
+        assert "doesn't support guarded tools" in agent().reason and "doesn't support guarded tools" in agent().reason
+        assert len([m for m in seen if "guarded tools" in m]) == 1, seen
+        assert not ran
+    finally:
+        agentfences.init(local_only=True)
+        logging.getLogger("agentfences").removeHandler(handler)
+
+
+def check_server_required_approval():
+    ran = []
+
+    @tool(cost_usd=lambda order_id, amount: amount)
+    def issue_refund(order_id, amount):
+        ran.append(order_id)
+
+    @governed(budget_usd=1)
+    def agent():
+        issue_refund("1182", 0.5)
+
+    server = cloud(Server())
+    server.needs_approval = True
+    try:
+        def approver():
+            wait_for(lambda: server.approval_requests)
+            req = server.approval_requests[-1]
+            assert req["reason"] == "issue_refund(order_id='1182', amount=0.5)" and req["amount_usd"] == 0.5, req
+            server.heartbeat_commands = [{"run_id": req["run_id"], "type": "approval", "approval_id": req["approval_id"],
+                                          "granted": True, "by": "dana@example.com"}]
+        background(approver)
+        agent()
+        checks = [g for g in server.guards if g["phase"] == "check"]
+        assert ran == ["1182"] and len(checks) == 2 and checks[1]["approval_id"] == server.approval_requests[-1]["approval_id"]
+    finally:
+        agentfences.init(local_only=True)
+
+
+# ── Level 1: model calls are prechecked against the budget ───────────────────
+
+def check_model_call_worst_case():
+    from agentfences.precheck import worst_case_usd
+    from agentfences.pricing import price_of
+    p = price_of("gpt-4o")
+    assert math.isclose(worst_case_usd("gpt-4o", "x" * 400, 1000), 201 * p["in"] + 1000 * p["out"])  # 402 JSON bytes / 2
+    assert math.isclose(worst_case_usd("gpt-4o", "x" * 400), 201 * p["in"] + p["max_out"] * p["out"]), "no cap: the model's"
+    image = "data:image/png;base64," + "A" * 100_000  # a file counts as a flat 2,000 tokens, not its base64 size
+    assert math.isclose(worst_case_usd("gpt-4o", image, 1000), (1 + 2000) * p["in"] + 1000 * p["out"])
+    assert worst_case_usd("gpt-4o", "hi", 1000, n=3) > 3000 * p["out"], "n choices multiply the output"
+    assert worst_case_usd("no-such-model", "hi", 1000) is None
+
+
+def check_parallel_model_calls_cannot_overspend():
+    """Ten calls in flight at once, each worth up to ~$0.01, against $0.05: only those that fit go out."""
+    from agentfences import precheck
+
+    @governed(budget_usd=0.05)
+    async def agent():
+        run = get_active_run()
+
+        async def call():
+            h = precheck.hold("gpt-4o", "hi", {"max_tokens": 1000})  # raises FencesStop if it might not fit
+            await asyncio.sleep(0.05)  # all in flight together
+            precheck.finish(h)
+            return h[0]
+        results = await asyncio.gather(*(call() for _ in range(10)), return_exceptions=True)
+        made = [r for r in results if isinstance(r, float)]
+        assert run.cost_usd + run.reserved_usd <= 0.05
+        await checkpoint(cost_delta_usd=sum(made))  # records what they cost, and releases their holds
+        return len(made), sum(isinstance(r, FencesStop) for r in results), run.reserved_usd, run.cost_usd
+
+    made, refused, held, spent = asyncio.run(agent())
+    assert (made, refused) == (4, 6) and held == 0 and spent <= 0.05, (made, refused, held, spent)
+
+
+def check_holds_are_released_exactly():
+    """Equal holds from parallel calls: releasing one never releases another."""
+    from agentfences import precheck
+
+    @governed(budget_usd=1)
+    def agent():
+        run = get_active_run()
+        a, b = (precheck.hold("gpt-4o", "hi", {"max_tokens": 100}) for _ in range(2))
+        precheck.finish(b, failed=True)
+        precheck.finish(a)
+        checkpoint_sync()
+        return run.reserved_usd
+    assert agent() == 0
+
+
+def check_refused_call_ends_run_breached():
+    """An agent that catches the precheck's FencesStop and returns still ends breached, and says why."""
+    from agentfences import precheck
+    server = cloud(Server())
+    try:
+        @governed(budget_usd=0.001)
+        def agent():
+            try:
+                precheck.hold("gpt-4o", "hi")
+            except FencesStop as stop:
+                return stop.message
+        agent()
+        assert server.of("end")[-1]["status"] == "breached"
+        assert server.of("end")[-1]["breach"] == "budget_exceeded", server.of("end")[-1]
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_guard_counts_model_calls_in_flight():
+    """In cloud mode the server can't see this process's in-flight model calls, so the SDK checks them first."""
+    from agentfences import precheck
+    ran = []
+
+    @tool(cost_usd=0.6)
+    def pay():
+        ran.append(1)
+
+    server = cloud(Server(budget=100))  # the server alone would allow it
+    try:
+        @governed(budget_usd=1)
+        def agent():
+            run = get_active_run()
+            precheck.hold("gpt-4o", "hi", {"max_tokens": 50_000})  # ~$0.50 in flight
+            e = blocked(pay)
+            return e, run.cost_usd + run.reserved_usd
+        e, committed = agent()
+        assert e and e.breach_type == "budget_exceeded" and not ran and committed <= 1, (e, committed)
+        assert not [g for g in server.guards if g["phase"] == "check"], "refused before asking the server"
+    finally:
+        agentfences.init(local_only=True)
+
+
+# ── Level 2: stops reach a stuck agent ────────────────────────────────────────
+
+def check_stop_during_hanging_tool():
+    server = cloud(Server(), stop_grace_s=0.2)
+    try:
+        @tool(name="crawl")
+        async def hangs():
+            await asyncio.sleep(60)
+
+        @governed(budget_usd=1)
+        async def agent():
+            await checkpoint(cost_delta_usd=0.01)
+            await hangs()
+
+        def operator():
+            wait_for(lambda: server.beats and server.beats[-1])
+            server.heartbeat_commands = [{"run_id": server.beats[-1][0]["run_id"], "type": "stop"}]
+        background(operator)
+        started = time.monotonic()
+        try:
+            asyncio.run(agent())
+        except FencesStop as e:
+            assert e.breach_type == "stopped_by_user"
+        else:
+            raise AssertionError("a stopped run stuck in a tool should end with FencesStop")
+        assert time.monotonic() - started < 3
+        assert server.of("end")[-1]["status"] == "breached"
+        assert any(r["stopped"] for beat in server.beats for r in beat), "the heartbeat says the stop was received"
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_stop_seen_at_checkpoint_is_not_cancelled():
+    """An agent that sees its stop gets to wrap up: summarizing after the stop isn't cut off."""
+    server = cloud(Server(), stop_grace_s=0.1)
+    try:
+        @governed(budget_usd=1)
+        async def agent():
+            for _ in range(500):
+                result = await checkpoint(cost_delta_usd=0.001)
+                if result.breached:
+                    await asyncio.sleep(0.5)  # the closing summary
+                    return result.breach_type
+                await asyncio.sleep(0.01)
+
+        def operator():
+            wait_for(lambda: server.beats and server.beats[-1])
+            server.heartbeat_commands = [{"run_id": server.beats[-1][0]["run_id"], "type": "stop"}]
+        background(operator)
+        assert asyncio.run(agent()) == "stopped_by_user"
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_hanging_tool_times_out():
+    @tool(timeout_s=0.1)
+    async def stuck_async():
+        await asyncio.sleep(60)
+
+    @tool(timeout_s=0.1)
+    def stuck_sync():
+        time.sleep(2)
+
+    for call in (lambda: asyncio.run(stuck_async()), stuck_sync):
+        started = time.monotonic()
+        try:
+            call()
+        except TimeoutError as e:
+            assert "longer than 0.1s" in str(e)
+        else:
+            raise AssertionError("expected a timeout")
+        assert time.monotonic() - started < 1
+
+
+# ── Level 1: limits hold when the server doesn't answer ───────────────────────
+
+def check_network_partition():
+    server = cloud(Server())
+    server.reachable = False
+    try:
+        @governed(budget_usd=0.05)
+        def agent():
+            for step in range(100):
+                if checkpoint_sync(cost_delta_usd=0.02).breached:
+                    return step
+        assert agent() == 2, "the budget is still enforced locally"
+
+        cloud(Server(), fail_closed=True).reachable = False
+
+        @governed(budget_usd=99)
+        def strict():
+            return checkpoint_sync(cost_delta_usd=0.01).breach_type
+        assert strict() == "fences_unreachable"
+    finally:
+        agentfences.init(local_only=True)
+
+
+if __name__ == "__main__":
+    agentfences.init(local_only=True)
+    checks = [
+        check_parallel_calls_cannot_overspend, check_blocked_tools_never_run, check_failed_and_timed_out_calls_are_settled,
+        check_guard_fails_closed, check_server_required_approval,
+        check_model_call_worst_case, check_parallel_model_calls_cannot_overspend, check_holds_are_released_exactly,
+        check_refused_call_ends_run_breached, check_guard_counts_model_calls_in_flight,
+        check_stop_during_hanging_tool, check_stop_seen_at_checkpoint_is_not_cancelled, check_hanging_tool_times_out,
+        check_network_partition,
+    ]
+    for check in checks:
+        check()
+        print("ok", check.__name__)
+    print("all enforcement checks passed")

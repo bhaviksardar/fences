@@ -43,8 +43,17 @@ class State(TypedDict):
     steps: int
 
 
+class PricedFakeModel(FakeMessagesListChatModel):
+    model_name: str = "gpt-4o"  # in invocation_params, as real chat models report it, so calls are prechecked
+    max_tokens: int = 200
+
+    @property
+    def _identifying_params(self):
+        return {"model_name": self.model_name, "max_tokens": self.max_tokens}
+
+
 def build_graph(max_steps=1000, failing_tool=False):
-    model = FakeMessagesListChatModel(responses=[reply()])
+    model = PricedFakeModel(responses=[reply()])
 
     def agent(state, config):
         return {"messages": [model.invoke(state["messages"], config)], "steps": state["steps"] + 1}
@@ -95,16 +104,17 @@ def check_graph_stops_on_budget():
         try:
             build_graph().invoke(START, {**CONFIG, "callbacks": [handler]})
         except FencesStop as stop:
-            assert stop.breach_type == "budget_exceeded" and "budget limit" in stop.message and stop.system_prompt
+            assert stop.breach_type == "budget_exceeded" and "can't make another model call" in stop.message and stop.system_prompt
         else:
             raise AssertionError("the graph should have been stopped")
         agentfences.flush()
+        assert sent.spent <= sent.budget, "the call that could overspend was refused before it was made"
         assert [p["agent_name"] for p in sent.of("start")] == ["research_graph"]
         assert sent.of("end")[-1]["status"] == "breached", sent.of("end")
         spans = [e["attributes"] for e in sent.of("event")]
         llm = [a for a in spans if a["gen_ai.operation.name"] == "chat"]
         tools = [a for a in spans if a["gen_ai.operation.name"] == "execute_tool"]
-        assert len(llm) == 4 and all(math.isclose(a["fences.cost_usd"], PER_CALL) for a in llm), llm  # the 4th call trips 3.5x
+        assert len(llm) == 3 and all(math.isclose(a["fences.cost_usd"], PER_CALL) for a in llm), llm  # a 4th could pass 3.5x
         assert llm[0]["gen_ai.response.model"] == "gpt-4o" and llm[0]["gen_ai.usage.cache_read.input_tokens"] == 400
         assert llm[0]["fences.integration"] == "langchain"
         assert len(tools) == 3 and tools[0]["gen_ai.tool.name"] == "lookup" and tools[0]["gen_ai.tool.call.arguments"] == "query='q1'"

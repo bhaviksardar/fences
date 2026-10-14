@@ -26,3 +26,14 @@ class FencesStop(FencesError):
         self.message = result.message
         self.system_prompt = result.system_prompt
         super().__init__(result.message)
+
+
+class ToolBlocked(FencesError):
+    """
+    Raised instead of running a guarded tool (@agentfences.tool(guard=True)) that Fences
+    didn't allow: the run is stopped, over budget, unapproved, or Fences couldn't be reached.
+    The tool's code never ran. reason says why; breach_type is set when a limit is the cause.
+    """
+    def __init__(self, tool: str, reason: str, breach_type: Optional[str] = None):
+        self.tool, self.reason, self.breach_type = tool, reason, breach_type
+        super().__init__(f"Fences blocked {tool}: {reason}")

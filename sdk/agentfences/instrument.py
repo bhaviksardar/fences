@@ -1,13 +1,15 @@
 """
 Record every OpenAI and Anthropic model call made inside a governed run, with no code
-changes: model, tokens, cost, latency, and the error if it failed. Recording only: calls
-don't count as checkpoints and don't add to the run's spend (checkpoint(response) does).
+changes: model, tokens, cost, latency, and the error if it failed. Calls don't count as
+checkpoints and don't add to the run's spend (checkpoint(response) does), but in a run with
+a budget each one is prechecked: refused with FencesStop if its worst case doesn't fit.
 """
 import functools
 import importlib
 import time
 from typing import List, Optional
 
+from . import precheck
 from .core import get_active_run
 from .spans import record_llm_call
 
@@ -35,12 +37,15 @@ def _wrap(create, provider: str, is_async: bool):
         async def wrapper(self, *args, **kwargs):
             if get_active_run() is None:
                 return await create(self, *args, **kwargs)
+            h = precheck.hold(kwargs.get("model"), kwargs, kwargs)
             started = time.perf_counter()
             try:
                 response = await create(self, *args, **kwargs)
-            except Exception as e:
+            except BaseException as e:
+                precheck.finish(h, failed=True)
                 _record(provider, kwargs, started, error=e)
                 raise
+            precheck.finish(h, response)
             _record(provider, kwargs, started, response=response)
             return response
     else:
@@ -48,12 +53,15 @@ def _wrap(create, provider: str, is_async: bool):
         def wrapper(self, *args, **kwargs):
             if get_active_run() is None:
                 return create(self, *args, **kwargs)
+            h = precheck.hold(kwargs.get("model"), kwargs, kwargs)  # raises FencesStop if it might not fit the budget
             started = time.perf_counter()
             try:
                 response = create(self, *args, **kwargs)
-            except Exception as e:
+            except BaseException as e:
+                precheck.finish(h, failed=True)
                 _record(provider, kwargs, started, error=e)
                 raise
+            precheck.finish(h, response)
             _record(provider, kwargs, started, response=response)
             return response
 

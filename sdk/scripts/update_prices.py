@@ -27,6 +27,8 @@ RATES = {  # our short name -> LiteLLM field, USD per token, standard tier
 
 def entry(v: dict) -> dict:
     e = {k: v[f] for k, f in RATES.items() if v.get(f) is not None}
+    if isinstance(v.get("max_output_tokens"), int):
+        e["max_out"] = v["max_output_tokens"]  # bounds a call's worst-case cost when the request sets no limit
     for threshold in ("200k", "272k"):  # long-context tier: higher rates once the prompt passes it
         tier = {k: v[f"{f}_above_{threshold}_tokens"] for k, f in RATES.items() if v.get(f"{f}_above_{threshold}_tokens") is not None}
         if tier:

@@ -14,7 +14,7 @@ import openai
 import openai._base_client
 
 import agentfences
-from agentfences import governed, get_active_run
+from agentfences import governed, get_active_run, checkpoint_sync, FencesStop
 from agentfences.pricing import price_of
 
 CHAT = {"id": "c", "object": "chat.completion", "created": 0, "model": "gpt-4o-2024-08-06",
@@ -34,10 +34,14 @@ def http(sdk_base_client):
     return getattr(sdk_base_client, "httpx2", None) or sdk_base_client.httpx
 
 
+REQUESTS = []  # every request that reached the provider
+
+
 def handler(request):
     lib = http(openai._base_client)
     body = json.loads(request.content or b"{}")
-    if body.get("model") == "rate-limited":
+    REQUESTS.append(body)
+    if body.get("model") == "rate-limited" or body.get("user") == "rate-limited":
         return lib.Response(429, json={"error": {"message": "slow down", "type": "rate_limit_error"}})
     path = request.url.path
     data = CHAT if path.endswith("/chat/completions") else RESPONSE if path.endswith("/responses") else MESSAGE
@@ -96,7 +100,43 @@ def main():
     assert failed["http.response.status_code"] == 429 and failed["error.type"] == "RateLimitError"
     assert "gen_ai.usage.input_tokens" not in failed and spans[4]["name"] == "chat rate-limited"
     assert (spent, iterations) == (0, 0), "recording doesn't checkpoint or add spend"
+    prechecks()
     print("instrument checks passed")
+
+
+def prechecks():
+    """In a run with a budget, a call whose worst case doesn't fit is refused before it's sent."""
+    oa = clients()[0]
+    msgs = [{"role": "user", "content": "hi"}]
+    actual = cost("gpt-4o", inp=600, cache_read=400, out=200)
+
+    @governed(budget_usd=0.05)
+    def agent():
+        run, sent = get_active_run(), len(REQUESTS)
+        try:
+            oa.chat.completions.create(model="gpt-4o", messages=msgs)  # up to 16,384 output tokens: $0.16+
+        except FencesStop as stop:
+            assert stop.breach_type == "budget_exceeded" and "can't make another model call" in stop.message
+        else:
+            raise AssertionError("a call that could cost more than the budget should be refused")
+        assert len(REQUESTS) == sent, "refused before it reached the provider"
+
+        resp = oa.chat.completions.create(model="gpt-4o", messages=msgs, max_tokens=1000)  # worst case ~$0.01: fits
+        assert math.isclose(run.reserved_usd, actual), "held at its actual cost until the checkpoint records it"
+        checkpoint_sync(resp)
+        assert run.reserved_usd == 0 and math.isclose(run.cost_usd, actual)
+
+        try:
+            oa.chat.completions.create(model="gpt-4o", messages=msgs, max_tokens=1000, user="rate-limited")
+        except openai.RateLimitError:
+            pass
+        assert run.reserved_usd == 0, "a failed call isn't billed, so its hold is released"
+    agent()
+
+    @governed()
+    def unbudgeted():
+        return oa.chat.completions.create(model="gpt-4o", messages=msgs)  # no budget: nothing to precheck
+    assert unbudgeted().usage.prompt_tokens == 1000
 
 
 if __name__ == "__main__":
