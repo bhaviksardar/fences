@@ -8,5 +8,5 @@ writeFileSync(new URL("../src/prices.generated.ts", import.meta.url),
   `// ${table.source}, fetched ${table.fetched}\n` +
   `export const PRICES: Record<string, PriceEntry> = ${JSON.stringify(table.models)};\n` +
   `export interface Rates { in: number; out: number; cache_read?: number; cache_write?: number }\n` +
-  `export interface PriceEntry extends Rates { above?: number; tier?: Rates }\n`);
+  `export interface PriceEntry extends Rates { above?: number; tier?: Rates; max_out?: number }\n`);
 console.log(`prices: ${Object.keys(table.models).length} models`);

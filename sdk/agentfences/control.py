@@ -23,7 +23,8 @@ _thread: Optional[threading.Thread] = None
 _client = None
 _interval = 15.0
 pause_timeout_s = 3600.0
-_supported = {"heartbeat": True, "approvals": True}
+_stop_grace_s: Optional[float] = 30.0
+_supported = {"heartbeat": True, "approvals": True, "guard": True}
 _asked: dict = {}              # approval_id -> (perf_counter at request, reason, amount_usd)
 
 
@@ -33,14 +34,15 @@ class Approval:
     by: Optional[str] = None          # who answered, as the dashboard reports it
     note: Optional[str] = None        # their note, or why no one could answer
     amount_usd: Optional[float] = None  # the amount approved, if one was asked for
+    approval_id: Optional[str] = None
 
 
-def configure(client, heartbeat_s: float, pause_timeout: float):
-    global _client, _interval, pause_timeout_s, _thread
-    _client, _interval, pause_timeout_s = client, heartbeat_s, pause_timeout
-    _supported.update(heartbeat=True, approvals=True)
+def configure(client, heartbeat_s: float, pause_timeout: float, stop_grace_s: Optional[float] = 30.0):
+    global _client, _interval, pause_timeout_s, _stop_grace_s, _thread
+    _client, _interval, pause_timeout_s, _stop_grace_s = client, heartbeat_s, pause_timeout, stop_grace_s
+    _supported.update(heartbeat=True, approvals=True, guard=True)
     _wake.set()  # a running heartbeat picks up the new client and interval now, not after its old wait
-    if client is not None and _thread is None:
+    if client is not None and (_thread is None or not _thread.is_alive()):  # it ends on a server without the heartbeat
         _thread = threading.Thread(target=_heartbeat, name="agentfences-heartbeat", daemon=True)
         _thread.start()
 
@@ -55,7 +57,7 @@ def unregister(run):
         _live.pop(run.run_id, None)
 
 
-def _unsupported(kind: str, what: str, consequence: str):
+def unsupported(kind: str, what: str, consequence: str):
     if _supported[kind]:
         _supported[kind] = False
         log.warning("agentfences: this Fences server doesn't support %s yet, so %s", what, consequence)
@@ -73,7 +75,9 @@ def apply(run, commands):
             continue
         kind = c.get("type")
         if kind == "stop":
-            run.stopped = True
+            if not run.stopped:
+                run.stopped, run.stopped_at = True, time.monotonic()
+                _wake.set()  # watch for the agent to see it, or cancel it
             _resume(run)
         elif kind == "pause":
             run.paused = True
@@ -103,24 +107,48 @@ def dispatch(commands):
             apply(runs[run_id], commands)
 
 
+def _unseen_stop(run) -> bool:
+    return run.stopped and not run.stop_seen and run.task is not None and not run.cancelled
+
+
+def _cancel(run):
+    """On the run's event loop: cancel a run that hasn't seen its stop. core turns it into FencesStop."""
+    if _unseen_stop(run):
+        run.cancelled = True
+        run.task.cancel()
+
+
+def cancel_overdue(runs):
+    """Cancel async runs that haven't reached a checkpoint within stop_grace_s of a stop."""
+    if _stop_grace_s is None:
+        return
+    for r in runs:
+        if _unseen_stop(r) and time.monotonic() - r.stopped_at >= _stop_grace_s:
+            try:
+                r.loop.call_soon_threadsafe(_cancel, r)
+            except RuntimeError:  # the loop has closed: the run is over anyway
+                pass
+
+
 def _heartbeat():
     while True:
         with _lock:
-            busy = any(r.paused or r.awaiting for r in _live.values())
-        _wake.wait(min(FAST_S, _interval) if busy else _interval)  # faster while busy, never slower
+            busy = any(r.paused or r.awaiting or _unseen_stop(r) for r in _live.values())
+        _wake.wait(min(FAST_S, _interval, _stop_grace_s or FAST_S) if busy else _interval)  # faster while busy, never slower
         _wake.clear()
         with _lock:
             runs = list(_live.values())
+        cancel_overdue(runs)
         if not runs or _client is None:
             continue
         try:
             resp = _client.heartbeat([{"run_id": r.run_id, "iterations": r.iterations, "spent_usd": r.cost_usd,
-                                       "tokens_used": r.tokens_used, "paused": r.paused} for r in runs])
+                                       "tokens_used": r.tokens_used, "paused": r.paused, "stopped": r.stopped} for r in runs])
         except Exception:
             continue
         if resp.get("unsupported"):
-            _unsupported("heartbeat", "the heartbeat", "a stop from the dashboard applies at the next checkpoint and pause isn't available")
-            return
+            unsupported("heartbeat", "the heartbeat", "a stop from the dashboard applies at the next checkpoint and pause isn't available")
+            return  # stops then arrive only in checkpoint replies, which the agent sees
         dispatch(resp.get("commands"))
 
 
@@ -167,7 +195,7 @@ def _ask(reason: str, amount_usd: Optional[float], timeout_s: float):
     if resp.get("unsupported") or "network_error" in resp:
         _asked.pop(approval_id, None)
     if resp.get("unsupported"):
-        _unsupported("approvals", "approval requests", "they are denied")
+        unsupported("approvals", "approval requests", "they are denied")
         return Approval(False, note="This Fences server doesn't support approvals")
     if "network_error" in resp:
         return Approval(False, note="Couldn't reach Fences to ask for approval")
@@ -185,6 +213,7 @@ def _settle(run, approval_id: str) -> Approval:
     from .core import record_span
     run.awaiting -= 1
     answer = run.approvals.pop(approval_id, None) or Approval(False, note="No answer before the timeout")
+    answer.approval_id = approval_id
     if answer.granted and answer.amount_usd and run.budget_usd is not None:  # an unlimited run stays unlimited
         run.budget_usd += answer.amount_usd
     started, reason, asked_usd = _asked.pop(approval_id, (time.perf_counter(), None, None))

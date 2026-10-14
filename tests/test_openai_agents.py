@@ -7,7 +7,7 @@ returns tool calls and usage. Offline, no API keys. Python 3.10+.
 import asyncio
 import math
 
-from agents import Agent, Runner, function_tool, set_tracing_disabled
+from agents import Agent, ModelSettings, Runner, function_tool, set_tracing_disabled
 from agents.items import ModelResponse
 from agents.models.interface import Model
 from agents.usage import Usage
@@ -57,7 +57,8 @@ def lookup(query: str) -> str:
 
 
 def research_agent(tool_turns=1000):
-    return Agent(name="research_agent", instructions="Research.", tools=[lookup], model=FakeModel(tool_turns))
+    return Agent(name="research_agent", instructions="Research.", tools=[lookup], model=FakeModel(tool_turns),
+                 model_settings=ModelSettings(max_tokens=200))  # bounds each call's worst case for the budget precheck
 
 
 def check_stops_on_budget():
@@ -66,16 +67,17 @@ def check_stops_on_budget():
         try:
             asyncio.run(openai_agents.run(research_agent(), "cats", budget_usd=PER_CALL * 3.5, max_turns=1000))
         except FencesStop as stop:
-            assert stop.breach_type == "budget_exceeded" and "budget limit" in stop.message
+            assert stop.breach_type == "budget_exceeded" and "can't make another model call" in stop.message
         else:
             raise AssertionError("the agent should have been stopped")
         agentfences.flush()
+        assert sent.spent <= sent.budget, "the call that could overspend was refused before it was made"
         assert [p["agent_name"] for p in sent.of("start")] == ["research_agent"]
         assert sent.of("end")[-1]["status"] == "breached", sent.of("end")
         spans = [e["attributes"] for e in sent.of("event")]
         llm = [a for a in spans if a["gen_ai.operation.name"] == "chat"]
         tools = [a for a in spans if a["gen_ai.operation.name"] == "execute_tool"]
-        assert len(llm) == 4 and all(math.isclose(a["fences.cost_usd"], PER_CALL) for a in llm), llm
+        assert len(llm) == 3 and all(math.isclose(a["fences.cost_usd"], PER_CALL) for a in llm), llm
         assert llm[0]["gen_ai.request.model"] == "gpt-4o" and llm[0]["gen_ai.provider.name"] == "openai"
         assert llm[0]["gen_ai.usage.input_tokens"] == 1000 and llm[0]["gen_ai.usage.cache_read.input_tokens"] == 400
         assert len(tools) == 3 and tools[0]["gen_ai.tool.name"] == "lookup" and tools[0]["gen_ai.tool.call.arguments"] == '{"query": "q1"}'

@@ -8,8 +8,9 @@ Fences for the OpenAI Agents SDK (Python 3.10+), with no decorators:
     except FencesStop as stop:
         print(stop.message)   # why it stopped, ready to show the user
 
-run() is Runner.run governed by Fences: each model call is recorded with its tokens and
-cost and checkpointed, so limits apply, and each tool call is recorded. Already inside
+run() is Runner.run governed by Fences: each model call is prechecked against the budget
+before it's sent, then recorded with its tokens and cost and checkpointed, so limits
+apply, and each tool call is recorded. Already inside
 @governed? Pass FencesRunHooks() as Runner.run(..., hooks=...) instead.
 """
 import time
@@ -18,7 +19,7 @@ from typing import Any, Optional
 from agents import RunHooks, Runner
 from agents.models import get_default_model
 
-from . import core
+from . import core, precheck
 from .exceptions import FencesStop
 from .spans import record_llm_call, record_tool_call
 
@@ -38,14 +39,21 @@ class FencesRunHooks(RunHooks):
 
     def __init__(self):
         self._started: dict = {}  # tool call id or model call key -> start time
+        self._holds: dict = {}    # model call key -> its budget hold
 
     async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
+        settings = getattr(agent, "model_settings", None)
+        params = {"max_tokens": getattr(settings, "max_tokens", None)}
+        # Before the request goes out: refuse it (FencesStop) if it might not fit the budget.
+        # ponytail: a call that fails holds its amount until the run ends; RunHooks has no model-error hook
+        self._holds[("llm", id(agent))] = precheck.hold(_model_name(agent), [system_prompt, input_items], params)
         self._started[("llm", id(agent))] = time.perf_counter()
 
     async def on_llm_end(self, context, agent, response) -> None:
         if core.get_active_run() is None:
             return
         t0 = self._started.pop(("llm", id(agent)), time.perf_counter())
+        precheck.finish(self._holds.pop(("llm", id(agent)), None))  # the checkpoint below swaps it for the actual cost
         source = {"model": _model_name(agent), "usage": response.usage}  # Responses-API-shaped usage
         record_llm_call("openai", source["model"], t0, source, integration="openai-agents")
         result = await core.checkpoint(source)  # the model call is the step: count it, price it, check limits

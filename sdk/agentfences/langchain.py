@@ -10,8 +10,9 @@ Fences for LangChain and LangGraph, with no decorators:
         print(stop.message)   # why it stopped, ready to show the user
 
 The outermost chain or graph run becomes a Fences run (or joins one already started by
-@governed). Each model call is recorded with its tokens and cost and checkpointed, so
-limits apply; each tool call is recorded. Requires langchain-core.
+@governed). Each model call is prechecked against the budget before it's sent, then
+recorded with its tokens and cost and checkpointed, so limits apply; each tool call is
+recorded. Requires langchain-core.
 """
 import logging
 import time
@@ -20,7 +21,7 @@ from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-from . import core
+from . import core, precheck
 from .exceptions import FencesStop
 from .pricing import read_usage
 from .spans import record_llm_call, record_tool_call
@@ -56,6 +57,7 @@ class FencesCallbackHandler(BaseCallbackHandler):
         self._runs: Dict[UUID, Any] = {}       # root LangChain run id -> (RunState, started_here)
         self._root: Dict[UUID, UUID] = {}      # any LangChain run id -> its root
         self._started: Dict[UUID, tuple] = {}  # model or tool call in progress -> (kind, name, args, t0)
+        self._holds: Dict[UUID, Any] = {}      # model call in progress -> its budget hold
 
     # ── run boundaries ────────────────────────────────────────────────────────
 
@@ -121,7 +123,7 @@ class FencesCallbackHandler(BaseCallbackHandler):
 
     # ── model calls ───────────────────────────────────────────────────────────
 
-    def _model_start(self, serialized, run_id, parent_run_id, kwargs):
+    def _model_start(self, serialized, run_id, parent_run_id, kwargs, request):
         def go():
             if parent_run_id is None:  # a model invoked on its own is a run of its own
                 self._enter(run_id, None, kwargs.get("name") or (serialized or {}).get("name") or "")
@@ -129,18 +131,26 @@ class FencesCallbackHandler(BaseCallbackHandler):
                 self._enter(run_id, parent_run_id, "")
             params = kwargs.get("invocation_params") or {}
             provider = (kwargs.get("metadata") or {}).get("ls_provider") or "langchain"  # e.g. "openai", "anthropic"
-            self._started[run_id] = ("llm", params.get("model") or params.get("model_name"), provider, time.perf_counter())
+            model = params.get("model") or params.get("model_name")
+            self._started[run_id] = ("llm", model, provider, time.perf_counter())
+            try:  # before the request goes out: refuse it if it might not fit the budget
+                self._holds[run_id] = self._with_run(run_id, lambda run: precheck.hold(model, request, params))
+            except FencesStop as stop:
+                if self._root.get(run_id) == run_id:  # a model run on its own ends here
+                    self._exit(run_id, stop)
+                raise
         self._safely(go)
 
     def on_chat_model_start(self, serialized, messages, *, run_id, parent_run_id=None, **kwargs):
-        self._model_start(serialized, run_id, parent_run_id, kwargs)
+        self._model_start(serialized, run_id, parent_run_id, kwargs, messages)  # whole messages: tool calls count as input too
 
     def on_llm_start(self, serialized, prompts, *, run_id, parent_run_id=None, **kwargs):
-        self._model_start(serialized, run_id, parent_run_id, kwargs)
+        self._model_start(serialized, run_id, parent_run_id, kwargs, prompts)
 
     def on_llm_end(self, response, *, run_id, **kwargs):
         def record(run):
             _, model, provider, t0 = self._started.pop(run_id, ("llm", None, "langchain", time.perf_counter()))
+            precheck.finish(self._holds.pop(run_id, None))  # the checkpoint below swaps it for the actual cost
             source = _response_of(response)
             record_llm_call(provider, model, t0, source, integration="langchain")
             # The model call is the step: count it, price it, check limits
@@ -156,6 +166,7 @@ class FencesCallbackHandler(BaseCallbackHandler):
     def on_llm_error(self, error, *, run_id, **kwargs):
         def record(run):
             _, model, provider, t0 = self._started.pop(run_id, ("llm", None, "langchain", time.perf_counter()))
+            precheck.finish(self._holds.pop(run_id, None), failed=True)
             record_llm_call(provider, model, t0, error=error, integration="langchain")
         self._safely(lambda: self._with_run(run_id, record))
         if self._root.get(run_id) == run_id:

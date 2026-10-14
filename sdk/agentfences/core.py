@@ -182,10 +182,21 @@ class RunState:
     resumed: threading.Event = field(default_factory=lambda: _set_event())
     approvals: dict = field(default_factory=dict)  # approval_id -> Approval, or None while waiting
     awaiting: int = 0
+    stopped_at: Optional[float] = None  # monotonic time a stop arrived
+    stop_seen: bool = False             # the agent got the stop from a checkpoint (or a blocked tool)
+    task: Optional[asyncio.Task] = None  # an async run's task, to cancel if a stop goes unseen
+    loop: Optional[asyncio.AbstractEventLoop] = None
+    cancelled: bool = False             # Fences cancelled the task after a stop
+    reserved_usd: float = 0.0           # held by guarded tools and model calls in flight
+    holds: list = field(default_factory=list)  # model calls' worst-case costs: [amount, finished]
 
     @property
     def duration_ms(self) -> int:
         return int((time.time() - self.started_at) * 1000)
+
+
+# Checking room in a budget and reserving it is one step, across threads and tasks
+reserve_lock = threading.Lock()
 
 
 def get_active_run() -> Optional[RunState]:
@@ -220,6 +231,7 @@ def init(
     instrument: bool = False,
     heartbeat_s: float = 15.0,
     pause_timeout_s: float = 3600.0,
+    stop_grace_s: Optional[float] = 30.0,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -248,7 +260,9 @@ def init(
 
     In cloud mode a background heartbeat reports live runs every heartbeat_s seconds and
     brings back dashboard commands (stop, pause, resume, limits, approval answers). A paused
-    run waits at its next checkpoint, for up to pause_timeout_s seconds.
+    run waits at its next checkpoint, for up to pause_timeout_s seconds. If an async run
+    doesn't reach a checkpoint within stop_grace_s seconds of a stop (say, it's stuck in a
+    tool), it's cancelled and the governed call raises FencesStop. None never cancels.
     """
     global _client, _local_only, _fail_closed
     set_custom_prices(prices)
@@ -261,7 +275,7 @@ def init(
 
     if local_only:
         _client = None
-        control.configure(None, heartbeat_s, pause_timeout_s)
+        control.configure(None, heartbeat_s, pause_timeout_s, stop_grace_s)
         return
 
     if not api_key:
@@ -271,7 +285,7 @@ def init(
         )
     _client = GovClient(api_key=api_key, endpoint=endpoint)
     _start_decision_worker()
-    control.configure(_client, heartbeat_s, pause_timeout_s)
+    control.configure(_client, heartbeat_s, pause_timeout_s, stop_grace_s)
 
 
 def _require_init():
@@ -354,13 +368,17 @@ def governed(
             async def async_wrapper(*args, **kwargs):
                 _require_init()
                 run = await asyncio.to_thread(start)
+                run.task, run.loop = asyncio.current_task(), asyncio.get_running_loop()
                 token, exc = _set_active_run(run), None
                 try:
                     return await func(*args, **kwargs)
                 except BaseException as e:
-                    exc = e
+                    exc = _stopped(run, e)
+                    if exc is not e:
+                        raise exc from None
                     raise
                 finally:
+                    run.task = None  # first, so a late cancel can't land in the cleanup below
                     _reset_active_run(token)
                     await asyncio.to_thread(_end_run, run, *_outcome(run, exc))
             return async_wrapper
@@ -381,6 +399,15 @@ def governed(
         return sync_wrapper
 
     return decorator
+
+
+def _stopped(run: RunState, e: BaseException) -> BaseException:
+    """A cancellation Fences made after an unseen stop becomes FencesStop; anything else is unchanged."""
+    if not (run.cancelled and isinstance(e, asyncio.CancelledError)):
+        return e
+    if hasattr(run.task, "uncancel"):  # 3.11+: the caller's task isn't being cancelled, only this run
+        run.task.uncancel()
+    return FencesStop(_result(run))
 
 
 def _outcome(run: RunState, exc: Optional[BaseException]):
@@ -447,7 +474,8 @@ def _end_run(run: RunState, status: str, error: Optional[str] = None):
     if client:
         # The run must end even if redaction drops its error details
         sent = events.redact({"type": "run_end", "status": status, "error": error, "exception": run.exception}) if error else None
-        client.end_run(run.run_id, status=status, error=(sent or {}).get("error"), exception=(sent or {}).get("exception"))
+        client.end_run(run.run_id, status=status, error=(sent or {}).get("error"), exception=(sent or {}).get("exception"),
+                       breach=run.last_breach if status == "breached" else None)
 
 
 # ── Checkpoint ────────────────────────────────────────────────────────────────
@@ -502,6 +530,7 @@ def _decide(run: RunState, resp: Optional[dict]) -> CheckpointResult:
 def _result(run: RunState) -> CheckpointResult:
     if run.stopped:  # a stop from the dashboard sticks, whatever a later response says
         run.last_breach = "stopped_by_user"
+        run.stop_seen = True
     elif run.pause_expired:
         run.last_breach = "paused"
     return _breach(run) if run.last_breach else CheckpointResult(spent_usd=run.cost_usd)
@@ -523,7 +552,11 @@ def _breach(run: RunState) -> CheckpointResult:
 def _record_step(cost_delta_usd: float, tokens_used: int) -> Optional[RunState]:
     run = get_active_run()
     if run is not None:
-        run.cost_usd += cost_delta_usd
+        with reserve_lock:  # the actual cost replaces the holds of calls that finished, in one step
+            run.cost_usd += cost_delta_usd
+            done = [h for h in run.holds if h[1]]
+            run.holds[:] = [h for h in run.holds if not h[1]]
+            run.reserved_usd -= sum(h[0] for h in done)
         run.tokens_used += tokens_used
         run.iterations += 1
     return run

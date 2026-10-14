@@ -321,8 +321,8 @@ class RecordingClient:
     def log_decision(self, run_id, iteration, reasoning, action):
         self.sent.append(("decision", {"reasoning": reasoning, "action": action}))
 
-    def end_run(self, run_id, status, error=None, exception=None):
-        self.sent.append(("end", {"status": status, "error": error, "exception": exception}))
+    def end_run(self, run_id, status, error=None, exception=None, breach=None):
+        self.sent.append(("end", {"status": status, "error": error, "exception": exception, **({"breach": breach} if breach else {})}))
 
     def log_spans(self, run_id, spans):
         if not self.events_supported:
@@ -576,7 +576,7 @@ def check_heartbeat_stop_and_limits():
         def operator():
             wait_for(lambda: sent.beats)  # the heartbeat reports the live run...
             run_id = sent.beats[-1][0]["run_id"]
-            assert set(sent.beats[-1][0]) == {"run_id", "iterations", "spent_usd", "tokens_used", "paused"}
+            assert set(sent.beats[-1][0]) == {"run_id", "iterations", "spent_usd", "tokens_used", "paused", "stopped"}
             sent.heartbeat_commands = [{"run_id": run_id, "type": "limits", "budget_usd": 5.0}]
             wait_for(lambda: not sent.heartbeat_commands)
             sent.heartbeat_commands = [{"run_id": run_id, "type": "stop"}]  # ...and brings back commands
