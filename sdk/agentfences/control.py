@@ -1,20 +1,23 @@
 """
 Live control from the Fences dashboard: a heartbeat that reports live runs and brings
-back commands (stop, pause, resume, limits, approval answers), pausing at checkpoints,
-and approval requests. Cloud mode only; an older server without these endpoints gets
-one warning and runs carry on as before.
+back commands (stop, pause, resume, quarantine, limits, approval answers) and
+acknowledges them, containment hooks, pausing at checkpoints, and approval requests.
+Cloud mode only; an older server without these endpoints gets one warning and runs
+carry on as before.
 """
 import asyncio
+import atexit
 import logging
 import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger("agentfences")
 
 FAST_S = 2.0  # heartbeat interval while a run is paused or waiting for an approval
+HOOK_TIMEOUT_S = 30.0  # a hook still running after this is reported as timed out
 
 _live: dict = {}               # run_id -> RunState, for runs in progress
 _lock = threading.Lock()
@@ -26,6 +29,10 @@ pause_timeout_s = 3600.0
 _stop_grace_s: Optional[float] = 30.0
 _supported = {"heartbeat": True, "approvals": True, "guard": True}
 _asked: dict = {}              # approval_id -> (perf_counter at request, reason, amount_usd)
+_hooks: dict = {"stop": None, "quarantine": None}  # init(on_stop=, on_quarantine=)
+_acks: list = []               # acknowledgements waiting for the next heartbeat
+_hooked: set = set()           # quarantine ids whose hook has run in this process
+_running_hooks: list = []      # hook threads still going, waited for at exit
 
 
 @dataclass
@@ -37,9 +44,11 @@ class Approval:
     approval_id: Optional[str] = None
 
 
-def configure(client, heartbeat_s: float, pause_timeout: float, stop_grace_s: Optional[float] = 30.0):
+def configure(client, heartbeat_s: float, pause_timeout: float, stop_grace_s: Optional[float] = 30.0,
+              on_stop: Optional[Callable] = None, on_quarantine: Optional[Callable] = None):
     global _client, _interval, pause_timeout_s, _stop_grace_s, _thread
     _client, _interval, pause_timeout_s, _stop_grace_s = client, heartbeat_s, pause_timeout, stop_grace_s
+    _hooks.update(stop=on_stop, quarantine=on_quarantine)
     _supported.update(heartbeat=True, approvals=True, guard=True)
     _wake.set()  # a running heartbeat picks up the new client and interval now, not after its old wait
     if client is not None and (_thread is None or not _thread.is_alive()):  # it ends on a server without the heartbeat
@@ -69,7 +78,7 @@ LIMIT_FIELDS = ("budget_usd", "max_iterations", "max_duration_ms", "max_tokens")
 
 
 def apply(run, commands):
-    """Apply the commands addressed to this run (from a heartbeat or a checkpoint response)."""
+    """Apply the commands addressed to this run (from a heartbeat or a checkpoint response), and acknowledge them."""
     for c in commands or ():
         if c.get("run_id") not in (None, run.run_id):
             continue
@@ -78,25 +87,112 @@ def apply(run, commands):
             if not run.stopped:
                 run.stopped, run.stopped_at = True, time.monotonic()
                 _wake.set()  # watch for the agent to see it, or cancel it
+                _hook("stop", run, c)  # once per run
             _resume(run)
-        elif kind == "pause":
+        elif kind in ("pause", "quarantine"):  # a quarantined agent's runs hold at their next checkpoint
             run.paused = True
             run.resumed.clear()
             _wake.set()
+            if kind == "quarantine":
+                run.quarantined = True  # guarded tools are blocked here too, even if the server can't be reached
+                _hook("quarantine", run, c)
         elif kind == "resume":
             _resume(run)
         elif kind == "limits":
             for f in LIMIT_FIELDS:
                 if c.get(f) is not None:
                     setattr(run, f, c[f])
-        elif kind == "approval" and c.get("approval_id") in run.approvals:
-            run.approvals[c["approval_id"]] = Approval(
-                granted=bool(c.get("granted")), by=c.get("by"), note=c.get("note"), amount_usd=c.get("amount_usd"))
+        elif kind == "approval":
+            if c.get("approval_id") in run.approvals:
+                run.approvals[c["approval_id"]] = Approval(
+                    granted=bool(c.get("granted")), by=c.get("by"), note=c.get("note"), amount_usd=c.get("amount_usd"))
+        else:
+            continue  # unknown: ignored, and not acknowledged
+        if c.get("id") and c["id"] not in run.acked:
+            run.acked.add(c["id"])
+            _ack({"run_id": run.run_id, "id": c["id"], "type": kind, "received_at": time.time()})
 
 
 def _resume(run):
-    run.paused = False
+    run.paused = run.quarantined = False  # releasing a quarantine resumes its runs
     run.resumed.set()
+
+
+# ── Acknowledgements and containment hooks ────────────────────────────────────
+
+def _ack(entry: dict):
+    with _lock:
+        _acks.append(entry)
+    _wake.set()  # send it now, not at the next interval
+
+
+def _hook(kind: str, run, c: dict):
+    """Run init(on_stop=/on_quarantine=) in its own thread; a quarantine's hook runs once per process."""
+    fn = _hooks.get(kind)
+    if fn is None:
+        return
+    if kind == "quarantine":
+        key = c.get("id") or ("run", run.run_id)  # every server that sends quarantine gives it an id
+        with _lock:
+            if key in _hooked:
+                return
+            _hooked.add(key)
+    event = {"type": kind, "run_id": run.run_id, "agent_name": run.agent_name, "id": c.get("id"),
+             "by": c.get("by"), "reason": c.get("reason")}
+    t = threading.Thread(target=_run_hook, args=(fn, event), name=f"agentfences-{kind}-hook", daemon=True)
+    with _lock:
+        _running_hooks.append(t)
+    t.start()
+
+
+def _run_hook(fn: Callable, event: dict):
+    from .events import error_text
+    box: dict = {}
+
+    def call():
+        try:
+            fn(event)
+        except BaseException as e:
+            box["error"] = e
+    t = threading.Thread(target=call, name=f"agentfences-{event['type']}-hook-call", daemon=True)
+    t.start()
+    t.join(HOOK_TIMEOUT_S)  # ponytail: a hung hook can't be killed; it's reported and left running
+    if t.is_alive():
+        result, detail = "timeout", None
+    elif "error" in box:
+        result, detail = "failed", error_text(box["error"])[:300]
+    else:
+        result, detail = "ok", None
+    if result != "ok":
+        log.warning("agentfences: the on_%s hook %s%s", event["type"], "timed out" if result == "timeout" else "failed: ", detail or "")
+    if event["id"]:
+        _ack({"run_id": event["run_id"], "id": event["id"], "type": event["type"], "hook": result,
+              **({"detail": detail} if detail else {}), "finished_at": time.time()})
+    with _lock:
+        _running_hooks.remove(threading.current_thread())
+
+
+def drain(timeout: float = HOOK_TIMEOUT_S):
+    """
+    Wait for running hooks, then send the acknowledgements still waiting. Runs at exit and
+    from flush(), so a script that ends right after a stop still finishes its containment,
+    and says so, instead of the hook being killed with the process.
+    """
+    deadline = time.monotonic() + timeout
+    with _lock:
+        hooks = list(_running_hooks)
+    for t in hooks:
+        t.join(max(0.0, deadline - time.monotonic()))
+    with _lock:
+        acks, _acks[:] = list(_acks), []
+    if acks and _client is not None and _supported["heartbeat"]:
+        try:
+            _client.heartbeat([], acks)
+        except Exception:
+            pass
+
+
+atexit.register(drain)
 
 
 def dispatch(commands):
@@ -138,13 +234,20 @@ def _heartbeat():
         _wake.clear()
         with _lock:
             runs = list(_live.values())
+            acks, _acks[:] = list(_acks), []
         cancel_overdue(runs)
-        if not runs or _client is None:
+        if not (runs or acks) or _client is None:
             continue
         try:
             resp = _client.heartbeat([{"run_id": r.run_id, "iterations": r.iterations, "spent_usd": r.cost_usd,
-                                       "tokens_used": r.tokens_used, "paused": r.paused, "stopped": r.stopped} for r in runs])
+                                       "tokens_used": r.tokens_used, "paused": r.paused, "stopped": r.stopped} for r in runs],
+                                     acks)
         except Exception:
+            resp = {"network_error": "heartbeat failed"}
+        if "network_error" in resp or resp.get("ok") is False:
+            if "network_error" in resp or resp.get("status", 500) >= 500:  # a 4xx won't get better by resending
+                with _lock:
+                    _acks[:0] = acks  # at least once: they go with the next heartbeat
             continue
         if resp.get("unsupported"):
             unsupported("heartbeat", "the heartbeat", "a stop from the dashboard applies at the next checkpoint and pause isn't available")

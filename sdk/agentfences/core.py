@@ -189,6 +189,8 @@ class RunState:
     cancelled: bool = False             # Fences cancelled the task after a stop
     reserved_usd: float = 0.0           # held by guarded tools and model calls in flight
     holds: list = field(default_factory=list)  # model calls' worst-case costs: [amount, finished]
+    quarantined: bool = False           # the agent was quarantined from the dashboard while this ran
+    acked: set = field(default_factory=set)  # command ids already acknowledged
 
     @property
     def duration_ms(self) -> int:
@@ -232,6 +234,8 @@ def init(
     heartbeat_s: float = 15.0,
     pause_timeout_s: float = 3600.0,
     stop_grace_s: Optional[float] = 30.0,
+    on_stop: Optional[Callable[[dict], None]] = None,
+    on_quarantine: Optional[Callable[[dict], None]] = None,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -263,6 +267,12 @@ def init(
     run waits at its next checkpoint, for up to pause_timeout_s seconds. If an async run
     doesn't reach a checkpoint within stop_grace_s seconds of a stop (say, it's stuck in a
     tool), it's cancelled and the governed call raises FencesStop. None never cancels.
+
+    on_stop and on_quarantine run in the agent's process, in a background thread, when a
+    stop or quarantine arrives from the dashboard, to contain what Fences can't reach (say,
+    revoke a credential the agent holds). They get {"type", "run_id", "agent_name", "id",
+    "by", "reason"}. on_stop runs once per run, on_quarantine once per quarantine; whether
+    each worked, failed or timed out (30 s) is reported to Fences.
     """
     global _client, _local_only, _fail_closed
     set_custom_prices(prices)
@@ -275,7 +285,7 @@ def init(
 
     if local_only:
         _client = None
-        control.configure(None, heartbeat_s, pause_timeout_s, stop_grace_s)
+        control.configure(None, heartbeat_s, pause_timeout_s, stop_grace_s, on_stop, on_quarantine)
         return
 
     if not api_key:
@@ -285,7 +295,7 @@ def init(
         )
     _client = GovClient(api_key=api_key, endpoint=endpoint)
     _start_decision_worker()
-    control.configure(_client, heartbeat_s, pause_timeout_s, stop_grace_s)
+    control.configure(_client, heartbeat_s, pause_timeout_s, stop_grace_s, on_stop, on_quarantine)
 
 
 def _require_init():
@@ -681,11 +691,12 @@ def _start_decision_worker():
 
 
 def flush(timeout: float = 5.0):
-    """Wait up to `timeout` seconds for queued decisions and events to reach the backend.
-    Runs automatically at exit; call it yourself in serverless handlers."""
+    """Wait up to `timeout` seconds for queued decisions and events to reach the backend, and for
+    on_stop/on_quarantine hooks to finish. Runs automatically at exit; call it yourself in serverless handlers."""
     deadline = time.time() + timeout
     while _decisions.unfinished_tasks and time.time() < deadline:
         time.sleep(0.02)
+    control.drain(max(0.0, deadline - time.time()))  # containment hooks, and command acknowledgements
 
 
 def record_span(name: str, elapsed_s: float, attributes: dict, error: Optional[BaseException] = None):

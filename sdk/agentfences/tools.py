@@ -97,6 +97,8 @@ def _approve(run, label: str, summary: str, amount: float) -> str:
 def _open(run, label: str, summary: str, amount: float, approve: bool) -> str:
     """Check a guarded call and reserve its amount; returns the guard id, or raises ToolBlocked."""
     from . import core
+    if run.quarantined:  # before waiting out the pause a quarantine brings: blocked now, not when it's released
+        _block(run, label, "the agent is quarantined in Fences")
     if run.paused:
         control.wait_if_paused(run)
     if run.pause_expired:

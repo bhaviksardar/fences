@@ -38,6 +38,7 @@ This README covers the Python SDK (`pip install agentfences`). There's also a Ty
 | Automatic OpenAI/Anthropic recording (`instrument=True`) | ✅ 0.3.0 | not yet |
 | LangChain/LangGraph and OpenAI Agents SDK integrations | ✅ 0.3.0 | not yet |
 | Budget prechecks before model calls, guarded tools, tool timeouts, cancelling a stuck run after a stop | ✅ 0.4.0 | not yet |
+| Containment hooks (`on_stop`, `on_quarantine`), acknowledging every dashboard command | ✅ 0.5.0 | not yet |
 
 What each part guarantees, and what it can't, is in [ENFORCEMENT.md](ENFORCEMENT.md).
 
@@ -180,7 +181,7 @@ In cloud mode the SDK keeps a heartbeat with Fences, so whoever is on call can a
 - **Stop:** the run's next `checkpoint()` returns `breach_type="stopped_by_user"` with its message, so the agent wraps up gracefully. A stop sticks, whatever later responses say. If an async run doesn't reach a checkpoint within `stop_grace_s` (default 30 seconds) of the stop, because it's stuck in a tool say, it's cancelled and the governed call raises `FencesStop`. `init(stop_grace_s=None)` turns that off. A synchronous run can't be interrupted, so it stops at its next checkpoint or guarded tool.
 - **Pause and resume:** a paused run waits inside its next `checkpoint()` until it's resumed, then carries on. If no one resumes it within `pause_timeout_s` (default one hour), the checkpoint returns `breach_type="paused"`.
 - **Change limits:** new limits apply to the run immediately.
-- **Quarantine:** calling a governed function for a quarantined agent raises `AgentQuarantined` before any of its code runs.
+- **Quarantine:** calling a governed function for a quarantined agent raises `AgentQuarantined` before any of its code runs. Its runs already going hold at their next checkpoint until the quarantine is released, and their guarded tools are blocked.
 
 An agent can also ask a person before doing something risky:
 
@@ -191,6 +192,19 @@ if not approval.granted:
 ```
 
 The answer has `granted`, `by`, `note` and `amount_usd`; an approved amount raises the run's budget by that much. `request_approval_sync()` does the same for synchronous agents. It never hangs and never raises: in local mode, outside a run, or when the server can't take requests it returns denied right away, and with no answer it returns denied after `timeout_s`.
+
+**Containment hooks** run in your agent's process when a stop or quarantine arrives, to contain what Fences can't reach, such as a credential the agent holds:
+
+```python
+def revoke(event):  # {"type": "quarantine", "run_id", "agent_name", "id", "by", "reason"}
+    vault.revoke(f"agent/{event['agent_name']}")
+
+agentfences.init(api_key="fc_...", on_quarantine=revoke, on_stop=lambda event: ...)
+```
+
+Each runs in a background thread: `on_stop` once per run, `on_quarantine` once per quarantine however many runs it reaches. Fences records whether the hook worked, raised (and why) or ran past 30 seconds, on the incident's timeline. A process that exits right after a stop waits for its hooks to finish first, up to 30 seconds; in serverless handlers, `flush()` does the same.
+
+**Acknowledgements:** the SDK confirms every dashboard command it receives, so the dashboard can tell "the agent has it" from "the agent hasn't acknowledged". A process that's dead, cut off or stuck in synchronous code gets flagged within about 30 seconds.
 
 The heartbeat reports live runs every 15 seconds (`init(heartbeat_s=...)`), and every 2 seconds while a run is paused or waiting for approval. A Fences server without these features gets one warning: stops still apply at the next checkpoint, and approval requests are denied.
 
