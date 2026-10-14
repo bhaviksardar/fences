@@ -288,6 +288,7 @@ class RecordingClient:
         self.start_notices = None
         self.heartbeat_commands, self.checkpoint_commands = [], []  # handed out on the next call
         self.beats, self.approval_requests = [], []
+        self.acks, self.lose_acks = [], False  # acks received; lose the next heartbeat that carries some
 
     def start_run(self, run_id, agent_name, *limits, context=None):
         if self.quarantine:
@@ -304,9 +305,13 @@ class RecordingClient:
         out, self.checkpoint_commands = self.checkpoint_commands, []
         return {"ok": True, "commands": out}
 
-    def heartbeat(self, runs):
+    def heartbeat(self, runs, acks=None):
         if not self.heartbeat_supported:
             return {"unsupported": True}
+        if acks and self.lose_acks:
+            self.lose_acks = False
+            return {"network_error": "connection reset"}
+        self.acks.extend(acks or [])
         self.beats.append(runs)
         out, self.heartbeat_commands = self.heartbeat_commands, []
         return {"commands": out}
@@ -669,6 +674,111 @@ def check_approvals():
         agentfences.init(local_only=True)
 
 
+def check_acks_and_containment_hooks():
+    hooked = []
+
+    def on_quarantine(event):
+        hooked.append(event)
+
+    def on_stop(event):
+        hooked.append(event)
+        raise RuntimeError("vault unreachable")
+
+    sent = cloud(heartbeat_s=0.05, on_quarantine=on_quarantine, on_stop=on_stop)
+    sent.lose_acks = True  # the first heartbeat with acks is lost: they must go with the next
+    try:
+        @governed(budget_usd=10)
+        async def agent():
+            for _ in range(400):
+                result = await checkpoint(cost_delta_usd=0.001)
+                if result.breached:
+                    return result.breach_type
+                await asyncio.sleep(0.01)
+
+        def operator():
+            wait_for(lambda: len(sent.beats) >= 1 and len(sent.beats[-1]) == 2)
+            ids = [r["run_id"] for r in sent.beats[-1]]
+            quarantine = [{"run_id": i, "type": "quarantine", "id": "q1", "by": "dana@example.com", "reason": "leaking data"} for i in ids]
+            sent.heartbeat_commands = quarantine
+            wait_for(lambda: all(r["paused"] for r in sent.beats[-1]))  # both runs hold at their checkpoints
+            sent.heartbeat_commands = quarantine  # re-sent with the same id: applied again, not acknowledged again
+            wait_for(lambda: not sent.heartbeat_commands)
+            sent.heartbeat_commands = [{"run_id": i, "type": "resume", "id": f"r-{i}"} for i in ids]  # quarantine released
+            wait_for(lambda: not any(r["paused"] for r in sent.beats[-1]))
+            sent.heartbeat_commands = [{"run_id": ids[0], "type": "stop", "id": "s1"}, {"run_id": ids[1], "type": "stop"}]
+        background(operator)
+
+        async def both():
+            return await asyncio.gather(agent(), agent())
+        assert asyncio.run(both()) == ["stopped_by_user"] * 2
+
+        wait_for(lambda: any(a.get("hook") == "failed" for a in sent.acks))
+        quarantines = [e for e in hooked if e["type"] == "quarantine"]
+        assert len(quarantines) == 1 and quarantines[0]["reason"] == "leaking data", hooked  # once per process per quarantine
+        assert len([e for e in hooked if e["type"] == "stop"]) == 2, "on_stop runs once per run, even without a command id"
+        receipts = [(a["id"], a["type"]) for a in sent.acks if "hook" not in a]
+        assert sorted(receipts) == sorted([("q1", "quarantine")] * 2 + [(f"r-{i}", "resume") for i in {a["run_id"] for a in sent.acks if a["id"] == "q1"}]
+                                          + [("s1", "stop")]), receipts
+        hooks = {a["id"]: a for a in sent.acks if "hook" in a}
+        assert hooks["q1"]["hook"] == "ok" and hooks["s1"]["hook"] == "failed" and "vault unreachable" in hooks["s1"]["detail"], hooks
+        assert all("received_at" in a for a in sent.acks if "hook" not in a)
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_hooks_finish_before_exit():
+    """A script that ends right after a stop still finishes on_stop, and acknowledges it, before the process exits."""
+    import json, os, subprocess, sys, tempfile
+    out = os.path.join(tempfile.mkdtemp(), "revoked")
+    script = f"""
+import atexit, json, sys, time
+sys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r})
+acks = []
+atexit.register(lambda: print(json.dumps(acks)))  # registered first, so it runs after Fences' own exit handlers
+import agentfences
+from test_local import RecordingClient
+
+def on_stop(event):
+    time.sleep(0.5)  # revoking a credential takes a moment
+    open({out!r}, "w").write("revoked")
+
+agentfences.init(api_key="fc", endpoint="http://x.invalid", heartbeat_s=60, on_stop=on_stop)
+sent = RecordingClient()
+agentfences.core._client = agentfences.control._client = sent
+acks = sent.acks
+sent.checkpoint_commands = [{{"type": "stop", "id": "s1"}}]
+
+@agentfences.governed(budget_usd=1)
+def agent():
+    return agentfences.checkpoint_sync(cost_delta_usd=0.01).breach_type
+assert agent() == "stopped_by_user"
+"""
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert open(out).read() == "revoked", "the hook was killed with the process"
+    acks = json.loads(r.stdout.strip().splitlines()[-1])
+    assert [(a["id"], a.get("hook")) for a in acks] == [("s1", None), ("s1", "ok")], acks
+
+
+def check_quarantine_blocks_guarded_tools():
+    cloud(heartbeat_s=60)
+    try:
+        @agentfences.tool(guard=True)
+        def deploy():
+            raise AssertionError("ran while quarantined")
+
+        @governed(budget_usd=1)
+        def agent():
+            agentfences.control.apply(get_active_run(), [{"type": "quarantine", "id": "q2"}])
+            try:
+                deploy()
+            except agentfences.ToolBlocked as e:
+                return e.reason
+        assert "quarantined" in agent()  # at once, not after the quarantine's pause is released
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_server_limits_are_adopted():
     sent = cloud()
     sent.start_limits = {"budget_usd": 0.05, "max_iterations": 3, "max_duration_ms": 300000, "max_tokens": 0}
@@ -812,7 +922,8 @@ if __name__ == "__main__":
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
         check_tool_calls, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
-        check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
+        check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals,
+        check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
         check_version_is_sent, check_quarantine,
         check_old_server_without_control,
     ]

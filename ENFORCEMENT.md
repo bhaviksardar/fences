@@ -1,6 +1,6 @@
 # Enforcement guarantees
 
-What Fences guarantees about an agent's limits, at each of its three levels, and what it can't. Each guarantee names the check that proves it, or is marked **(server)** when it rests on the Fences server implementing [PROTOCOL.md](PROTOCOL.md). These live in [`tests/test_enforcement.py`](tests/test_enforcement.py) unless marked otherwise, and run in CI on Python 3.9 to 3.14. This covers the Python SDK 0.4.0. The TypeScript SDK has level 1 and level 2 except tool timeouts and cancelling (see the [support table](README.md#python-and-typescript)).
+What Fences guarantees about an agent's limits, at each of its three levels, and what it can't. Each guarantee names the check that proves it, or is marked **(server)** when it rests on the Fences server implementing [PROTOCOL.md](PROTOCOL.md). These live in [`tests/test_enforcement.py`](tests/test_enforcement.py) unless marked otherwise, and run in CI on Python 3.9 to 3.14. This covers the Python SDK 0.5.0. The TypeScript SDK has level 1 and level 2 except tool timeouts and cancelling (see the [support table](README.md#python-and-typescript)).
 
 ## The three levels
 
@@ -37,11 +37,13 @@ Levels 1 and 2 are cooperative: they work through the agent's own loop. Level 3 
 - **An agent that saw its stop isn't cut off.** Once a checkpoint (or a blocked tool) has handed the agent its stop, it's never cancelled, so it can write its summary. Check: `check_stop_seen_at_checkpoint_is_not_cancelled`.
 - **Tool timeouts:** `@tool(timeout_s=...)` raises `TimeoutError` in time, whether the tool is async or sync. Check: `check_hanging_tool_times_out`.
 - **Pause** holds the agent at its next checkpoint and expires after `pause_timeout_s`. Check: `test_local.py`: `check_pause_resume_and_timeout`.
-- **The dashboard can tell received from unanswered.** The heartbeat reports `stopped: true` once the SDK has the stop. A run that's still going after that is shown as unresponsive and can be quarantined (PROTOCOL.md, "Heartbeat").
+- **The dashboard can tell received from unanswered.** The SDK acknowledges every command it receives (stop, pause, quarantine, resume), by its id, in the next heartbeat, which it sends at once. A lost heartbeat's acknowledgements go with the next one. A command with no acknowledgement within 30 seconds marks the agent as not acknowledging **(server)**. Check: `test_local.py`: `check_acks_and_containment_hooks`.
+- **Containment hooks run, and report back.** `on_quarantine` runs once per quarantine in each process, and `on_stop` once per run. Whether each worked, failed (with the error) or timed out is acknowledged to the server. A process that exits right after a stop finishes its hooks and sends their results first. Checks: `check_acks_and_containment_hooks`, `check_hooks_finish_before_exit`.
+- **A quarantine blocks guarded tools at once,** in the SDK as well as on the server, without waiting for the pause it brings. Check: `test_local.py`: `check_quarantine_blocks_guarded_tools`.
 
 **Not guaranteed**
 - **Synchronous agents can't be interrupted.** Python can't stop a thread from outside, so a sync run stops at its next checkpoint or guarded tool. A timed-out sync tool keeps running in a background thread; the agent just stops waiting for it.
-- **A dead or cut-off process** can't hear a stop. The server sees no heartbeat; it can't end the process.
+- **A dead or cut-off process** can't hear a stop or run its hooks. The server sees no heartbeat and no acknowledgement; it can't end the process. Containment that must happen anyway belongs on the server side: webhooks the server fires, and credentials it can revoke itself.
 - Cancelling covers `async def` agents, not async generators (streaming agents), which stop at their next checkpoint.
 
 ## Level 3: guarded tools

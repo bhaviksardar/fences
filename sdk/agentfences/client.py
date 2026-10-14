@@ -44,9 +44,9 @@ class GovClient:
     def log_spans(self, run_id: str, spans: list) -> dict:
         return self._post(f"/api/runs/{run_id}/spans", {"spans": spans}, optional=True)
 
-    def heartbeat(self, runs: list) -> dict:
-        """Report live runs; the reply may carry commands for them."""
-        return self._post("/api/heartbeat", {"runs": runs}, optional=True)
+    def heartbeat(self, runs: list, acks: Optional[list] = None) -> dict:
+        """Report live runs and acknowledge commands; the reply may carry commands for them."""
+        return self._post("/api/heartbeat", {"runs": runs, **({"acks": acks} if acks else {})}, optional=True)
 
     def request_approval(self, run_id: str, approval_id: str, reason: str, amount_usd: Optional[float],
                          timeout_s: float) -> dict:
