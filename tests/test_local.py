@@ -760,6 +760,29 @@ assert agent() == "stopped_by_user"
     assert [(a["id"], a.get("hook")) for a in acks] == [("s1", None), ("s1", "ok")], acks
 
 
+def check_resent_quarantine_doesnt_flood_heartbeats():
+    """The server re-sends quarantine on every reply while it lasts; that mustn't make heartbeats back-to-back."""
+    import time
+    sent = cloud(heartbeat_s=0.5, pause_timeout_s=1.5)
+    real = sent.heartbeat
+
+    def quarantined(runs, acks=None):
+        real(runs, acks)
+        return {"commands": [{"run_id": r["run_id"], "type": "quarantine", "id": "q1"} for r in runs]}
+    sent.heartbeat = quarantined
+    try:
+        @governed(budget_usd=1)
+        def agent():
+            time.sleep(0.6)  # the first heartbeat brings the quarantine
+            before, t = len(sent.beats), time.monotonic()
+            checkpoint_sync(cost_delta_usd=0.01)  # held until pause_timeout_s
+            return len(sent.beats) - before, time.monotonic() - t
+        beats, held = agent()
+        assert beats <= held / 0.5 + 3, f"{beats} heartbeats in {held:.1f}s: the re-sent quarantine floods the server"
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_quarantine_blocks_guarded_tools():
     cloud(heartbeat_s=60)
     try:
@@ -923,7 +946,8 @@ if __name__ == "__main__":
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
         check_tool_calls, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
         check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals,
-        check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
+        check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit,
+        check_resent_quarantine_doesnt_flood_heartbeats, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
         check_version_is_sent, check_quarantine,
         check_old_server_without_control,
     ]

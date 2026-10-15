@@ -90,9 +90,10 @@ def apply(run, commands):
                 _hook("stop", run, c)  # once per run
             _resume(run)
         elif kind in ("pause", "quarantine"):  # a quarantined agent's runs hold at their next checkpoint
-            run.paused = True
-            run.resumed.clear()
-            _wake.set()
+            if not run.paused:  # only a change wakes the heartbeat: a quarantine is re-sent on every reply while it lasts
+                run.paused = True
+                run.resumed.clear()
+                _wake.set()
             if kind == "quarantine":
                 run.quarantined = True  # guarded tools are blocked here too, even if the server can't be reached
                 _hook("quarantine", run, c)
