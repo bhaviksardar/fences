@@ -17,6 +17,7 @@ from typing import Callable, Optional
 log = logging.getLogger("agentfences")
 
 FAST_S = 2.0  # heartbeat interval while a run is paused or waiting for an approval
+RETRY = {429, *range(500, 600)}  # heartbeat statuses whose acks go again with the next heartbeat
 HOOK_TIMEOUT_S = 30.0  # a hook still running after this is reported as timed out
 
 _live: dict = {}               # run_id -> RunState, for runs in progress
@@ -246,7 +247,7 @@ def _heartbeat():
         except Exception:
             resp = {"network_error": "heartbeat failed"}
         if "network_error" in resp or resp.get("ok") is False:
-            if "network_error" in resp or resp.get("status", 500) >= 500:  # a 4xx won't get better by resending
+            if "network_error" in resp or resp.get("status", 500) in RETRY:  # any other 4xx won't get better by resending
                 with _lock:
                     _acks[:0] = acks  # at least once: they go with the next heartbeat
             continue

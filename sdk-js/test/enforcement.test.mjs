@@ -32,6 +32,7 @@ before(async () => {
       if (server.down) return reply(503, { detail: "down" });
       if (req.url === "/api/heartbeat") {
         if (body.acks && server.loseAcks) { server.loseAcks = false; return reply(503, { detail: "lost" }); }
+        if (body.acks && server.rateLimitAcks) { server.rateLimitAcks = false; return reply(429, { detail: "Too many heartbeats" }); }
         server.beats.push(body.runs);
         server.acks.push(...(body.acks ?? []));
         const out = server.heartbeatCommands; server.heartbeatCommands = [];
@@ -247,6 +248,18 @@ test("commands are acknowledged once; hooks run once and report back; a lost hea
   assert.equal(hooks.q1.hook, "ok");
   assert.equal(hooks.s1.hook, "failed");
   assert.match(hooks.s1.detail, /vault unreachable/);
+});
+
+test("a heartbeat rate limited with 429 doesn't lose its acks", async () => {
+  cloud();
+  server.rateLimitAcks = true;
+  server.checkpointCommands = [{ type: "stop", id: "s7" }];
+  await governed(async () => {
+    await checkpoint(null, { costDeltaUsd: 0.01 });
+    await waitFor(() => server.acks.length);
+  }, { budgetUsd: 1 })();
+  assert.equal(server.rateLimitAcks, false, "the first heartbeat with acks was rate limited");
+  assert.deepEqual(server.acks.map((a) => a.id), ["s7"]);
 });
 
 test("a quarantine re-sent on every reply doesn't make heartbeats back-to-back", async () => {

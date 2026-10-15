@@ -760,6 +760,31 @@ assert agent() == "stopped_by_user"
     assert [(a["id"], a.get("hook")) for a in acks] == [("s1", None), ("s1", "ok")], acks
 
 
+def check_acks_survive_a_rate_limited_heartbeat():
+    """A heartbeat over the server's heartbeat budget gets 429; its acks go again with the next one."""
+    import time
+    sent = cloud(heartbeat_s=0.1)
+    real = sent.heartbeat
+    limited = []
+
+    def heartbeat(runs, acks=None):
+        if acks and not limited:
+            limited.append(acks)
+            return {"ok": False, "status": 429}
+        return real(runs, acks)
+    sent.heartbeat = heartbeat
+    sent.checkpoint_commands = [{"type": "stop", "id": "s1"}]
+    try:
+        @governed(budget_usd=1)
+        def agent():
+            checkpoint_sync(cost_delta_usd=0.01)
+            wait_for(lambda: sent.acks)
+        agent()
+        assert limited and [a["id"] for a in sent.acks] == ["s1"], (limited, sent.acks)
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_resent_quarantine_doesnt_flood_heartbeats():
     """The server re-sends quarantine on every reply while it lasts; that mustn't make heartbeats back-to-back."""
     import time
@@ -947,7 +972,7 @@ if __name__ == "__main__":
         check_tool_calls, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
         check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals,
         check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit,
-        check_resent_quarantine_doesnt_flood_heartbeats, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
+        check_resent_quarantine_doesnt_flood_heartbeats, check_acks_survive_a_rate_limited_heartbeat, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
         check_version_is_sent, check_quarantine,
         check_old_server_without_control,
     ]
