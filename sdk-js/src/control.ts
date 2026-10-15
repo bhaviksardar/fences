@@ -9,6 +9,8 @@ import { randomUUID } from "node:crypto";
 import type { FencesClient, Reply } from "./client.js";
 import type { Run } from "./core.js";
 
+/** Heartbeat statuses whose acks go again with the next heartbeat: rate limited, or a server error. */
+const retryable = (status: number | undefined) => status === undefined || status === 429 || status >= 500;
 const FAST_MS = 2000;  // heartbeat interval while a run is paused, waiting for an approval, or stopping
 const HOOK_TIMEOUT_MS = 30_000;  // a hook still running after this is reported as timed out
 
@@ -207,7 +209,7 @@ async function sendAcks(): Promise<void> {
   const batch = acks;
   acks = [];
   const resp = await client.heartbeat([], batch).catch(() => ({ network_error: "heartbeat failed" }) as Reply);
-  if (resp.network_error || (resp.ok === false && (resp.status ?? 500) >= 500)) acks = [...batch, ...acks];
+  if (resp.network_error || (resp.ok === false && retryable(resp.status))) acks = [...batch, ...acks];
 }
 
 // Node exits once nothing keeps it busy: beforeExit lets acks queued by a finished hook still go out.
@@ -257,7 +259,7 @@ async function beat(): Promise<void> {
     const resp = await client.heartbeat(runs.map((r) => ({ run_id: r.runId, iterations: r.iterations, spent_usd: r.costUsd,
       tokens_used: r.tokensUsed, paused: r.control.paused, stopped: r.control.stopped })), batch);
     if (resp.network_error || (resp.ok === false && !resp.unsupported)) {
-      if (resp.network_error || (resp.status ?? 500) >= 500) acks = [...batch, ...acks];  // at least once; a 4xx won't get better
+      if (resp.network_error || retryable(resp.status)) acks = [...batch, ...acks];  // at least once; any other 4xx won't get better
     } else if (resp.unsupported) {
       unsupported("heartbeat", "the heartbeat", "a stop from the dashboard applies at the next checkpoint and pause isn't available");
       return;
