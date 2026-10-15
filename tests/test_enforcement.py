@@ -26,9 +26,13 @@ class Server(RecordingClient):
         self.needs_approval = False
         self.lock = threading.Lock()
 
+    breach = None  # set to make every checkpoint reply breached, like a run over its limit
+
     def checkpoint(self, *args):
         if not self.reachable:
             return {"network_error": "connection refused"}
+        if self.breach:
+            return {"ok": False, "breach": self.breach}
         return super().checkpoint(*args)
 
     def guard(self, run_id, body):
@@ -386,6 +390,177 @@ def check_hanging_tool_times_out():
         assert time.monotonic() - started < 1
 
 
+# ── Waiting at a limit (on_breach="hold") ─────────────────────────────────────
+
+def held_beat(server, kind):
+    """The run id of a heartbeat reporting a run held at a limit of this kind, or None."""
+    for beat in reversed(server.beats):
+        for r in beat:
+            if r.get("held") == kind and r["paused"]:
+                return r["run_id"]
+
+
+def check_hold_at_a_breach_until_raised():
+    server = cloud(Server())
+    try:
+        @governed(budget_usd=1, on_breach="hold")
+        def agent():
+            server.breach = "budget_exceeded"
+            held = checkpoint_sync(cost_delta_usd=0.01)  # waits here until someone raises the limit
+            after = checkpoint_sync(cost_delta_usd=0.01)
+            return held, after
+
+        def operator():
+            wait_for(lambda: held_beat(server, "breach"))
+            server.breach = None  # "Raise limits & resume": the run is back to running...
+            server.heartbeat_commands = [{"run_id": held_beat(server, "breach"), "type": "resume", "id": "r1"}]  # ...and resumed
+        background(operator)
+        held, after = agent()
+        assert held.ok and after.ok, (held, after)
+        assert server.of("end")[-1]["status"] == "success"
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_hold_ends_on_stop_or_timeout():
+    server = cloud(Server(), pause_timeout_s=0.3)
+    try:
+        @governed(budget_usd=1, on_breach="hold")
+        def timed_out():
+            server.breach = "iteration_limit"
+            r = checkpoint_sync(cost_delta_usd=0.01)
+            server.breach = None  # raised later: the run is fine again, and mustn't be stuck as "paused"
+            return r, checkpoint_sync(cost_delta_usd=0.01)
+        r, later = timed_out()
+        assert r.breach_type == "iteration_limit", "after the wait, the limit it was held at, not 'paused'"
+        assert later.ok, later
+
+        server = cloud(Server())
+
+        @governed(budget_usd=1, on_breach="hold")
+        def stopped():
+            server.breach = "budget_exceeded"
+            return checkpoint_sync(cost_delta_usd=0.01)
+
+        def operator():
+            wait_for(lambda: held_beat(server, "breach"))
+            server.heartbeat_commands = [{"run_id": held_beat(server, "breach"), "type": "stop", "id": "s1"}]
+        background(operator)
+        assert stopped().breach_type == "stopped_by_user"
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_hold_only_when_someone_can_raise_it():
+    import time
+    from agentfences import precheck
+
+    @governed(budget_usd=0.01, on_breach="hold")
+    def local():
+        return checkpoint_sync(cost_delta_usd=0.02)
+    assert local().breach_type == "budget_exceeded", "local mode never holds"
+
+    @governed(budget_usd=0.001, on_breach="hold")
+    def local_call():
+        try:
+            precheck.hold("gpt-4o", "hi", {"max_tokens": 1000})
+        except FencesStop as stop:
+            return stop.breach_type
+    agentfences.init(local_only=True, pause_timeout_s=5)
+    t = time.monotonic()
+    assert local_call() == "budget_exceeded" and time.monotonic() - t < 1, "a refused call doesn't wait in local mode"
+    agentfences.init(local_only=True)
+
+    server = cloud(Server())
+    server.reachable = False
+    try:
+        assert local().breach_type == "budget_exceeded", "a breach found while the server is unreachable never holds"
+    finally:
+        agentfences.init(local_only=True)
+    try:
+        agentfences.init(local_only=True, on_breach="wait")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown on_breach value should be refused")
+
+
+def check_resume_releases_against_the_raised_limit():
+    """A reply listing resume before limits (as the server does): the budget is raised before the resume lands."""
+    from agentfences import control
+    cloud(Server())
+    try:
+        @governed(budget_usd=0.01, on_breach="hold")
+        def agent():
+            run = get_active_run()
+            seen = []
+            real_set = run.resumed.set
+            run.resumed.set = lambda: (seen.append(run.budget_usd), real_set())
+            control.apply(run, [{"type": "resume", "id": "r1"}, {"type": "limits", "budget_usd": 5.0}])
+            return seen
+        assert agent() == [5.0], "the resume landed before the raised limit"
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_hold_a_call_until_the_budget_is_raised():
+    """A model call refused by the precheck, and a guarded tool denied for budget, wait for a raise too."""
+    from agentfences import precheck
+    ran = []
+
+    @tool(cost_usd=0.5)
+    def pay():
+        ran.append(1)
+
+    server = cloud(Server(budget=0.3))
+    try:
+        @governed(budget_usd=0.01, on_breach="hold")
+        def agent():
+            h = precheck.hold("gpt-4o", "hi", {"max_tokens": 1000})  # worst case just over the whole $0.01 budget: waits
+            precheck.finish(h)
+            pay()
+            return h
+
+        def operator():
+            wait_for(lambda: held_beat(server, "budget"))
+            rid = held_beat(server, "budget")
+            server.heartbeat_commands = [{"run_id": rid, "type": "limits", "budget_usd": 5.0}, {"run_id": rid, "type": "resume", "id": "r1"}]
+            server.beats.clear()
+            wait_for(lambda: held_beat(server, "budget"))  # then the guarded tool: the server's budget is too low
+            server.budget = 5.0
+            server.heartbeat_commands = [{"run_id": rid, "type": "resume", "id": "r2"}]
+        background(operator)
+        assert agent() is not None and ran == [1]
+        checks = [g for g in server.guards if g["phase"] == "check"]
+        assert len({g["guard_id"] for g in checks}) == 1 and len(checks) >= 2, "re-checked with the same guard id"
+
+        server = cloud(Server())
+
+        @governed(budget_usd=0.01, on_breach="hold")
+        async def async_agent():  # what instrument=True and the OpenAI Agents hooks use: waiting doesn't block the loop
+            ticks = []
+            ticker = asyncio.ensure_future(_tick(ticks))
+            h = await precheck.hold_async("gpt-4o", "hi", {"max_tokens": 1000})
+            ticker.cancel()
+            return h, len(ticks)
+
+        def release():
+            wait_for(lambda: held_beat(server, "budget"))
+            rid = held_beat(server, "budget")
+            server.heartbeat_commands = [{"run_id": rid, "type": "limits", "budget_usd": 5.0}, {"run_id": rid, "type": "resume", "id": "r3"}]
+        background(release)
+        h, ticks = asyncio.run(async_agent())
+        assert h is not None and ticks > 3, "the event loop kept running while the call waited"
+    finally:
+        agentfences.init(local_only=True)
+
+
+async def _tick(ticks):
+    while True:
+        ticks.append(1)
+        await asyncio.sleep(0.01)
+
+
 # ── Level 1: limits hold when the server doesn't answer ───────────────────────
 
 def check_network_partition():
@@ -416,6 +591,8 @@ if __name__ == "__main__":
         check_guard_fails_closed, check_server_required_approval,
         check_model_call_worst_case, check_parallel_model_calls_cannot_overspend, check_holds_are_released_exactly,
         check_refused_call_ends_run_breached, check_guard_counts_model_calls_in_flight,
+        check_hold_at_a_breach_until_raised, check_hold_ends_on_stop_or_timeout, check_hold_only_when_someone_can_raise_it,
+        check_hold_a_call_until_the_budget_is_raised, check_resume_releases_against_the_raised_limit,
         check_stop_during_hanging_tool, check_stop_seen_at_checkpoint_is_not_cancelled, check_hanging_tool_times_out,
         check_network_partition,
     ]

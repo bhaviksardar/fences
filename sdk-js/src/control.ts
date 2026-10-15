@@ -50,6 +50,8 @@ export interface Control {
   paused: boolean;
   pauseExpired: boolean;
   quarantined: boolean;
+  /** While waiting at a limit: "breach" or "budget". */
+  held: "breach" | "budget" | null;
   /** approval id -> the answer, or null while waiting */
   approvals: Map<string, Approval | null>;
   awaiting: number;
@@ -59,7 +61,7 @@ export interface Control {
 
 export const newControl = (): Control => ({
   stopped: false, stoppedAt: 0, stopSeen: false, cancelled: false, onCancel: null, paused: false, pauseExpired: false,
-  quarantined: false, approvals: new Map(), awaiting: 0, acked: new Set(),
+  quarantined: false, held: null, approvals: new Map(), awaiting: 0, acked: new Set(),
 });
 
 const live = new Map<string, Run>();  // run id -> runs in progress
@@ -115,7 +117,8 @@ const LIMITS = { budget_usd: "budgetUsd", max_iterations: "maxIterations", max_d
 
 /** Apply the commands addressed to this run (from a heartbeat or a checkpoint reply), and acknowledge them. Each is safe to apply twice. */
 export function apply(run: Run, commands: Reply[] | undefined): void {
-  for (const c of commands ?? []) {
+  // Limits first: a resume in the same reply may release a call held for budget, which re-checks against them at once
+  for (const c of [...(commands ?? [])].sort((a, b) => Number(a.type !== "limits") - Number(b.type !== "limits"))) {
     if (c.run_id !== undefined && c.run_id !== run.runId) continue;
     const ctl = run.control;
     if (c.type === "stop") {
@@ -257,7 +260,8 @@ async function beat(): Promise<void> {
   acks = [];
   try {
     const resp = await client.heartbeat(runs.map((r) => ({ run_id: r.runId, iterations: r.iterations, spent_usd: r.costUsd,
-      tokens_used: r.tokensUsed, paused: r.control.paused, stopped: r.control.stopped })), batch);
+      tokens_used: r.tokensUsed, paused: r.control.paused, stopped: r.control.stopped,
+      ...(r.control.held ? { held: r.control.held } : {}) })), batch);
     if (resp.network_error || (resp.ok === false && !resp.unsupported)) {
       if (resp.network_error || retryable(resp.status)) acks = [...batch, ...acks];  // at least once; any other 4xx won't get better
     } else if (resp.unsupported) {
@@ -272,6 +276,36 @@ async function beat(): Promise<void> {
     beating = false;
   }
   schedule(nextDelay());
+}
+
+// ── Waiting at a limit ────────────────────────────────────────────────────────
+
+/** Breaches a person can lift by raising a limit, so onBreach "hold" waits at them. */
+export const HOLDABLE = new Set(["budget_exceeded", "iteration_limit", "time_limit", "token_limit", "key_daily_budget",
+                                 "key_monthly_budget", "limit_reached"]);
+export const BUDGET_BREACHES = new Set(["budget_exceeded", "key_daily_budget", "key_monthly_budget"]);
+
+/** Whether this run waits at a limit: onBreach "hold", in cloud mode (someone can raise it), and not stopped. */
+export const holds = (run: Run) => run.onBreach === "hold" && client !== null && !run.control.stopped;
+
+/** Pause the run at a limit: "breach" (a checkpoint breached) or "budget" (a call refused for budget). */
+export function startHold(run: Run, kind: "breach" | "budget"): void {
+  run.control.held = kind;
+  if (!run.control.paused) {
+    run.control.paused = true;
+    schedule(0);
+  }
+}
+
+/** After waiting: "released" (an operator raised the limit), "stopped", or "timeout". */
+export function endHold(run: Run): "released" | "stopped" | "timeout" {
+  run.control.held = null;
+  if (run.control.stopped) return "stopped";
+  if (run.control.pauseExpired) {
+    run.control.pauseExpired = false;  // the run ends with the limit it was held at, not "paused"
+    return "timeout";
+  }
+  return "released";
 }
 
 // ── Pausing ───────────────────────────────────────────────────────────────────

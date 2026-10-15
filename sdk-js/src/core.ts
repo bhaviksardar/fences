@@ -99,6 +99,8 @@ export class Run {
   readonly control = control.newControl();
   /** Held by guarded tools that are running. */
   reservedUsd = 0;
+  /** "hold": wait at a limit for someone to raise it (see InitOptions.onBreach). */
+  onBreach: "hold" | null = null;
   private readonly abort = new AbortController();
   /**
    * Aborts when Fences halts the run after a stop it didn't reach a checkpoint for (see
@@ -159,11 +161,25 @@ export interface InitOptions {
   onStop?: control.Hook;
   /** The same, when the agent is quarantined (once per quarantine, however many runs it reaches). */
   onQuarantine?: control.Hook;
+  /**
+   * "hold" makes runs wait at a limit instead of ending: when the server says a limit is crossed,
+   * checkpoint() waits (as if paused) until someone raises it and resumes the run, then returns ok
+   * and the agent carries on. A guarded tool denied for budget waits the same way. A stop ends the
+   * wait, and after pauseTimeoutS the breach is returned as usual. Cloud only; override per agent in governed().
+   */
+  onBreach?: "hold" | null;
 }
 
 let client: FencesClient | null = null;
 let localOnly = false;
 let failClosed = false;
+let defaultOnBreach: "hold" | null = null;
+
+function checkOnBreach(value: unknown): "hold" | null {
+  if (value === undefined || value === null) return null;
+  if (value !== "hold") throw new TypeError(`onBreach must be "hold" or null, not ${JSON.stringify(value)}`);
+  return value;
+}
 
 /** Call once at startup, before any governed function runs. */
 export function init(options: InitOptions = {}): void {
@@ -171,6 +187,7 @@ export function init(options: InitOptions = {}): void {
   events.configure(options.environment, options.release, options.redact);
   localOnly = !!options.localOnly;
   failClosed = !!options.failClosed;
+  defaultOnBreach = checkOnBreach(options.onBreach);
   if (localOnly) {
     client = null;
   } else if (!options.apiKey) {
@@ -216,12 +233,14 @@ function warnUnreachable(run: Run, err: string): void {
  */
 export function governed<A extends unknown[], R>(
   fn: (...args: A) => R | Promise<R>,
-  options: Limits & { name?: string } = {},
+  options: Limits & { name?: string; onBreach?: "hold" | null } = {},
 ): (...args: A) => Promise<Awaited<R>> {
   const name = options.name ?? (fn.name || "agent");
+  checkOnBreach(options.onBreach);
   return async (...args: A): Promise<Awaited<R>> => {
     requireInit();
     const run = await startRun(name, options);
+    run.onBreach = checkOnBreach(options.onBreach) ?? defaultOnBreach;
     // A stop the agent doesn't reach a checkpoint for within stopGraceS halts the call here
     const halted = new Promise<never>((_, reject) => {
       run.control.onCancel = () => {
@@ -335,6 +354,17 @@ export async function checkpoint(response?: unknown, extra: Extra = {}): Promise
   const resp = client ? await client.checkpoint(run.runId, {
     cost_delta_usd: stepCost, tokens_used: stepTokens, iterations: run.iterations, duration_ms: run.durationMs }) : null;
   const result = decide(run, resp);
+  // onBreach "hold": wait here for someone to raise the limit. Only a breach the server decided: an unreachable one can't be raised
+  if (result.breachType && control.HOLDABLE.has(result.breachType) && control.holds(run) && resp && !resp.network_error) {
+    control.startHold(run, "breach");
+    await control.waitIfPaused(run);
+    const outcome = control.endHold(run);
+    if (outcome === "released") {  // an operator raised the limit and resumed the run
+      run.lastBreach = null;
+      return okResult(run.costUsd);
+    }
+    return outcome === "stopped" ? finalResult(run) : result;  // timed out: the limit it was held at
+  }
   if (run.control.paused && !result.breached) {  // paused from the dashboard: wait here until resumed
     await control.waitIfPaused(run);
     return finalResult(run);

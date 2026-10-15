@@ -19,7 +19,7 @@ async function waitFor(cond, ms = 5000) {
 const server = {};
 const reset = (budget = 1) => Object.assign(server, {
   budget, spent: 0, held: new Map(), guards: [], ends: [], beats: [], acks: [], approvals: [],
-  heartbeatCommands: [], checkpointCommands: [], guardRoute: true, needsApproval: false, down: false, loseAcks: false,
+  heartbeatCommands: [], checkpointCommands: [], guardRoute: true, needsApproval: false, down: false, loseAcks: false, breach: null,
 });
 let base, srv;
 before(async () => {
@@ -58,6 +58,7 @@ before(async () => {
       }
       if (req.url.endsWith("/checkpoint")) {
         const out = server.checkpointCommands; server.checkpointCommands = [];
+        if (server.breach) return reply(200, { ok: false, breach: server.breach, commands: out });
         return reply(200, { ok: true, commands: out });
       }
       if (req.url.endsWith("/end")) server.ends.push(body);
@@ -307,4 +308,93 @@ test("a script that ends right after a stop finishes its hook and acknowledges i
     (error, stdout, stderr) => ok({ error, stdout, stderr })));
   assert.deepEqual(r.stdout.trim().split("\n"), ["stopped_by_user", "revoked"], r.stderr);
   await waitFor(() => server.acks.some((a) => a.id === "s9" && a.hook === "ok"));
+});
+
+// ── waiting at a limit (onBreach: "hold") ─────────────────────────────────────
+
+const heldRun = (kind) => server.beats.flat().findLast((r) => r.held === kind && r.paused)?.run_id;
+
+test("a run held at a breach carries on once the limit is raised and it's resumed", async () => {
+  cloud({}, 10);
+  const agent = governed(async () => {
+    server.breach = "budget_exceeded";
+    const held = await checkpoint(null, { costDeltaUsd: 0.01 });  // waits here
+    return [held, await checkpoint(null, { costDeltaUsd: 0.01 })];
+  }, { budgetUsd: 1, onBreach: "hold" });
+  const operator = (async () => {
+    await waitFor(() => heldRun("breach"));
+    server.breach = null;  // "Raise limits & resume": back to running, then resumed
+    server.heartbeatCommands = [{ run_id: heldRun("breach"), type: "resume", id: "r1" }];
+  })();
+  const [held, after] = await agent();
+  await operator;
+  assert.ok(held.ok && after.ok, JSON.stringify([held, after]));
+  assert.equal(server.ends.at(-1).status, "success");
+});
+
+test("a hold ends on a stop, or after pauseTimeoutS with the limit it was held at", async () => {
+  cloud({ pauseTimeoutS: 0.3 }, 10);
+  const timedOut = governed(async () => {
+    server.breach = "iteration_limit";
+    const r = await checkpoint(null, { costDeltaUsd: 0.01 });
+    server.breach = null;  // raised later: fine again, and not stuck as "paused"
+    return [r, await checkpoint(null, { costDeltaUsd: 0.01 })];
+  }, { budgetUsd: 1, onBreach: "hold" });
+  const [r, later] = await timedOut();
+  assert.equal(r.breachType, "iteration_limit");
+  assert.ok(later.ok, JSON.stringify(later));
+
+  cloud({}, 10);
+  const stopped = governed(async () => {
+    server.breach = "budget_exceeded";
+    return checkpoint(null, { costDeltaUsd: 0.01 });
+  }, { budgetUsd: 1, onBreach: "hold" });
+  const operator = (async () => {
+    await waitFor(() => heldRun("breach"));
+    server.heartbeatCommands = [{ run_id: heldRun("breach"), type: "stop", id: "s1" }];
+  })();
+  assert.equal((await stopped()).breachType, "stopped_by_user");
+  await operator;
+});
+
+test("no hold where no one can raise the limit; onBreach is checked", async () => {
+  init({ localOnly: true, onBreach: "hold" });
+  const local = governed(() => checkpoint(null, { costDeltaUsd: 0.02 }), { budgetUsd: 0.01 });
+  assert.equal((await local()).breachType, "budget_exceeded", "local mode never holds");
+  cloud({ onBreach: "hold" });
+  server.down = true;
+  assert.equal((await local()).breachType, "budget_exceeded", "a breach found while the server is unreachable never holds");
+  assert.throws(() => governed(() => 1, { onBreach: "wait" }), /onBreach/);
+});
+
+test("a reply listing resume before limits raises the limit first", async () => {
+  cloud({ heartbeatS: 60 }, 10);
+  const { apply } = await import("../dist/control.js");
+  const seen = await governed(async () => {
+    const run = getActiveRun();
+    run.control.paused = true;
+    const order = [];
+    const desc = Object.getOwnPropertyDescriptor(run.control, "paused");
+    Object.defineProperty(run.control, "paused", { configurable: true, get: () => desc.value,
+      set: (v) => { if (!v) order.push(run.budgetUsd); desc.value = v; } });
+    apply(run, [{ type: "resume", id: "r9" }, { type: "limits", budget_usd: 5 }]);
+    return order;
+  }, { budgetUsd: 0.01 })();
+  assert.deepEqual(seen, [5], "the resume landed before the raised limit");
+});
+
+test("a guarded tool denied for budget waits for a raise, then runs, re-checked with the same guard id", async () => {
+  cloud({ onBreach: "hold" }, 0.3);
+  const ran = [];
+  const pay = tool(() => ran.push(1), { costUsd: 0.5, name: "pay" });
+  const operator = (async () => {
+    await waitFor(() => heldRun("budget"));
+    server.budget = 5;
+    server.heartbeatCommands = [{ run_id: heldRun("budget"), type: "resume", id: "r2" }];
+  })();
+  await governed(() => pay(), { budgetUsd: 10 })();
+  await operator;
+  const checks = server.guards.filter((g) => g.phase === "check");
+  assert.deepEqual(ran, [1]);
+  assert.ok(checks.length >= 2 && new Set(checks.map((g) => g.guard_id)).size === 1);
 });

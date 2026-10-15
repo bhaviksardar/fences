@@ -113,6 +113,22 @@ def _open(run, label: str, summary: str, amount: float, approve: bool) -> str:
         if denied:
             _block(run, label, *denied)
         return str(uuid.uuid4())
+    guard_id = str(uuid.uuid4())  # one per call: the server answers a re-check of a denied id afresh
+    while True:
+        try:
+            return _check_with_server(run, client, label, summary, amount, approval_id, guard_id)
+        except ToolBlocked as e:
+            if e.breach_type not in control.BUDGET_BREACHES or not control.holds(run):
+                raise
+            control.start_hold(run, "budget")  # on_breach="hold": wait for someone to raise the budget, then check again
+            control.wait_if_paused(run)
+            if control.end_hold(run) != "released":
+                if run.stopped:
+                    _block(run, label, "the run was stopped from the Fences dashboard", "stopped_by_user")
+                raise
+
+
+def _check_with_server(run, client, label: str, summary: str, amount: float, approval_id: Optional[str], guard_id: str) -> str:
     if run.stopped:
         _block(run, label, "the run was stopped from the Fences dashboard", "stopped_by_user")
     with _reserve_lock:  # the server can't see this process's in-flight model calls, so check against them here first
@@ -122,17 +138,16 @@ def _open(run, label: str, summary: str, amount: float, approve: bool) -> str:
     if not fits:
         _block(run, label, f"${amount:.2f} more could take the run past its ${run.budget_usd:.2f} budget", "budget_exceeded")
     try:
-        return _ask_server(run, client, label, summary, amount, approval_id)
+        return _ask_server(run, client, label, summary, amount, approval_id, guard_id)
     except BaseException:
         with _reserve_lock:
             run.reserved_usd -= amount
         raise
 
 
-def _ask_server(run, client, label: str, summary: str, amount: float, approval_id: Optional[str]) -> str:
+def _ask_server(run, client, label: str, summary: str, amount: float, approval_id: Optional[str], guard_id: str) -> str:
     sent = events.redact({"type": "guard", "tool": label, "arguments": summary}) or {}  # the check goes ahead without them
     for _ in range(2):  # once more after an approval the server asked for
-        guard_id = str(uuid.uuid4())
         resp = client.guard(run.run_id, {"guard_id": guard_id, "phase": "check", "tool": label, "arguments": sent.get("arguments"),
                                          "amount_usd": amount, "approval_id": approval_id})
         control.apply(run, resp.get("commands"))

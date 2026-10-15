@@ -37,7 +37,7 @@ async function open(run: Run, name: string, summary: string, amount: number, nee
   if (run.control.quarantined) block(run, name, "the agent is quarantined in Fences");  // now, not when the quarantine's pause ends
   if (run.control.paused) await control.waitIfPaused(run);
   if (run.control.pauseExpired) block(run, name, "the run was paused from the Fences dashboard and not resumed in time", "paused");
-  let approvalId = needsApproval ? await approve(run, name, summary, amount) : null;
+  const approvalId = needsApproval ? await approve(run, name, summary, amount) : null;
   if (run.control.stopped) block(run, name, "the run was stopped from the Fences dashboard", "stopped_by_user");
   const client = _client();
   if (!client) {  // local mode: the same rules, applied here
@@ -47,6 +47,24 @@ async function open(run: Run, name: string, summary: string, amount: number, nee
     run.reservedUsd += amount;
     return randomUUID();
   }
+  const call = { guardId: randomUUID(), approvalId };  // one id per call: the server answers a re-check of a denied id afresh
+  for (;;) {
+    try {
+      return await check(run, client, name, summary, amount, call);
+    } catch (e) {
+      if (!(e instanceof ToolBlocked && control.BUDGET_BREACHES.has(e.breachType ?? "") && control.holds(run))) throw e;
+      control.startHold(run, "budget");  // onBreach "hold": wait for someone to raise the budget, then check again
+      await control.waitIfPaused(run);
+      const outcome = control.endHold(run);
+      if (outcome === "stopped") block(run, name, "the run was stopped from the Fences dashboard", "stopped_by_user");
+      if (outcome !== "released") throw e;
+    }
+  }
+}
+
+async function check(run: Run, client: NonNullable<ReturnType<typeof _client>>, name: string, summary: string, amount: number,
+                     call: { guardId: string; approvalId: string | null }): Promise<string> {
+  if (run.control.stopped) block(run, name, "the run was stopped from the Fences dashboard", "stopped_by_user");
   // Check against what this process already holds before asking the server, which can't see it; reserve until it answers
   if (!fits(run, amount)) block(run, name, `$${amount.toFixed(2)} more could take the run past its $${run.budgetUsd!.toFixed(2)} budget`, "budget_exceeded");
   run.reservedUsd += amount;
@@ -54,13 +72,12 @@ async function open(run: Run, name: string, summary: string, amount: number, nee
     const sent: Record<string, unknown> = events.redact({ type: "guard", tool: name, arguments: summary }) ?? {};  // the check goes ahead without them
     let resp: Record<string, any> = {};  // eslint-disable-line @typescript-eslint/no-explicit-any
     for (let attempt = 0; attempt < 2; attempt++) {  // once more after an approval the server asked for
-      const guardId = randomUUID();
-      resp = await client.guard(run.runId, { guard_id: guardId, phase: "check", tool: name, arguments: sent.arguments ?? null,
-                                             amount_usd: amount, approval_id: approvalId });
+      resp = await client.guard(run.runId, { guard_id: call.guardId, phase: "check", tool: name, arguments: sent.arguments ?? null,
+                                             amount_usd: amount, approval_id: call.approvalId });
       control.apply(run, resp.commands);
-      if (resp.allow === true) return guardId;
-      if (!(resp.needs_approval && approvalId === null)) break;
-      approvalId = await approve(run, name, summary, amount);
+      if (resp.allow === true) return call.guardId;
+      if (!(resp.needs_approval && call.approvalId === null)) break;
+      call.approvalId = await approve(run, name, summary, amount);
     }
     if (resp.unsupported) {
       control.unsupported("guard", "guarded tools", "they are blocked");

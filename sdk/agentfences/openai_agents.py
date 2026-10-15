@@ -46,7 +46,7 @@ class FencesRunHooks(RunHooks):
         params = {"max_tokens": getattr(settings, "max_tokens", None)}
         # Before the request goes out: refuse it (FencesStop) if it might not fit the budget.
         # ponytail: a call that fails holds its amount until the run ends; RunHooks has no model-error hook
-        self._holds[("llm", id(agent))] = precheck.hold(_model_name(agent), [system_prompt, input_items], params)
+        self._holds[("llm", id(agent))] = await precheck.hold_async(_model_name(agent), [system_prompt, input_items], params)
         self._started[("llm", id(agent))] = time.perf_counter()
 
     async def on_llm_end(self, context, agent, response) -> None:

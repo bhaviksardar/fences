@@ -190,6 +190,8 @@ class RunState:
     reserved_usd: float = 0.0           # held by guarded tools and model calls in flight
     holds: list = field(default_factory=list)  # model calls' worst-case costs: [amount, finished]
     quarantined: bool = False           # the agent was quarantined from the dashboard while this ran
+    on_breach: Optional[str] = None     # "hold": wait at a limit for someone to raise it
+    held: Optional[str] = None          # while waiting at a limit: "breach" or "budget"
     acked: set = field(default_factory=set)  # command ids already acknowledged
 
     @property
@@ -219,6 +221,13 @@ def _reset_active_run(token):
 _client: Optional[GovClient] = None
 _local_only: bool = False
 _fail_closed: bool = False
+_on_breach: Optional[str] = None
+
+
+def _check_on_breach(value: Optional[str]) -> Optional[str]:
+    if value not in (None, "hold"):
+        raise ValueError(f'on_breach must be None or "hold", not {value!r}')
+    return value
 
 
 def init(
@@ -236,6 +245,7 @@ def init(
     stop_grace_s: Optional[float] = 30.0,
     on_stop: Optional[Callable[[dict], None]] = None,
     on_quarantine: Optional[Callable[[dict], None]] = None,
+    on_breach: Optional[str] = None,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -273,8 +283,15 @@ def init(
     revoke a credential the agent holds). They get {"type", "run_id", "agent_name", "id",
     "by", "reason"}. on_stop runs once per run, on_quarantine once per quarantine; whether
     each worked, failed or timed out (30 s) is reported to Fences.
+
+    on_breach="hold" makes runs wait at a limit instead of ending: when the server says a
+    limit is crossed, checkpoint() waits (as if paused) until someone raises it and resumes
+    the run, then returns ok and the agent carries on. A model call or guarded tool refused
+    for budget waits the same way. A stop ends the wait, and after pause_timeout_s the
+    breach is returned as usual. Cloud mode only. Override per agent in @governed.
     """
-    global _client, _local_only, _fail_closed
+    global _client, _local_only, _fail_closed, _on_breach
+    _on_breach = _check_on_breach(on_breach)
     set_custom_prices(prices)
     events.configure(environment, release, redact)
     if instrument:
@@ -322,6 +339,7 @@ def governed(
     max_iterations: Optional[int] = None,
     max_duration_ms: Optional[int] = None,
     max_tokens: Optional[int] = None,
+    on_breach: Optional[str] = None,
 ):
     """
     Decorator that applies governance policy to an agent function.
@@ -332,6 +350,7 @@ def governed(
         max_iterations: Maximum number of checkpoint() calls allowed.
         max_duration_ms: Maximum wall-clock duration in milliseconds.
         max_tokens: Maximum total tokens (input + output) allowed. 0 = no limit.
+        on_breach: "hold" to wait at a limit for someone to raise it (see init); defaults to init's.
 
     Every limit is optional. In cloud mode a limit left out here comes from the agent's
     page in the Fences dashboard. Limits set nowhere default to 100 steps, 5 minutes and
@@ -353,8 +372,10 @@ def governed(
                 return final
             return response
     """
+    _check_on_breach(on_breach)
+
     def decorator(func: Callable) -> Callable:
-        start = functools.partial(_start_run, func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens)
+        start = functools.partial(_start_run, func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens, on_breach)
 
         if inspect.isasyncgenfunction(func):
             @functools.wraps(func)
@@ -441,7 +462,7 @@ def _notice(agent_name: str, code: str, message: str):
         log.warning("agentfences: %s", message)
 
 
-def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens) -> RunState:
+def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens, on_breach=None) -> RunState:
     run_id = str(uuid.uuid4())
     in_code = {"max_iterations": max_iterations, "max_duration_ms": max_duration_ms, "max_tokens": max_tokens}
     run = RunState(
@@ -450,6 +471,7 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
         budget_usd=budget_usd,
         **{k: DEFAULT_LIMITS[k] if v is None else v for k, v in in_code.items()},
         context=events.current_context(),
+        on_breach=on_breach or _on_breach,
     )
     client = _client
     if not client and budget_usd is None:
@@ -559,6 +581,20 @@ def _breach(run: RunState) -> CheckpointResult:
     return result
 
 
+def _holds_at(run: RunState, resp: Optional[dict], result: CheckpointResult) -> bool:
+    """Wait at this breach? Only one the server decided: an unreachable server can't have its limit raised."""
+    return (result.breach_type in control.HOLDABLE and control.holds(run)
+            and resp is not None and "network_error" not in resp)
+
+
+def _after_hold(run: RunState, breach: CheckpointResult) -> CheckpointResult:
+    outcome = control.end_hold(run)
+    if outcome == "released":  # an operator raised the limit and resumed the run
+        run.last_breach = None
+        return CheckpointResult(spent_usd=run.cost_usd)
+    return _result(run) if outcome == "stopped" else breach  # timed out: the limit it was held at
+
+
 def _record_step(cost_delta_usd: float, tokens_used: int) -> Optional[RunState]:
     run = get_active_run()
     if run is not None:
@@ -617,6 +653,10 @@ async def checkpoint(response=None, cost_delta_usd: float = 0.0, tokens_used: in
     run = _record_step(cost, tokens)
     resp = await asyncio.to_thread(_server_check, run, cost, tokens) if _client else None
     result = _decide(run, resp)
+    if _holds_at(run, resp, result):  # on_breach="hold": wait here for someone to raise the limit
+        control.start_hold(run, "breach")
+        await control.wait_if_paused_async(run)
+        return _after_hold(run, result)
     if run.paused and not result.breached:  # paused from the dashboard: wait here until resumed
         await control.wait_if_paused_async(run)
         result = _result(run)
@@ -629,7 +669,12 @@ def checkpoint_sync(response=None, cost_delta_usd: float = 0.0, tokens_used: int
         return CheckpointResult()
     cost, tokens = _measure(response, cost_delta_usd, tokens_used)
     run = _record_step(cost, tokens)
-    result = _decide(run, _server_check(run, cost, tokens) if _client else None)
+    resp = _server_check(run, cost, tokens) if _client else None
+    result = _decide(run, resp)
+    if _holds_at(run, resp, result):
+        control.start_hold(run, "breach")
+        control.wait_if_paused(run)
+        return _after_hold(run, result)
     if run.paused and not result.breached:
         control.wait_if_paused(run)
         result = _result(run)

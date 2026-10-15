@@ -10,6 +10,7 @@ import logging
 import re
 from typing import Optional
 
+from . import control
 from .core import get_active_run, reserve_lock, _make_breach_result
 from .exceptions import FencesStop
 from .pricing import price_of, cost_of, read_usage
@@ -59,28 +60,70 @@ def _refuse(run, worst: float, out_cap: Optional[int]):
     raise FencesStop(result)
 
 
-def hold(model: Optional[str], request, params: Optional[dict] = None) -> Optional[list]:
-    """
-    Before a model call: raise FencesStop if its worst case doesn't fit in what's left of the
-    run's budget, else hold that amount. Returns the hold to pass to finish(), or None when
-    there's nothing to check (no run, no budget, or a model with no known price).
-    """
+def _prepare(model: Optional[str], request, params: Optional[dict]):
+    """(run, worst case, output cap) for a call to check, or None when there's nothing to check."""
     run = get_active_run()
     if run is None or run.budget_usd is None:
         return None
     params = params or {}
     out_cap = max_out(params)
     worst = worst_case_usd(model, request, out_cap, params.get("n") or 1)
-    if worst is None:
-        return None
+    return None if worst is None else (run, worst, out_cap)
+
+
+def _take(run, worst: float) -> Optional[list]:
+    """Hold worst if it fits in what's left of the budget; None if it doesn't."""
     with reserve_lock:
-        fits = round(run.cost_usd + run.reserved_usd + worst, 9) <= run.budget_usd
-        if fits:
-            h = [worst, False]
-            run.holds.append(h)
-            run.reserved_usd += worst
-    if not fits:
-        _refuse(run, worst, out_cap)
+        if round(run.cost_usd + run.reserved_usd + worst, 9) > run.budget_usd:
+            return None
+        h = [worst, False]
+        run.holds.append(h)
+        run.reserved_usd += worst
+        return h
+
+
+def _gave_up(run, worst: float, out_cap: Optional[int]):
+    """A call that doesn't fit, and won't wait (or waited and wasn't released): FencesStop."""
+    if run.stopped:
+        from .core import _result
+        raise FencesStop(_result(run))
+    _refuse(run, worst, out_cap)
+
+
+def hold(model: Optional[str], request, params: Optional[dict] = None) -> Optional[list]:
+    """
+    Before a model call: raise FencesStop if its worst case doesn't fit in what's left of the
+    run's budget, else hold that amount. Returns the hold to pass to finish(), or None when
+    there's nothing to check (no run, no budget, or a model with no known price). With
+    on_breach="hold" a call that doesn't fit waits for someone to raise the budget first.
+    """
+    prepared = _prepare(model, request, params)
+    if prepared is None:
+        return None
+    run, worst, out_cap = prepared
+    while (h := _take(run, worst)) is None:
+        if not control.holds(run):
+            _gave_up(run, worst, out_cap)
+        control.start_hold(run, "budget")
+        control.wait_if_paused(run)
+        if control.end_hold(run) != "released":
+            _gave_up(run, worst, out_cap)
+    return h
+
+
+async def hold_async(model: Optional[str], request, params: Optional[dict] = None) -> Optional[list]:
+    """hold() for async callers: waiting for a raised budget doesn't block the event loop."""
+    prepared = _prepare(model, request, params)
+    if prepared is None:
+        return None
+    run, worst, out_cap = prepared
+    while (h := _take(run, worst)) is None:
+        if not control.holds(run):
+            _gave_up(run, worst, out_cap)
+        control.start_hold(run, "budget")
+        await control.wait_if_paused_async(run)
+        if control.end_hold(run) != "released":
+            _gave_up(run, worst, out_cap)
     return h
 
 

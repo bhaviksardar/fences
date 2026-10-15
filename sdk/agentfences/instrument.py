@@ -37,7 +37,7 @@ def _wrap(create, provider: str, is_async: bool):
         async def wrapper(self, *args, **kwargs):
             if get_active_run() is None:
                 return await create(self, *args, **kwargs)
-            h = precheck.hold(kwargs.get("model"), kwargs, kwargs)
+            h = await precheck.hold_async(kwargs.get("model"), kwargs, kwargs)
             started = time.perf_counter()
             try:
                 response = await create(self, *args, **kwargs)

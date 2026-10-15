@@ -61,6 +61,19 @@ Levels 1 and 2 are cooperative: they work through the agent's own loop. Level 3 
 - **A guarded tool called outside a governed run just runs:** there's no run to check it against.
 - **`cost_usd` is your estimate.** Fences reserves and charges what you declare, not what the payment provider bills.
 
+## Waiting at a limit
+
+With `on_breach="hold"` (opt-in), a crossed limit pauses the run instead of ending it.
+
+**Guaranteed**
+- **A held run doesn't continue until a person acts.** It waits until someone raises the limit and resumes it (`resume`), it's stopped, or `pause_timeout_s` passes. A server never auto-resumes a held run **(server)**. Checks: `check_hold_at_a_breach_until_raised`, `check_hold_a_call_until_the_budget_is_raised`, and their TypeScript twins.
+- **A held call is checked again before it runs.** A model call or guarded tool refused for budget re-checks with the raised limit and waits again if it still doesn't fit. Nothing is spent while held.
+- **A stop or a timeout still ends it.** A stop gives `stopped_by_user`; a timeout gives the breach it was held at, so the agent wraps up as it would have. Check: `check_hold_ends_on_stop_or_timeout`.
+- **It only holds when someone can raise the limit.** Never in local mode, and never at a breach found while the server was unreachable. Check: `check_hold_only_when_someone_can_raise_it`.
+
+**Not guaranteed**
+- **A held agent holds its resources:** a thread for a synchronous agent, and the caller's request for anything a person is waiting on. Use it for background agents.
+
 ## Server requirements
 
 Levels 1 and 2 work against any Fences server that implements [PROTOCOL.md](PROTOCOL.md). Level 3 needs the `/guard` endpoint. Against a server without it, guarded tools are blocked (they fail closed), with one warning.

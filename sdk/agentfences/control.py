@@ -80,7 +80,8 @@ LIMIT_FIELDS = ("budget_usd", "max_iterations", "max_duration_ms", "max_tokens")
 
 def apply(run, commands):
     """Apply the commands addressed to this run (from a heartbeat or a checkpoint response), and acknowledge them."""
-    for c in commands or ():
+    # Limits first: a resume in the same reply may release a call held for budget, which re-checks against them at once
+    for c in sorted(commands or (), key=lambda c: c.get("type") != "limits"):
         if c.get("run_id") not in (None, run.run_id):
             continue
         kind = c.get("type")
@@ -242,7 +243,8 @@ def _heartbeat():
             continue
         try:
             resp = _client.heartbeat([{"run_id": r.run_id, "iterations": r.iterations, "spent_usd": r.cost_usd,
-                                       "tokens_used": r.tokens_used, "paused": r.paused, "stopped": r.stopped} for r in runs],
+                                       "tokens_used": r.tokens_used, "paused": r.paused, "stopped": r.stopped,
+                                       **({"held": r.held} if r.held else {})} for r in runs],
                                      acks)
         except Exception:
             resp = {"network_error": "heartbeat failed"}
@@ -255,6 +257,39 @@ def _heartbeat():
             unsupported("heartbeat", "the heartbeat", "a stop from the dashboard applies at the next checkpoint and pause isn't available")
             return  # stops then arrive only in checkpoint replies, which the agent sees
         dispatch(resp.get("commands"))
+
+
+# ── Waiting at a limit ────────────────────────────────────────────────────────
+
+# Breaches a person can lift by raising a limit, so on_breach="hold" waits at them
+HOLDABLE = {"budget_exceeded", "iteration_limit", "time_limit", "token_limit", "key_daily_budget", "key_monthly_budget",
+            "limit_reached"}
+BUDGET_BREACHES = {"budget_exceeded", "key_daily_budget", "key_monthly_budget"}
+
+
+def holds(run) -> bool:
+    """Whether this run waits at a limit: on_breach="hold", in cloud mode (someone can raise it), and not stopped."""
+    return run.on_breach == "hold" and _client is not None and not run.stopped
+
+
+def start_hold(run, kind: str):
+    """Pause the run at a limit: kind "breach" (a checkpoint breached) or "budget" (a call refused for budget)."""
+    run.held = kind
+    if not run.paused:
+        run.paused = True
+        run.resumed.clear()
+        _wake.set()
+
+
+def end_hold(run) -> str:
+    """After waiting: "released" (an operator raised the limit), "stopped", or "timeout"."""
+    run.held = None
+    if run.stopped:
+        return "stopped"
+    if run.pause_expired:
+        run.pause_expired = False  # the run ends with the limit it was held at, not "paused"
+        return "timeout"
+    return "released"
 
 
 # ── Pausing ───────────────────────────────────────────────────────────────────
