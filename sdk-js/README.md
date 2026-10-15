@@ -78,6 +78,8 @@ if (!approval.granted) return `I didn't issue the refund: ${approval.note}`;
 
 An approved amount raises the run's budget. It never hangs or throws: in local mode, outside a run, or on a server without approvals it's denied right away, and with no answer it's denied after `timeoutS`. The heartbeat's timer never keeps your process alive on its own.
 
+**Waiting at a limit** (from 0.6.0): with `init({ onBreach: "hold" })` (or `governed(fn, { onBreach: "hold" })`), a limit the server says is crossed makes `checkpoint()` wait instead of returning the breach, so whoever is on call can raise it from the dashboard and the agent carries on. A guarded tool denied for budget waits the same way. A stop ends the wait; after `pauseTimeoutS` the agent gets the breach it was held at. Cloud only. Don't hold an agent a person is waiting on.
+
 **Containment hooks** (from 0.5.0) run in your process when a stop or quarantine arrives, to contain what Fences can't reach, such as a credential the agent holds:
 
 ```ts

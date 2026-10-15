@@ -40,6 +40,7 @@ This README covers the Python SDK (`pip install agentfences`). There's also a Ty
 | Guarded tools, tool timeouts, halting a stuck run after a stop | ✅ 0.4.0 | 0.5.0, not on npm yet |
 | Budget prechecks before model calls (needs `instrument=True` or a framework integration) | ✅ 0.4.0 | not yet |
 | Containment hooks (`on_stop`, `on_quarantine`), acknowledging every dashboard command | ✅ 0.5.0 | 0.5.0, not on npm yet |
+| Waiting at a limit for someone to raise it (`on_breach="hold"`) | 0.6.0, not released yet | 0.6.0, not on npm yet |
 
 What each part guarantees, and what it can't, is in [ENFORCEMENT.md](ENFORCEMENT.md).
 
@@ -193,6 +194,14 @@ if not approval.granted:
 ```
 
 The answer has `granted`, `by`, `note` and `amount_usd`; an approved amount raises the run's budget by that much. `request_approval_sync()` does the same for synchronous agents. It never hangs and never raises: in local mode, outside a run, or when the server can't take requests it returns denied right away, and with no answer it returns denied after `timeout_s`.
+
+**Waiting at a limit** (from 0.6.0). By default a crossed limit ends the run: the agent gets the breach and wraps up. With `on_breach="hold"`, it waits instead, so whoever is on call can raise the limit and the agent carries on where it was:
+
+```python
+agentfences.init(api_key="fc_...", on_breach="hold")   # or per agent: @governed(on_breach="hold")
+```
+
+When the server says a limit is crossed, `checkpoint()` waits, as if paused, and the dashboard shows the run held at its limit. "Raise limits & resume" there returns `ok` from that checkpoint. A model call refused by the budget precheck, or a guarded tool denied for budget, waits the same way and is checked again once the budget is raised. A stop ends the wait (`stopped_by_user`). With no one acting, after `pause_timeout_s` (default one hour), the agent gets the breach it was held at. It's cloud mode only, since locally there's no one to raise the limit. Don't hold an agent that has a person waiting on it, such as a chat request.
 
 **Containment hooks** run in your agent's process when a stop or quarantine arrives, to contain what Fences can't reach, such as a credential the agent holds:
 

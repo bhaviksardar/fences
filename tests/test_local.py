@@ -762,7 +762,6 @@ assert agent() == "stopped_by_user"
 
 def check_acks_survive_a_rate_limited_heartbeat():
     """A heartbeat over the server's heartbeat budget gets 429; its acks go again with the next one."""
-    import time
     sent = cloud(heartbeat_s=0.1)
     real = sent.heartbeat
     limited = []
