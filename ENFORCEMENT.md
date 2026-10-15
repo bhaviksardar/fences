@@ -1,6 +1,6 @@
 # Enforcement guarantees
 
-What Fences guarantees about an agent's limits, at each of its three levels, and what it can't. Each guarantee names the check that proves it, or is marked **(server)** when it rests on the Fences server implementing [PROTOCOL.md](PROTOCOL.md). These live in [`tests/test_enforcement.py`](tests/test_enforcement.py) unless marked otherwise, and run in CI on Python 3.9 to 3.14. This covers the Python SDK 0.5.0. The TypeScript SDK has level 1 and level 2 except tool timeouts and cancelling (see the [support table](README.md#python-and-typescript)).
+What Fences guarantees about an agent's limits, at each of its three levels, and what it can't. Each guarantee names the check that proves it, or is marked **(server)** when it rests on the Fences server implementing [PROTOCOL.md](PROTOCOL.md). These live in [`tests/test_enforcement.py`](tests/test_enforcement.py) unless marked otherwise, and run in CI on Python 3.9 to 3.14. This covers the Python SDK 0.5.0. The TypeScript SDK 0.5.0 has the same levels 2 and 3, tested in `sdk-js/test/enforcement.test.mjs`, with two differences. It doesn't precheck model calls (level 1), as it has no model-call instrumentation. And JavaScript can't stop running code, so a stuck run's governed call rejects with `FencesStop` and the run's `signal` aborts, but the agent's work only stops if it uses that signal (see the [support table](README.md#python-and-typescript)).
 
 ## The three levels
 

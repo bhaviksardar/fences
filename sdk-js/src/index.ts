@@ -3,9 +3,10 @@ export type { CheckpointResult, InitOptions, Limits, Extra, Span } from "./core.
 export { context } from "./events.js";
 export type { RedactHook, Event } from "./events.js";
 export { tool } from "./tools.js";
+export type { GuardedToolOptions } from "./tools.js";
 export { requestApproval } from "./control.js";
-export type { Approval } from "./control.js";
+export type { Approval, ControlEvent, Hook } from "./control.js";
 export { priceOf } from "./pricing.js";
 export type { CustomPrice } from "./pricing.js";
-export { FencesError, FencesAuthError, AgentQuarantined, FencesStop } from "./errors.js";
+export { FencesError, FencesAuthError, AgentQuarantined, FencesStop, ToolBlocked } from "./errors.js";
 export { VERSION } from "./version.js";

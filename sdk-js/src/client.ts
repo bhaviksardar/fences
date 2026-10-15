@@ -18,8 +18,12 @@ export class FencesClient {
   logDecision(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/decisions`, body); }
   endRun(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/end`, body); }
   logSpans(runId: string, spans: unknown[]): Promise<Reply> { return this.post(`/api/runs/${runId}/spans`, { spans }, true); }
-  /** Report live runs; the reply may carry commands for them. */
-  heartbeat(runs: unknown[]): Promise<Reply> { return this.post("/api/heartbeat", { runs }, true); }
+  /** Report live runs and acknowledge commands; the reply may carry commands for them. */
+  heartbeat(runs: unknown[], acks: unknown[] = []): Promise<Reply> {
+    return this.post("/api/heartbeat", acks.length ? { runs, acks } : { runs }, true);
+  }
+  /** Check a guarded tool call before it runs ({ phase: "check" }), or settle it after ({ phase: "settle" }). */
+  guard(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/guard`, body, true); }
   requestApproval(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/approvals`, body, true); }
 
   /**

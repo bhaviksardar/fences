@@ -61,11 +61,11 @@ The server is authoritative for limits and sees spend across processes. If it ca
 
 ## Live control (from 0.4.0)
 
-From version 0.4.0: in cloud mode a heartbeat (every 15 seconds, `init({ heartbeatS })`) lets whoever is on call act on a running agent from the dashboard:
+In cloud mode a heartbeat (every 15 seconds, `init({ heartbeatS })`) lets whoever is on call act on a running agent from the dashboard:
 
-- **Stop:** the next `checkpoint()` returns `breachType: "stopped_by_user"`, so the agent wraps up gracefully.
+- **Stop:** the next `checkpoint()` returns `breachType: "stopped_by_user"`, so the agent wraps up gracefully. If the run doesn't reach a checkpoint within `stopGraceS` (default 30) seconds, say it's stuck in a tool, the governed call rejects with `FencesStop` and the run's `signal` aborts (from 0.5.0). JavaScript can't stop running code, so pass `getActiveRun()?.signal` to `fetch` and other cancellable work for a stuck run to really stop. `init({ stopGraceS: null })` turns this off.
 - **Pause and resume:** a paused run waits inside its next `checkpoint()` until it's resumed; after `pauseTimeoutS` (default one hour) it returns `breachType: "paused"`.
-- **Limits** changed in the dashboard apply to the run immediately. **Quarantine** makes the governed call throw `AgentQuarantined` before any agent code runs.
+- **Limits** changed in the dashboard apply to the run immediately. **Quarantine** makes the governed call throw `AgentQuarantined` before any agent code runs; runs already going hold at their next checkpoint, and their guarded tools are blocked.
 
 An agent can ask a person before doing something risky:
 
@@ -78,6 +78,33 @@ if (!approval.granted) return `I didn't issue the refund: ${approval.note}`;
 
 An approved amount raises the run's budget. It never hangs or throws: in local mode, outside a run, or on a server without approvals it's denied right away, and with no answer it's denied after `timeoutS`. The heartbeat's timer never keeps your process alive on its own.
 
+**Containment hooks** (from 0.5.0) run in your process when a stop or quarantine arrives, to contain what Fences can't reach, such as a credential the agent holds:
+
+```ts
+init({ apiKey: "fc_...", onQuarantine: async (event) => vault.revoke(`agent/${event.agentName}`), onStop: (event) => { ... } });
+```
+
+`onStop` runs once per run, and `onQuarantine` once per quarantine however many runs it reaches. Each gets `{ type, runId, agentName, id, by, reason }`. Fences records whether it worked, threw (and why) or ran past 30 seconds. A process that's about to exit waits for its hooks first; in serverless handlers, `await flush()` does the same. The SDK also acknowledges every dashboard command it receives, so the dashboard can tell "the agent has it" from "the agent hasn't acknowledged".
+
+## Guarded tools (from 0.5.0)
+
+For actions with consequences (refunds, payments, writes to production), guard the tool, and it asks Fences **before** it runs:
+
+```ts
+import { tool, ToolBlocked } from "agentfences";
+
+const issueRefund = tool(refund, { costUsd: (orderId: string, amount: number) => amount, approve: true });
+const deploy = tool(deployImpl, { guard: true, timeoutS: 30 });
+```
+
+- The tool runs only if its run isn't stopped, paused, over a limit or quarantined. Otherwise it throws `ToolBlocked` (with `reason` and `breachType`) and its code never runs.
+- `costUsd` (a number, or a function of the tool's arguments) is **reserved** before the call and charged after, so parallel calls can't overspend the budget together. A call that throws is released uncharged; one that times out is charged, because it may have happened.
+- `approve: true` asks a person on the dashboard before each call. The dashboard can also require approval for a tool, and the SDK then asks for it.
+- **Guards fail closed:** if Fences can't be reached, or doesn't support guarded tools, the tool is blocked. In local mode the same rules apply in-process, and `approve` is always denied.
+- `timeoutS` works on any tool: past it, the call rejects with a `TimeoutError`. The tool's own code carries on unless it uses `getActiveRun()?.signal`.
+
+A guarded or timed tool always returns a promise. What each part guarantees: [ENFORCEMENT.md](../ENFORCEMENT.md).
+
 ## Not yet in the TypeScript SDK
 
-The Python SDK also records OpenAI/Anthropic calls automatically (`instrument`) and integrates with LangGraph and the OpenAI Agents SDK. Everything here follows the same server protocol ([PROTOCOL.md](../PROTOCOL.md)).
+The Python SDK also records OpenAI/Anthropic calls automatically (`instrument`) and integrates with LangGraph and the OpenAI Agents SDK. Those are also how it checks a model call against the budget **before** it's sent, so the TypeScript SDK doesn't do that yet: a model call is checked afterwards, by `checkpoint()`, and a run can go over its budget by one call. Everything here follows the same server protocol ([PROTOCOL.md](../PROTOCOL.md)).
