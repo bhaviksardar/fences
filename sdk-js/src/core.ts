@@ -97,6 +97,17 @@ export class Run {
   warned = false;
   /** Live control from the dashboard (see control.ts). */
   readonly control = control.newControl();
+  /** Held by guarded tools that are running. */
+  reservedUsd = 0;
+  private readonly abort = new AbortController();
+  /**
+   * Aborts when Fences halts the run after a stop it didn't reach a checkpoint for (see
+   * stopGraceS). Pass it to fetch and other cancellable work so a stuck run really stops:
+   *     await fetch(url, { signal: getActiveRun()?.signal });
+   */
+  get signal(): AbortSignal { return this.abort.signal; }
+  /** @internal */
+  _abort(reason: unknown): void { this.abort.abort(reason); }
 
   constructor(readonly agentName: string, public budgetUsd: number | null, public maxIterations: number,
               public maxDurationMs: number, public maxTokens: number, readonly context: Record<string, string>) {}
@@ -134,6 +145,20 @@ export interface InitOptions {
   heartbeatS?: number;
   /** How long a paused run waits at its checkpoint before stopping with breach "paused". Default 3600. */
   pauseTimeoutS?: number;
+  /**
+   * If a run doesn't reach a checkpoint within this many seconds of a dashboard stop (say, it's
+   * stuck in a tool), the governed call rejects with FencesStop and the run's signal aborts.
+   * Default 30; null never does.
+   */
+  stopGraceS?: number | null;
+  /**
+   * Run in the agent's process when a stop arrives from the dashboard (once per run), to
+   * contain what Fences can't reach, e.g. revoke a credential the agent holds. Whether it
+   * worked, threw or ran past 30 seconds is reported to Fences.
+   */
+  onStop?: control.Hook;
+  /** The same, when the agent is quarantined (once per quarantine, however many runs it reaches). */
+  onQuarantine?: control.Hook;
 }
 
 let client: FencesClient | null = null;
@@ -153,11 +178,18 @@ export function init(options: InitOptions = {}): void {
   } else {
     client = new FencesClient(options.apiKey, options.endpoint ?? "http://localhost:8000");
   }
-  control.configure(client, options.heartbeatS ?? 15, options.pauseTimeoutS ?? 3600);
+  control.configure(client, { heartbeatS: options.heartbeatS ?? 15, pauseTimeoutS: options.pauseTimeoutS ?? 3600,
+    stopGraceS: options.stopGraceS === undefined ? 30 : options.stopGraceS, onStop: options.onStop, onQuarantine: options.onQuarantine });
 }
 
 /** @internal For tests: point the SDK at a fake server client. */
-export function _setClient(c: FencesClient | null): void { client = c; control.configure(c, 15, 3600); }
+export function _setClient(c: FencesClient | null): void {
+  client = c;
+  control.configure(c, { heartbeatS: 15, pauseTimeoutS: 3600, stopGraceS: 30 });
+}
+
+/** @internal */
+export const _client = (): FencesClient | null => client;
 
 function requireInit(): void {
   if (!localOnly && !client) {
@@ -190,14 +222,24 @@ export function governed<A extends unknown[], R>(
   return async (...args: A): Promise<Awaited<R>> => {
     requireInit();
     const run = await startRun(name, options);
+    // A stop the agent doesn't reach a checkpoint for within stopGraceS halts the call here
+    const halted = new Promise<never>((_, reject) => {
+      run.control.onCancel = () => {
+        const stop = new FencesStop(finalResult(run));
+        run._abort(stop);
+        reject(stop);
+      };
+    });
     control.register(run);
     let error: unknown, failed = false;
     try {
-      return await (store.run(run, () => fn(...args)) as Promise<Awaited<R>>);
+      // ponytail: JS can't stop running code; the agent's own work goes on unless it uses run.signal
+      return await Promise.race([store.run(run, () => fn(...args)) as Promise<Awaited<R>>, halted]);
     } catch (e) {
       [error, failed] = [e, true];
       throw e;
     } finally {
+      run.control.onCancel = null;  // first, so a late cancel can't land after the call is over
       await endRun(run, ...outcome(run, failed, error));
     }
   };
@@ -205,7 +247,7 @@ export function governed<A extends unknown[], R>(
 
 function outcome(run: Run, failed: boolean, error: unknown): [string, string | null] {
   if (!failed) return [run.lastBreach ? "breached" : "success", null];
-  if (error instanceof FencesStop) return ["breached", null];  // a framework integration halted the agent
+  if (error instanceof FencesStop) return ["breached", null];  // halted after a stop it missed (stopGraceS)
   run.exception = events.exceptionInfo(error);
   const e = run.exception;
   return ["error", e.message ? `${e.type}: ${e.message}` : e.type];
@@ -255,6 +297,7 @@ async function endRun(run: Run, status: string, error: string | null): Promise<v
   const sent = error ? events.redact({ type: "run_end", status, error, exception: run.exception }) : null;
   const body: Record<string, unknown> = { status, error: sent?.error ?? null };
   if (sent?.exception) body.exception = sent.exception;
+  if (status === "breached" && run.lastBreach) body.breach = run.lastBreach;  // matters for breaches the SDK decided
   await client.endRun(run.runId, body);
 }
 
@@ -299,7 +342,8 @@ export async function checkpoint(response?: unknown, extra: Extra = {}): Promise
   return result;
 }
 
-function localBreach(run: Run): string | null {
+/** @internal The breach the run is in by local rules, if any. */
+export function localBreach(run: Run): string | null {
   // Limits trip only once exceeded, same rule as the server; round away float drift (0.02*5 != 0.10)
   if (run.budgetUsd !== null && Math.round(run.costUsd * 1e9) / 1e9 > run.budgetUsd) return "budget_exceeded";
   if (run.iterations > run.maxIterations) return "iteration_limit";
@@ -334,7 +378,10 @@ function decide(run: Run, resp: Reply | null): CheckpointResult {
 }
 
 function finalResult(run: Run): CheckpointResult {
-  if (run.control.stopped) run.lastBreach = "stopped_by_user";  // a stop from the dashboard sticks, whatever a later reply says
+  if (run.control.stopped) {  // a stop from the dashboard sticks, whatever a later reply says
+    run.lastBreach = "stopped_by_user";
+    run.control.stopSeen = true;
+  }
   else if (run.control.pauseExpired) run.lastBreach = "paused";
   return run.lastBreach ? breachResult(run.lastBreach, run) : okResult(run.costUsd);
 }
@@ -376,10 +423,14 @@ async function drain(): Promise<void> {
   }
 }
 
-/** Wait up to timeoutMs for queued decisions and spans to reach the server. Call before a serverless handler returns. */
+/**
+ * Wait up to timeoutMs for queued decisions and spans to reach the server, and for onStop and
+ * onQuarantine hooks to finish. Call before a serverless handler returns.
+ */
 export async function flush(timeoutMs = 5000): Promise<void> {
-  if (!draining) return;
-  await Promise.race([draining, new Promise((r) => setTimeout(r, timeoutMs).unref())]);
+  const deadline = Date.now() + timeoutMs;
+  if (draining) await Promise.race([draining, new Promise((r) => setTimeout(r, timeoutMs).unref())]);
+  await control.drain(Math.max(0, deadline - Date.now()));
 }
 
 /** Record the agent's reasoning at this step. Does nothing outside a governed run. */

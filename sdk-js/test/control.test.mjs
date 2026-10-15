@@ -61,7 +61,7 @@ test("the heartbeat reports live runs and brings back limits and stop", async ()
   const operator = (async () => {
     await waitFor(() => server.beats.length);
     const run = server.beats.at(-1)[0];
-    assert.deepEqual(Object.keys(run).sort(), ["iterations", "paused", "run_id", "spent_usd", "tokens_used"]);
+    assert.deepEqual(Object.keys(run).sort(), ["iterations", "paused", "run_id", "spent_usd", "stopped", "tokens_used"]);
     server.heartbeatCommands = [{ run_id: run.run_id, type: "limits", budget_usd: 5 }];
     await waitFor(() => !server.heartbeatCommands.length);
     server.heartbeatCommands = [{ run_id: run.run_id, type: "stop" }];

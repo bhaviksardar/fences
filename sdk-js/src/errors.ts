@@ -19,8 +19,19 @@ export class AgentQuarantined extends FencesError {
 }
 
 /**
- * Thrown by framework integrations when a limit is crossed, because a framework callback
- * can't hand a result back to the agent. Carries the same fields as a breached CheckpointResult.
+ * Thrown instead of running a guarded tool (tool(fn, { guard: true })) that Fences didn't
+ * allow: the run is stopped, over budget, unapproved or quarantined, or Fences couldn't be
+ * reached. The tool's code never ran. reason says why; breachType is set when a limit is the cause.
+ */
+export class ToolBlocked extends FencesError {
+  constructor(public readonly tool: string, public readonly reason: string, public readonly breachType: string | null = null) {
+    super(`Fences blocked ${tool}: ${reason}`);
+  }
+}
+
+/**
+ * Thrown when a run is halted from outside the agent's own code: a governed call stuck after a
+ * dashboard stop (see stopGraceS). Carries the same fields as a breached CheckpointResult.
  */
 export class FencesStop extends FencesError {
   readonly breachType: string | null;
