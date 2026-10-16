@@ -37,10 +37,10 @@ This README covers the Python SDK (`pip install agentfences`). There's also a Ty
 | Live control: stop, pause and approvals from the dashboard | ✅ 0.3.0 | ✅ 0.4.0 |
 | Automatic OpenAI/Anthropic recording (`instrument=True`) | ✅ 0.3.0 | not yet |
 | LangChain/LangGraph and OpenAI Agents SDK integrations | ✅ 0.3.0 | not yet |
-| Guarded tools, tool timeouts, halting a stuck run after a stop | ✅ 0.4.0 | 0.5.0, not on npm yet |
+| Guarded tools, tool timeouts, halting a stuck run after a stop | ✅ 0.4.0 | ✅ 0.6.0 |
 | Budget prechecks before model calls (needs `instrument=True` or a framework integration) | ✅ 0.4.0 | not yet |
-| Containment hooks (`on_stop`, `on_quarantine`), acknowledging every dashboard command | ✅ 0.5.0 | 0.5.0, not on npm yet |
-| Waiting at a limit for someone to raise it (`on_breach="hold"`) | 0.6.0, not released yet | 0.6.0, not on npm yet |
+| Containment hooks (`on_stop`, `on_quarantine`), acknowledging every dashboard command | ✅ 0.5.2 | ✅ 0.6.0 |
+| Waiting at a limit for someone to raise it (`on_breach="hold"`) | ✅ 0.6.0 | ✅ 0.6.0 |
 
 What each part guarantees, and what it can't, is in [ENFORCEMENT.md](ENFORCEMENT.md).
 
