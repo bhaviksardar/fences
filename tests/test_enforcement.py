@@ -472,6 +472,7 @@ def check_stuck_sync_run_is_halted():
         worker = threading.Thread(target=run_code)
         worker.start()
         armed.wait()
+        time.sleep(0.2)  # ponytail: let it reach gate.acquire(); a halt sent before then lands in Python code, as it should
         run.stopped, run.stopped_at = True, time.monotonic() - 1
         agentfences.control._halt(run)
         assert run.cancelled
