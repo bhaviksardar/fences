@@ -50,6 +50,7 @@ def init(
     on_stop: Optional[Callable[[dict], None]] = None,
     on_quarantine: Optional[Callable[[dict], None]] = None,
     on_breach: Optional[str] = None,
+    tool_arguments: str = "names",
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -92,6 +93,11 @@ never halts.
     "by", "reason"}. on_stop runs once per run, on_quarantine once per quarantine; whether
     each worked, failed or timed out (30 s) is reported to Fences.
 
+    tool_arguments: what a recorded tool call carries of its arguments: "names" (the default:
+    `query, limit`), "full" (`query='cats', limit=5`, each value shortened) or "none". A guarded
+    tool's check and an approval request still send the values, which rules and approvers need;
+    the redact hook can change or drop them.
+
     on_breach="hold" makes runs wait at a limit instead of ending: when the server says a
     limit is crossed, checkpoint() waits (as if paused) until someone raises it and resumes
     the run, then returns ok and the agent carries on. A model call or guarded tool refused
@@ -100,6 +106,10 @@ never halts.
     """
     global _client, _local_only, _fail_closed, _on_breach
     _on_breach = _check_on_breach(on_breach)
+    from . import spans
+    if tool_arguments not in spans.TOOL_ARGUMENTS:
+        raise ValueError(f"tool_arguments must be one of {spans.TOOL_ARGUMENTS}, not {tool_arguments!r}")
+    spans.tool_arguments = tool_arguments
     set_custom_prices(prices)
     events.configure(environment, release, redact)
     if instrument:

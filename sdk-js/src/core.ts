@@ -11,6 +11,7 @@ import * as events from "./events.js";
 import * as outbox from "./outbox.js";
 import * as precheck from "./precheck.js";
 import { costOf, setCustomPrices, type CustomPrice } from "./pricing.js";
+import { setToolArguments, type ToolArguments } from "./spans.js";
 import { breachResult, okResult, type CheckpointResult } from "./results.js";
 import { DEFAULTS, MAX_EVENTS_PER_RUN, Run, getActiveRun, store, type Limits, type Span } from "./run.js";
 
@@ -61,6 +62,12 @@ export interface InitOptions {
    * wait, and after pauseTimeoutS the breach is returned as usual. Cloud only; override per agent in governed().
    */
   onBreach?: "hold" | null;
+  /**
+   * What a recorded tool call carries of its arguments: "names" (the default: `query, limit`),
+   * "full" (the arguments as JSON, capped) or "none". A guarded tool's check and an approval request
+   * still send the values, which rules and approvers need; the redact hook can change or drop them.
+   */
+  toolArguments?: ToolArguments;
 }
 
 let client: FencesClient | null = null;
@@ -76,6 +83,7 @@ function checkOnBreach(value: unknown): "hold" | null {
 
 /** Call once at startup, before any governed function runs. */
 export function init(options: InitOptions = {}): void {
+  setToolArguments(options.toolArguments ?? "names");
   setCustomPrices(options.prices);
   events.configure(options.environment, options.release, options.redact);
   localOnly = !!options.localOnly;

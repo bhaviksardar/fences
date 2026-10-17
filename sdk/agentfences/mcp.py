@@ -11,6 +11,7 @@ never reaches the MCP server. Outside a governed run calls pass straight through
 from typing import Callable, Iterable, Mapping, Union
 
 from .core import get_active_run
+from .spans import names_of
 from .tools import call_async, items_summary
 
 
@@ -48,7 +49,8 @@ def wrap(session, *, guard: Union[bool, Iterable[str]] = (), cost_usd: Mapping[s
                 raise MCPToolError(result)
             return result
         try:
-            return await call_async(run, name, items_summary((arguments or {}).items()), cost, name in approve, call)
+            return await call_async(run, name, items_summary((arguments or {}).items()), cost, name in approve, call,
+                                    names_of(arguments or {}))
         except MCPToolError as e:
             return e.result
 

@@ -6,6 +6,13 @@ import { ToolBlocked } from "./errors.js";
 import * as events from "./events.js";
 import { MAX_ARGS, recordToolCall } from "./spans.js";
 
+/** `query, limit` (one object argument: its keys), or `0, 1` (positions): what a tool call span carries by default. */
+export function argNames(args: unknown[]): string {
+  const [only] = args;
+  if (args.length === 1 && only && typeof only === "object" && !Array.isArray(only)) return Object.keys(only).join(", ");
+  return args.map((_, i) => String(i)).join(", ");
+}
+
 /** `{"query":"cats","limit":5}`: the arguments as compact JSON (one object argument on its own), capped. */
 export function argsSummary(args: unknown[]): string {
   let text: string;
@@ -105,8 +112,9 @@ async function settle(run: Run, guardId: string, amount: number, error: unknown,
 }
 
 /** Record an async tool call; cost is null for an unguarded call, else a function giving its amount. */
+/** summary (the values) goes to the guard and an approval request; the span gets names. */
 export async function callAsync<R>(run: Run, name: string, summary: string, cost: (() => number) | null, needsApproval: boolean,
-                                   call: () => Promise<R>): Promise<R> {
+                                   call: () => Promise<R>, names?: string): Promise<R> {
   const started = performance.now();
   let gate: [string, number] | null = null;
   try {
@@ -115,11 +123,11 @@ export async function callAsync<R>(run: Run, name: string, summary: string, cost
       gate = [await open(run, name, summary, amount, needsApproval), amount];
     }
     const out = await call();
-    recordToolCall(name, summary, started);
+    recordToolCall(name, summary, started, undefined, { argNames: names });
     if (gate) await settle(run, ...gate, undefined, false);
     return out;
   } catch (e) {
-    recordToolCall(name, summary, started, e);
+    recordToolCall(name, summary, started, e, { argNames: names });
     if (gate) await settle(run, ...gate, e, true);
     throw e;
   }
@@ -183,24 +191,25 @@ export function tool<A extends unknown[], R>(fn: (...args: A) => R, options: Too
       if (!run) return timed(Promise.resolve().then(() => fn(...args)), options.timeoutS, name) as Promise<Awaited<R>>;
       const c = options.costUsd;
       return callAsync(run, name, argsSummary(args), guarded ? () => (typeof c === "function" ? c(...args) : c) ?? 0 : null,
-                       !!options.approve, () => timed(Promise.resolve().then(() => fn(...args)), options.timeoutS, name) as Promise<Awaited<R>>);
+                       !!options.approve, () => timed(Promise.resolve().then(() => fn(...args)), options.timeoutS, name) as Promise<Awaited<R>>,
+                       argNames(args));
     };
   }
   return (...args: A): R => {
     if (!getActiveRun()) return fn(...args);
-    const summary = argsSummary(args), started = performance.now();
+    const summary = argsSummary(args), started = performance.now(), opts = { argNames: argNames(args) };
     let out: R;
     try {
       out = fn(...args);
     } catch (e) {
-      recordToolCall(name, summary, started, e);
+      recordToolCall(name, summary, started, e, opts);
       throw e;
     }
     if (out instanceof Promise) {
-      return out.then((v) => { recordToolCall(name, summary, started); return v; },
-                      (e) => { recordToolCall(name, summary, started, e); throw e; }) as R;
+      return out.then((v) => { recordToolCall(name, summary, started, undefined, opts); return v; },
+                      (e) => { recordToolCall(name, summary, started, e, opts); throw e; }) as R;
     }
-    recordToolCall(name, summary, started);
+    recordToolCall(name, summary, started, undefined, opts);
     return out;
   };
 }

@@ -117,7 +117,7 @@ def check_graph_stops_on_budget():
         assert len(llm) == 3 and all(math.isclose(a["fences.cost_usd"], PER_CALL) for a in llm), llm  # a 4th could pass 3.5x
         assert llm[0]["gen_ai.response.model"] == "gpt-4o" and llm[0]["gen_ai.usage.cache_read.input_tokens"] == 400
         assert llm[0]["fences.integration"] == "langchain"
-        assert len(tools) == 3 and tools[0]["gen_ai.tool.name"] == "lookup" and tools[0]["gen_ai.tool.call.arguments"] == "query='q1'"
+        assert len(tools) == 3 and tools[0]["gen_ai.tool.name"] == "lookup" and tools[0]["gen_ai.tool.call.arguments"] == "query"
     finally:
         agentfences.init(local_only=True)
 

@@ -6,6 +6,16 @@ import { recordSpan } from "./core.js";
 import { costOf, readUsage } from "./pricing.js";
 
 export const MAX_ARGS = 300;  // characters of a tool call's argument summary
+export type ToolArguments = "names" | "full" | "none";
+/** init({ toolArguments }): what tool call spans carry of the arguments. */
+export let toolArguments: ToolArguments = "names";
+/** @internal */
+export function setToolArguments(value: unknown): void {
+  if (value !== "names" && value !== "full" && value !== "none") {
+    throw new TypeError(`toolArguments must be "names", "full" or "none", not ${JSON.stringify(value)}`);
+  }
+  toolArguments = value;
+}
 
 /** A `chat {model}` span. started is a performance.now() reading; response carries the usage. */
 export function recordLlmCall(provider: string, requestModel: string | undefined, started: number,
@@ -28,12 +38,17 @@ export function recordLlmCall(provider: string, requestModel: string | undefined
   recordSpan(`chat ${model}`, performance.now() - started, attrs, error);
 }
 
-/** An `execute_tool {name}` span; args is a short summary of the call's arguments. */
+/**
+ * An `execute_tool {name}` span. args is a short summary of the call's arguments and opts.argNames
+ * just their names: the span carries the names by default, the values only with
+ * init({ toolArguments: "full" }), and neither with "none".
+ */
 export function recordToolCall(name: string, args: string, started: number, error?: unknown,
-                               opts: { callId?: string; integration?: string } = {}): void {
+                               opts: { callId?: string; integration?: string; argNames?: string } = {}): void {
+  const sent = toolArguments === "full" ? args : toolArguments === "names" ? opts.argNames : undefined;
   recordSpan(`execute_tool ${name}`, performance.now() - started, {
     "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name, "gen_ai.tool.call.id": opts.callId,
-    "gen_ai.tool.call.arguments": args.length <= MAX_ARGS ? args : args.slice(0, MAX_ARGS - 1) + "…",
+    "gen_ai.tool.call.arguments": sent === undefined || sent.length <= MAX_ARGS ? sent : sent.slice(0, MAX_ARGS - 1) + "…",
     "fences.integration": opts.integration,
   }, error);
 }

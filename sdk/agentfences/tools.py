@@ -22,14 +22,22 @@ _short = reprlib.Repr()
 _short.maxstring, _short.maxother, _short.maxlist, _short.maxdict = 60, 60, 5, 5
 
 
-def args_summary(func: Callable, args: tuple, kwargs: dict) -> str:
-    """`query='cats', limit=5`, each value shortened, the whole thing capped."""
+def _items(func: Callable, args: tuple, kwargs: dict) -> list:
     try:
         bound = inspect.signature(func).bind_partial(*args, **kwargs)
-        items = [(k, v) for k, v in bound.arguments.items() if k not in ("self", "cls")]
+        return [(k, v) for k, v in bound.arguments.items() if k not in ("self", "cls")]
     except (TypeError, ValueError):  # builtins or odd signatures: fall back to positions
-        items = [(str(i), v) for i, v in enumerate(args)] + list(kwargs.items())
-    return items_summary(items)
+        return [(str(i), v) for i, v in enumerate(args)] + list(kwargs.items())
+
+
+def args_summary(func: Callable, args: tuple, kwargs: dict) -> str:
+    """`query='cats', limit=5`, each value shortened, the whole thing capped."""
+    return items_summary(_items(func, args, kwargs))
+
+
+def arg_names(func: Callable, args: tuple, kwargs: dict) -> str:
+    """`query, limit`: what a tool call span carries by default (init(tool_arguments=...))."""
+    return ", ".join(k for k, _ in _items(func, args, kwargs))
 
 
 def items_summary(items) -> str:
@@ -180,8 +188,11 @@ def _settle(run, guard_id: str, amount: float, error: Optional[BaseException]):
         core._client.guard(run.run_id, {"guard_id": guard_id, "phase": "settle", "outcome": outcome, "cost_usd": charged})
 
 
-async def call_async(run, label: str, summary: str, cost, approve: bool, call: Callable):
-    """Record an async tool call; cost is None/False for an unguarded call, else a function giving its amount."""
+async def call_async(run, label: str, summary: str, cost, approve: bool, call: Callable, names: Optional[str] = None):
+    """
+    Record an async tool call; cost is None/False for an unguarded call, else a function giving its
+    amount. summary (the values) goes to the guard and an approval request; the span gets names.
+    """
     started, gate = time.perf_counter(), None
     try:
         if cost:
@@ -189,11 +200,11 @@ async def call_async(run, label: str, summary: str, cost, approve: bool, call: C
             gate = (await asyncio.to_thread(_open, run, label, summary, amount, approve), amount)
         out = await call()
     except BaseException as e:
-        record_tool_call(label, summary, started, e)
+        record_tool_call(label, summary, started, e, arg_names=names)
         if gate:
             await asyncio.to_thread(_settle, run, *gate, e)
         raise
-    record_tool_call(label, summary, started)
+    record_tool_call(label, summary, started, arg_names=names)
     if gate:
         await asyncio.to_thread(_settle, run, *gate, None)
     return out
@@ -248,7 +259,8 @@ def tool(func: Optional[Callable] = None, *, name: Optional[str] = None, timeout
                 if run is None:
                     return await _timed_async(f(*args, **kwargs), timeout_s, label)
                 return await call_async(run, label, args_summary(f, args, kwargs), guarded and (lambda: amount(args, kwargs)),
-                                        approve, lambda: _timed_async(f(*args, **kwargs), timeout_s, label))
+                                        approve, lambda: _timed_async(f(*args, **kwargs), timeout_s, label),
+                                        arg_names(f, args, kwargs))
             return async_wrapper
 
         @functools.wraps(f)
@@ -256,18 +268,18 @@ def tool(func: Optional[Callable] = None, *, name: Optional[str] = None, timeout
             run = get_active_run()
             if run is None:
                 return _timed_sync(f, args, kwargs, timeout_s, label)
-            summary, started, gate = args_summary(f, args, kwargs), time.perf_counter(), None
+            summary, names, started, gate = args_summary(f, args, kwargs), arg_names(f, args, kwargs), time.perf_counter(), None
             try:
                 if guarded:
                     cost = check_amount(amount(args, kwargs), f"{label}'s cost_usd")
                     gate = (_open(run, label, summary, cost, approve), cost)
                 out = _timed_sync(f, args, kwargs, timeout_s, label)
             except BaseException as e:
-                record_tool_call(label, summary, started, e)
+                record_tool_call(label, summary, started, e, arg_names=names)
                 if gate:
                     _settle(run, *gate, e)
                 raise
-            record_tool_call(label, summary, started)
+            record_tool_call(label, summary, started, arg_names=names)
             if gate:
                 _settle(run, *gate, None)
             return out

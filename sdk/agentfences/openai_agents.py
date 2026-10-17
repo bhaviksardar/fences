@@ -13,6 +13,7 @@ before it's sent, then recorded with its tokens and cost and checkpointed, so li
 apply, and each tool call is recorded. Already inside
 @governed? Pass FencesRunHooks() as Runner.run(..., hooks=...) instead.
 """
+import json
 import time
 from typing import Any, Optional
 
@@ -21,7 +22,7 @@ from agents.models import get_default_model
 
 from . import core, precheck
 from .exceptions import FencesStop
-from .spans import record_llm_call, record_tool_call
+from .spans import names_of, record_llm_call, record_tool_call
 
 
 def _model_name(agent) -> str:
@@ -68,9 +69,13 @@ class FencesRunHooks(RunHooks):
         if core.get_active_run() is None:
             return
         t0 = self._started.pop(getattr(context, "tool_call_id", None) or ("tool", id(tool)), time.perf_counter())
-        record_tool_call(getattr(context, "tool_name", None) or getattr(tool, "name", "tool"),
-                         str(getattr(context, "tool_arguments", "") or ""), t0,
-                         call_id=getattr(context, "tool_call_id", None), integration="openai-agents")
+        args = str(getattr(context, "tool_arguments", "") or "")
+        try:
+            names = names_of(json.loads(args)) if args else None  # the model's arguments, as JSON
+        except ValueError:
+            names = None
+        record_tool_call(getattr(context, "tool_name", None) or getattr(tool, "name", "tool"), args, t0,
+                         call_id=getattr(context, "tool_call_id", None), integration="openai-agents", arg_names=names)
 
 
 async def run(agent, input: Any, *, agent_name: Optional[str] = None, budget_usd: Optional[float] = None,

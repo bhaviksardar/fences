@@ -45,7 +45,7 @@ export function wrap<C extends CallToolClient>(client: C, options: WrapOptions =
                                const result = await original(params, ...rest);
                                if (result?.isError) throw new MCPToolError(result);
                                return result;
-                             });
+                             }, Object.keys(args).join(", "));
     } catch (e) {
       if (e instanceof MCPToolError) return e.result;
       throw e;

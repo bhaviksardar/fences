@@ -94,6 +94,7 @@ test("parallel guarded calls can't overspend together, locally or against a serv
   const check = server.guards.find((g) => g.phase === "check");
   assert.deepEqual(Object.keys(check).sort(), ["amount_usd", "approval_id", "arguments", "guard_id", "phase", "tool"]);
   assert.equal(check.tool, "refund");
+  assert.equal(check.arguments, "0.4");  // the check gets values (rules need them); the span only names
 });
 
 test("mcp.wrap: every callTool is a tool span; named tools are guarded; isError is a failed call", async () => {
@@ -117,7 +118,7 @@ test("mcp.wrap: every callTool is a tool span; named tools are guarded; isError 
   assert.deepEqual(calls, ["search", "search", "broken", "send_email", "constructor", "refund"]);  // the refused refund never ran
   assert.deepEqual(spans.map((s) => [s.attributes["gen_ai.tool.name"], s.status]),
     [["search", "ok"], ["broken", "error"], ["send_email", "ok"], ["constructor", "ok"], ["refund", "ok"], ["refund", "error"]]);
-  assert.equal(spans[0].attributes["gen_ai.tool.call.arguments"], '{"q":"cats"}');
+  assert.equal(spans[0].attributes["gen_ai.tool.call.arguments"], "q");  // names by default
   assert.equal(spans[1].attributes["error.type"], "MCPToolError");
   assert.deepEqual(server.guards.filter((g) => g.phase === "check").map((g) => [g.tool, g.amount_usd]), [["send_email", 0], ["refund", 0.7]]);
   assert.deepEqual([Math.round(server.spent * 1e9) / 1e9, server.held.size], [0.7, 0]);

@@ -24,7 +24,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from . import core, precheck
 from .exceptions import FencesStop
 from .pricing import read_usage
-from .spans import record_llm_call, record_tool_call
+from .spans import names_of, record_llm_call, record_tool_call
 
 log = logging.getLogger("agentfences")
 
@@ -180,7 +180,7 @@ class FencesCallbackHandler(BaseCallbackHandler):
             self._enter(run_id, parent_run_id, "")
             args = ", ".join(f"{k}={v!r}" for k, v in inputs.items()) if isinstance(inputs, dict) else str(input_str)
             name = kwargs.get("name") or (serialized or {}).get("name") or "tool"
-            self._started[run_id] = ("tool", name, args, time.perf_counter())
+            self._started[run_id] = ("tool", name, args, names_of(inputs), time.perf_counter())
         self._safely(go)
 
     def _tool_end(self, run_id, error):
@@ -188,8 +188,8 @@ class FencesCallbackHandler(BaseCallbackHandler):
             started = self._started.pop(run_id, None)
             if started is None:
                 return
-            _, name, args, t0 = started
-            record_tool_call(name, args, t0, error, integration="langchain")
+            _, name, args, names, t0 = started
+            record_tool_call(name, args, t0, error, integration="langchain", arg_names=names)
         self._safely(lambda: self._with_run(run_id, record))
 
     def on_tool_end(self, output, *, run_id, **kwargs):

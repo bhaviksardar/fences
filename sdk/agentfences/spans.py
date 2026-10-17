@@ -9,6 +9,8 @@ from .core import record_span
 from .pricing import cost_of, read_usage
 
 MAX_ARGS = 300  # characters of a tool call's argument summary
+TOOL_ARGUMENTS = ("names", "full", "none")
+tool_arguments = "names"  # init(tool_arguments=...): what tool call spans carry of the arguments
 
 
 def record_llm_call(provider: str, request_model: Optional[str], started: float, response=None,
@@ -34,10 +36,20 @@ def record_llm_call(provider: str, request_model: Optional[str], started: float,
 
 
 def record_tool_call(name: str, args: str, started: float, error: Optional[BaseException] = None,
-                     call_id: Optional[str] = None, integration: Optional[str] = None):
-    """An `execute_tool {name}` span; args is a short summary of the call's arguments."""
+                     call_id: Optional[str] = None, integration: Optional[str] = None, arg_names: Optional[str] = None):
+    """
+    An `execute_tool {name}` span. args is a short summary of the call's arguments and arg_names
+    just their names: the span carries the names by default, the values only with
+    init(tool_arguments="full"), and neither with "none".
+    """
+    sent = args if tool_arguments == "full" else arg_names if tool_arguments == "names" else None
     record_span(f"execute_tool {name}", time.perf_counter() - started, {
         "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name, "gen_ai.tool.call.id": call_id,
-        "gen_ai.tool.call.arguments": args if len(args) <= MAX_ARGS else args[:MAX_ARGS - 1] + "…",
+        "gen_ai.tool.call.arguments": sent if sent is None or len(sent) <= MAX_ARGS else sent[:MAX_ARGS - 1] + "…",
         "fences.integration": integration,
     }, error)
+
+
+def names_of(arguments) -> Optional[str]:
+    """`query, limit` for a dict of arguments; None when there are no names to give."""
+    return ", ".join(str(k) for k in arguments) if isinstance(arguments, dict) else None
