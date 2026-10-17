@@ -1,2 +1,2 @@
 /** The one place the version lives; sent to Fences on every request. Keep in step with package.json. */
-export const VERSION = "0.6.0";
+export const VERSION = "0.7.0";

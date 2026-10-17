@@ -10,3 +10,4 @@ export { priceOf } from "./pricing.js";
 export type { CustomPrice } from "./pricing.js";
 export { FencesError, FencesAuthError, AgentQuarantined, FencesStop, ToolBlocked } from "./errors.js";
 export { VERSION } from "./version.js";
+export * as mcp from "./mcp.js";

@@ -100,6 +100,27 @@ async function settle(run: Run, guardId: string, amount: number, error: unknown,
   await _client()?.guard(run.runId, { guard_id: guardId, phase: "settle", outcome, cost_usd: charged });
 }
 
+/** Record an async tool call; cost is null for an unguarded call, else a function giving its amount. */
+export async function callAsync<R>(run: Run, name: string, summary: string, cost: (() => number) | null, needsApproval: boolean,
+                                   call: () => Promise<R>): Promise<R> {
+  const started = performance.now();
+  let gate: [string, number] | null = null;
+  try {
+    if (cost) {
+      const amount = cost();
+      gate = [await open(run, name, summary, amount, needsApproval), amount];
+    }
+    const out = await call();
+    recordToolCall(name, summary, started);
+    if (gate) await settle(run, ...gate, undefined, false);
+    return out;
+  } catch (e) {
+    recordToolCall(name, summary, started, e);
+    if (gate) await settle(run, ...gate, e, true);
+    throw e;
+  }
+}
+
 // ── tool() ────────────────────────────────────────────────────────────────────
 
 interface ToolFields<A extends unknown[]> {
@@ -156,22 +177,9 @@ export function tool<A extends unknown[], R>(fn: (...args: A) => R, options: Too
     return async (...args: A): Promise<Awaited<R>> => {
       const run = getActiveRun();
       if (!run) return timed(Promise.resolve().then(() => fn(...args)), options.timeoutS, name) as Promise<Awaited<R>>;
-      const summary = argsSummary(args), started = performance.now();
-      let gate: [string, number] | null = null;
-      try {
-        if (guarded) {
-          const c = options.costUsd, amount = Number((typeof c === "function" ? c(...args) : c) ?? 0);
-          gate = [await open(run, name, summary, amount, !!options.approve), amount];
-        }
-        const out = await timed(Promise.resolve().then(() => fn(...args)), options.timeoutS, name) as Awaited<R>;
-        recordToolCall(name, summary, started);
-        if (gate) await settle(run, ...gate, undefined, false);
-        return out;
-      } catch (e) {
-        recordToolCall(name, summary, started, e);
-        if (gate) await settle(run, ...gate, e, true);
-        throw e;
-      }
+      const c = options.costUsd;
+      return callAsync(run, name, argsSummary(args), guarded ? () => Number((typeof c === "function" ? c(...args) : c) ?? 0) : null,
+                       !!options.approve, () => timed(Promise.resolve().then(() => fn(...args)), options.timeoutS, name) as Promise<Awaited<R>>);
     };
   }
   return (...args: A): R => {

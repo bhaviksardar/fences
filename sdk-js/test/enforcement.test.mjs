@@ -96,6 +96,33 @@ test("parallel guarded calls can't overspend together, locally or against a serv
   assert.equal(check.tool, "refund");
 });
 
+test("mcp.wrap: every callTool is a tool span; named tools are guarded; isError is a failed call", async () => {
+  const calls = [];
+  const client = fences.mcp.wrap({  // stands in for the MCP SDK's Client
+    async callTool({ name }) { calls.push(name); return { isError: name === "broken", content: [{ type: "text", text: "disk full" }] }; },
+  }, { guard: ["send_email"], costUsd: { refund: (a) => a.amount } });
+  assert.equal((await client.callTool({ name: "search", arguments: { q: "x" } })).isError, false);  // outside a run: straight through
+
+  cloud();
+  const [failed, denied, spans] = await governed(async () => {
+    await client.callTool({ name: "search", arguments: { q: "cats" } });
+    const failed = await client.callTool({ name: "broken" });
+    await client.callTool({ name: "send_email", arguments: { to: "a@b.c" } });
+    await client.callTool({ name: "constructor" });  // not a guarded tool, though it's a key of every object
+    await client.callTool({ name: "refund", arguments: { amount: 0.7 } });
+    const denied = await blocked(() => client.callTool({ name: "refund", arguments: { amount: 0.7 } }));
+    return [failed, denied, getActiveRun().events];
+  }, { budgetUsd: 1 })();
+  assert.ok(failed.isError && denied?.breachType === "budget_exceeded");
+  assert.deepEqual(calls, ["search", "search", "broken", "send_email", "constructor", "refund"]);  // the refused refund never ran
+  assert.deepEqual(spans.map((s) => [s.attributes["gen_ai.tool.name"], s.status]),
+    [["search", "ok"], ["broken", "error"], ["send_email", "ok"], ["constructor", "ok"], ["refund", "ok"], ["refund", "error"]]);
+  assert.equal(spans[0].attributes["gen_ai.tool.call.arguments"], '{"q":"cats"}');
+  assert.equal(spans[1].attributes["error.type"], "MCPToolError");
+  assert.deepEqual(server.guards.filter((g) => g.phase === "check").map((g) => [g.tool, g.amount_usd]), [["send_email", 0], ["refund", 0.7]]);
+  assert.deepEqual([Math.round(server.spent * 1e9) / 1e9, server.held.size], [0.7, 0]);
+});
+
 test("a blocked tool never runs; outside a run it just runs; local approval is denied", async () => {
   init({ localOnly: true });
   const ran = [];

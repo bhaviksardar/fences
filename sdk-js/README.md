@@ -107,6 +107,16 @@ const deploy = tool(deployImpl, { guard: true, timeoutS: 30 });
 
 A guarded or timed tool always returns a promise. What each part guarantees: [ENFORCEMENT.md](../ENFORCEMENT.md).
 
+**MCP tools** (from 0.7.0): wrap an MCP `Client` and every `callTool` is recorded, with no `tool()` per tool. The tools you name are guarded as above:
+
+```ts
+import { mcp } from "agentfences";
+
+mcp.wrap(client, { guard: ["send_email"], costUsd: { refund: (args) => args.amount as number } });
+```
+
+`guard: true` guards every tool, and `approve: [...]` names tools a person approves first. A result with `isError` is recorded as a failed call and still comes back to the agent.
+
 ## Not yet in the TypeScript SDK
 
 The Python SDK also records OpenAI/Anthropic calls automatically (`instrument`) and integrates with LangGraph and the OpenAI Agents SDK. Those are also how it checks a model call against the budget **before** it's sent, so the TypeScript SDK doesn't do that yet: a model call is checked afterwards, by `checkpoint()`, and a run can go over its budget by one call. Everything here follows the same server protocol ([PROTOCOL.md](../PROTOCOL.md)).
