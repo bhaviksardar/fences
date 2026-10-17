@@ -700,8 +700,11 @@ def check_hold_a_call_until_the_budget_is_raised():
             wait_for(lambda: held_beat(server, "budget"))
             rid = held_beat(server, "budget")
             server.heartbeat_commands = [{"run_id": rid, "type": "limits", "budget_usd": 5.0}, {"run_id": rid, "type": "resume", "id": "r1"}]
+            # Then the guarded tool: the server's budget is too low. Wait for its check first, so a heartbeat
+            # sent before the resume above, still showing the first hold, can't be taken for this one
+            wait_for(lambda: any(g["phase"] == "check" for g in server.guards))
             server.beats.clear()
-            wait_for(lambda: held_beat(server, "budget"))  # then the guarded tool: the server's budget is too low
+            wait_for(lambda: held_beat(server, "budget"))
             server.budget = 5.0
             server.heartbeat_commands = [{"run_id": rid, "type": "resume", "id": "r2"}]
         background(operator)
