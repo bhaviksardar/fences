@@ -1,4 +1,4 @@
-import { getActiveRun } from "./core.js";
+import { getActiveRun } from "./run.js";
 import { argsSummary, callAsync } from "./tools.js";
 
 type Args = Record<string, unknown>;
@@ -40,7 +40,7 @@ export function wrap<C extends CallToolClient>(client: C, options: WrapOptions =
     const { name } = params, args = params.arguments ?? {}, c = Object.hasOwn(costs, name) ? costs[name] : undefined;
     const guarded = options.guard === true || named.has(name) || c !== undefined || approve.has(name);
     try {
-      return await callAsync(run, name, argsSummary([args]), guarded ? () => Number((typeof c === "function" ? c(args) : c) ?? 0) : null,
+      return await callAsync(run, name, argsSummary([args]), guarded ? () => (typeof c === "function" ? c(args) : c) ?? 0 : null,
                              approve.has(name), async () => {
                                const result = await original(params, ...rest);
                                if (result?.isError) throw new MCPToolError(result);

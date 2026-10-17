@@ -126,9 +126,45 @@ def check_custom_hooks_rejected():
         raise AssertionError("expected TypeError")
 
 
+def check_on_breach_is_checked():
+    try:
+        asyncio.run(openai_agents.run(None, "hi", on_breach="wait"))
+    except ValueError as e:
+        assert "on_breach" in str(e)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def check_failed_model_call_releases_its_hold():
+    """A model call that raises gets no on_llm_end: its hold is released when the next call starts, not kept until the run ends."""
+    class FlakyModel(FakeModel):
+        async def get_response(self, *args, **kwargs):
+            if self.turns == 0 and not getattr(self, "failed", False):
+                self.failed = True
+                raise ConnectionError("provider timed out")
+            return await super().get_response(*args, **kwargs)
+
+    agent = research_agent(tool_turns=0)
+    agent.model = FlakyModel(tool_turns=0)
+    hooks = openai_agents.FencesRunHooks()
+
+    @governed(budget_usd=1)
+    async def retrying():
+        try:
+            await Runner.run(agent, "Research cats", hooks=hooks)
+        except ConnectionError:
+            held_after_failure = get_active_run().reserved_usd
+        await Runner.run(agent, "Research cats", hooks=hooks)  # the retry
+        return held_after_failure, get_active_run().reserved_usd, get_active_run().cost_usd
+    held_after_failure, held_at_end, spent = asyncio.run(retrying())
+    assert held_after_failure > 0, held_after_failure  # its worst case, held while nothing says the call ended
+    assert math.isclose(held_at_end, 0, abs_tol=1e-12) and math.isclose(spent, PER_CALL), (held_at_end, spent)
+
+
 if __name__ == "__main__":
     agentfences.init(local_only=True)
-    for check in [check_stops_on_budget, check_success, check_hooks_inside_governed, check_custom_hooks_rejected]:
+    for check in [check_stops_on_budget, check_success, check_hooks_inside_governed, check_custom_hooks_rejected, check_on_breach_is_checked,
+                  check_failed_model_call_releases_its_hold]:
         check()
         print("ok", check.__name__)
     print("openai-agents checks passed")

@@ -10,21 +10,35 @@ export interface CustomPrice { input: number; output: number; cacheRead?: number
 
 const custom: Record<string, PriceEntry> = {};
 
+const validPrice = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+
+/** input and output are required; a missing or invalid price throws here, not at the agent's first step. */
 export function setCustomPrices(prices: Record<string, CustomPrice> = {}): void {
-  for (const k of Object.keys(custom)) delete custom[k];
+  const table: Record<string, PriceEntry> = {};
   for (const [model, p] of Object.entries(prices)) {
+    if (!p || typeof p !== "object" || p.input === undefined || p.output === undefined) {
+      throw new TypeError(`init({ prices }): '${model}' needs an input and an output price (USD per 1M tokens)`);
+    }
+    for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+      if (p[key] !== undefined && !validPrice(p[key])) {
+        throw new TypeError(`init({ prices }): '${model}' ${key} must be a number, zero or more, not ${String(p[key])}`);
+      }
+    }
     const e: PriceEntry = { in: p.input / 1e6, out: p.output / 1e6 };
     if (p.cacheRead !== undefined) e.cache_read = p.cacheRead / 1e6;
     if (p.cacheWrite !== undefined) e.cache_write = p.cacheWrite / 1e6;
-    custom[model.toLowerCase()] = e;
+    table[model.toLowerCase()] = e;
   }
+  for (const k of Object.keys(custom)) delete custom[k];  // only once every entry is valid
+  Object.assign(custom, table);
 }
 
 export function priceOf(model: string): PriceEntry | undefined {
   const name = model.toLowerCase().split("/").pop() ?? "";            // "models/gemini-2.5-pro", "openai/gpt-4o"
   const undated = name.replace(/-(\d{4}-\d{2}-\d{2}|\d{8})$/, "");     // "claude-sonnet-4-5-20250929"
   for (const candidate of [name, undated]) {
-    const hit = custom[candidate] ?? PRICES[candidate];
+    // hasOwn: a model named "constructor" mustn't find Object.prototype's
+    const hit = Object.hasOwn(custom, candidate) ? custom[candidate] : Object.hasOwn(PRICES, candidate) ? PRICES[candidate] : undefined;
     if (hit) return hit;
   }
   return undefined;

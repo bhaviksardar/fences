@@ -43,17 +43,18 @@ def _response_of(result) -> Any:
 
 class FencesCallbackHandler(BaseCallbackHandler):
     """
-    Governs a LangChain or LangGraph run. Limits work as in @governed and are all
-    optional; in cloud mode, limits left out come from the agent's page in the dashboard.
+    Governs a LangChain or LangGraph run. Limits and on_breach work as in @governed and are
+    all optional; in cloud mode, limits left out come from the agent's page in the dashboard.
     agent_name defaults to the outermost run's name (e.g. "LangGraph").
     """
     raise_error = True  # so a FencesStop can halt the graph; anything else this handler hits is logged, never raised
 
     def __init__(self, agent_name: Optional[str] = None, budget_usd: Optional[float] = None,
                  max_iterations: Optional[int] = None, max_duration_ms: Optional[int] = None,
-                 max_tokens: Optional[int] = None):
+                 max_tokens: Optional[int] = None, on_breach: Optional[str] = None):
+        core._check_on_breach(on_breach)
         self.agent_name = agent_name
-        self.limits = (budget_usd, max_iterations, max_duration_ms, max_tokens)
+        self.limits = (budget_usd, max_iterations, max_duration_ms, max_tokens, on_breach)
         self._runs: Dict[UUID, Any] = {}       # root LangChain run id -> (RunState, started_here)
         self._root: Dict[UUID, UUID] = {}      # any LangChain run id -> its root
         self._started: Dict[UUID, tuple] = {}  # model or tool call in progress -> (kind, name, args, t0)
@@ -76,7 +77,7 @@ class FencesCallbackHandler(BaseCallbackHandler):
 
     def _exit(self, run_id: UUID, error: Optional[BaseException]):
         entry = self._runs.pop(run_id, None) if self._root.get(run_id) == run_id else None
-        for child in [k for k, root in self._root.items() if root == run_id]:
+        for child in [k for k, root in list(self._root.items()) if root == run_id]:  # list(): parallel branches add to it
             self._root.pop(child, None)
         if entry is None or not entry[1]:
             return

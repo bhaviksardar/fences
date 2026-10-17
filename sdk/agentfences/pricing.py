@@ -15,13 +15,23 @@ _custom: dict = {}   # init(prices=...) entries, same shape as the table
 _warned: set = set()
 
 
+FIELDS = (("in", "input"), ("out", "output"), ("cache_read", "cache_read"), ("cache_write", "cache_write"))
+
+
 def set_custom_prices(prices: Optional[dict]):
-    """prices: {"model": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75}}, USD per 1M tokens."""
-    _custom.clear()
+    """prices: {"model": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75}}, USD per 1M tokens.
+    input and output are required; a missing or invalid price raises ValueError here, not at the agent's first step."""
+    table = {}
     for model, p in (prices or {}).items():
-        _custom[model.lower()] = {k: p[src] / 1_000_000 for k, src in
-                                  (("in", "input"), ("out", "output"), ("cache_read", "cache_read"), ("cache_write", "cache_write"))
-                                  if p.get(src) is not None}
+        if not isinstance(p, dict) or p.get("input") is None or p.get("output") is None:
+            raise ValueError(f"init(prices=...): {model!r} needs an input and an output price (USD per 1M tokens)")
+        for _, src in FIELDS:
+            v = p.get(src)
+            if v is not None and (not isinstance(v, (int, float)) or isinstance(v, bool) or not 0 <= v < float("inf")):
+                raise ValueError(f"init(prices=...): {model!r} {src} must be a number, zero or more, not {v!r}")
+        table[model.lower()] = {k: p[src] / 1_000_000 for k, src in FIELDS if p.get(src) is not None}
+    _custom.clear()  # only once every entry is valid
+    _custom.update(table)
 
 
 def _prices() -> dict:

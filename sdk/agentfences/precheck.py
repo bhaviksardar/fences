@@ -11,7 +11,8 @@ import re
 from typing import Optional
 
 from . import control
-from .core import get_active_run, reserve_lock, _make_breach_result
+from .results import breach_result
+from .run import get_active_run, reserve_lock
 from .exceptions import FencesStop
 from .pricing import price_of, cost_of, read_usage
 
@@ -48,7 +49,7 @@ def worst_case_usd(model: Optional[str], request, out_cap: Optional[int] = None,
 
 
 def _refuse(run, worst: float, out_cap: Optional[int]):
-    result = _make_breach_result("budget_exceeded", spent=run.cost_usd, limit=run.budget_usd)
+    result = breach_result("budget_exceeded", spent=run.cost_usd, limit=run.budget_usd)
     room = max(run.budget_usd - run.cost_usd - run.reserved_usd, 0)
     result.spent_usd = run.cost_usd
     result.message = (f"I can't make another model call without risking going over my budget (spent ${run.cost_usd:.4f} "

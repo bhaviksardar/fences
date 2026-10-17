@@ -177,3 +177,38 @@ test("context() tags runs; inner values win", async () => {
   assert.deepEqual(await agent(), { environment: "prod", release: "v1.4.2" });
   init({ localOnly: true });
 });
+
+test("a NaN, negative or non-number cost is refused: it would switch the budget off", async () => {
+  init({ localOnly: true });
+  const step = (extra) => governed(async () => checkpoint(null, extra), { budgetUsd: 0.01 })();
+  await assert.rejects(step({ costDeltaUsd: NaN }), TypeError);
+  await assert.rejects(step({ costDeltaUsd: "0.02" }), TypeError);
+  await assert.rejects(step({ costDeltaUsd: -100 }), RangeError);
+  await assert.rejects(step({ costDeltaUsd: Infinity }), RangeError);
+  await assert.rejects(step({ tokensUsed: -5 }), RangeError);
+  const ran = [];
+  const pay = tool((amount) => { ran.push(amount); }, { costUsd: (amount) => amount, name: "pay" });
+  const out = await governed(async () => {
+    const errors = [];
+    for (const amount of [-50, NaN]) await pay(amount).catch((e) => errors.push(e.name));
+    return [errors, getActiveRun().reservedUsd, getActiveRun().costUsd];
+  }, { budgetUsd: 1 })();
+  assert.deepEqual(out, [["RangeError", "TypeError"], 0, 0]);
+  assert.deepEqual(ran, []);
+});
+
+test("custom prices are checked at init, and a model named like an Object key has no price", async () => {
+  for (const prices of [{ m: { input: 1 } }, { m: { output: 1 } }, { m: { input: -1, output: 1 } },
+                        { m: { input: NaN, output: 1 } }, { m: { input: "1", output: 1 } }, { m: 3 }]) {
+    assert.throws(() => init({ localOnly: true, prices }), (e) => e instanceof TypeError && /'m'/.test(e.message), JSON.stringify(prices));
+  }
+  init({ localOnly: true, prices: { m: { input: 1, output: 2 } } });
+  assert.deepEqual(fences.priceOf("m"), { in: 1e-6, out: 2e-6 });
+  init({ localOnly: true });
+  for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty"]) assert.equal(fences.priceOf(name), undefined, name);
+  const spent = await governed(async () => {
+    await checkpoint({ model: "constructor", usage: { prompt_tokens: 10, completion_tokens: 10 } });
+    return getActiveRun().costUsd;
+  }, { budgetUsd: 1 })();
+  assert.equal(spent, 0);  // unpriced (with a warning), not NaN
+});

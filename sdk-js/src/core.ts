@@ -1,128 +1,20 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+/**
+ * init(), governed() and checkpoint(): starting and ending runs, checking every step against
+ * its limits (the server decides in cloud mode, the same rules apply here otherwise), and
+ * recording decisions and spans.
+ */
 import { FencesClient, type Reply } from "./client.js";
 import * as control from "./control.js";
 import { AgentQuarantined, FencesStop } from "./errors.js";
 import * as events from "./events.js";
+import * as outbox from "./outbox.js";
+import * as precheck from "./precheck.js";
 import { costOf, setCustomPrices, type CustomPrice } from "./pricing.js";
+import { breachResult, okResult, type CheckpointResult } from "./results.js";
+import { DEFAULTS, MAX_EVENTS_PER_RUN, Run, getActiveRun, store, type Limits, type Span } from "./run.js";
 
-// ── Results ───────────────────────────────────────────────────────────────────
-
-export interface CheckpointResult {
-  ok: boolean;
-  breached: boolean;
-  /** "budget_exceeded" | "iteration_limit" | "time_limit" | "token_limit" | "stopped_by_user" | ... (see PROTOCOL.md) */
-  breachType: string | null;
-  /** First-person text, ready to return to the user. */
-  message: string;
-  /** An instruction to give the model so it wraps up. */
-  systemPrompt: string;
-  /** The run's total spend so far. */
-  spentUsd: number;
-}
-
-const SUMMARY = "I'll summarize what I found so far.";
-const WRAP_UP = "Stop your current task immediately and summarize what you have found or completed so far.";
-const money = (x: number) => `$${x.toFixed(4)}`;
-const count = (n: number) => n.toLocaleString("en-US");
-
-function breachResult(type: string, run: Run): CheckpointResult {
-  const spent = run.costUsd, limit = run.budgetUsd ?? 0;
-  const text: Record<string, [string, string]> = {
-    budget_exceeded: [`I've reached my budget limit (spent ${money(spent)} of ${money(limit)}). ${SUMMARY}`,
-      `You have reached your budget limit (${money(spent)} of ${money(limit)} spent). Stop your current task immediately ` +
-      "and provide a clear summary of what you have found or completed so far. Tell the user you stopped due to budget and what you accomplished."],
-    iteration_limit: [`I've reached my iteration limit (${run.iterations} steps). ${SUMMARY}`,
-      `You have reached your iteration limit (${run.iterations} steps). ${WRAP_UP} Tell the user you stopped due to the iteration limit.`],
-    time_limit: [`I've reached my time limit (${run.durationMs}ms). ${SUMMARY}`,
-      `You have reached your time limit. ${WRAP_UP} Tell the user you stopped due to the time limit.`],
-    token_limit: [`I've reached my token limit (${count(run.tokensUsed)} tokens). ${SUMMARY}`,
-      `You have reached your token limit (${count(run.tokensUsed)} tokens used). ${WRAP_UP} Tell the user you stopped due to the token limit.`],
-    stopped_by_user: [`I was stopped from the Fences dashboard. ${SUMMARY}`,
-      `A person stopped this run from the Fences dashboard. ${WRAP_UP} Tell the user you were stopped by an operator.`],
-    key_daily_budget: [`My daily spending cap has been reached. ${SUMMARY}`,
-      `Your daily spending cap, across all of your runs, has been reached. ${WRAP_UP} Tell the user you stopped because the daily cap was reached.`],
-    key_monthly_budget: [`My monthly spending cap has been reached. ${SUMMARY}`,
-      `Your monthly spending cap, across all of your runs, has been reached. ${WRAP_UP} Tell the user you stopped because the monthly cap was reached.`],
-    fences_unreachable: [`I can't reach Fences to confirm I'm within my limits, so I'm stopping to be safe. ${SUMMARY}`,
-      `Your governance service can't be reached and you are configured to stop when that happens. ${WRAP_UP}`],
-    paused: [`I was paused from the Fences dashboard and not resumed in time. ${SUMMARY}`,
-      `A person paused this run from the Fences dashboard and it was not resumed in time. Stop your current task and summarize ` +
-      "what you have found or completed so far. Tell the user the run was paused by an operator."],
-  };
-  const [message, systemPrompt] = text[type] ??
-    ["Governance limit reached.", "A governance limit has been reached. Summarize what you have done so far."];
-  return { ok: false, breached: true, breachType: type, message, systemPrompt, spentUsd: run.costUsd };
-}
-
-const okResult = (spentUsd = 0): CheckpointResult =>
-  ({ ok: true, breached: false, breachType: null, message: "", systemPrompt: "", spentUsd });
-
-// ── Runs ──────────────────────────────────────────────────────────────────────
-
-/** Every limit is optional; see governed(). */
-export interface Limits {
-  /** Maximum spend for the run in USD. None anywhere: unlimited spend, with a warning. */
-  budgetUsd?: number | null;
-  /** Maximum checkpoints (steps). Default 100. */
-  maxIterations?: number | null;
-  /** Maximum wall-clock time in milliseconds. Default 300000 (5 minutes). */
-  maxDurationMs?: number | null;
-  /** Maximum tokens (input + output). 0 or unset: no limit. */
-  maxTokens?: number | null;
-}
-
-const DEFAULTS = { maxIterations: 100, maxDurationMs: 300_000, maxTokens: 0 };
-export const MAX_EVENTS_PER_RUN = 1000;
-
-export interface Span {
-  name: string;
-  start_ts: number;
-  end_ts: number;
-  status: "ok" | "error";
-  attributes: Record<string, unknown>;
-}
-
-export class Run {
-  readonly runId = randomUUID();
-  costUsd = 0;
-  iterations = 0;
-  tokensUsed = 0;
-  readonly startedAt = Date.now();
-  readonly decisions: { timestamp: number; iteration: number; reasoning: string; action: string | null }[] = [];
-  /** Tool and model calls as OpenTelemetry-shaped spans, newest 1,000 kept. */
-  readonly events: Span[] = [];
-  lastBreach: string | null = null;
-  exception?: events.ExceptionInfo;
-  warned = false;
-  /** Live control from the dashboard (see control.ts). */
-  readonly control = control.newControl();
-  /** Held by guarded tools that are running. */
-  reservedUsd = 0;
-  /** "hold": wait at a limit for someone to raise it (see InitOptions.onBreach). */
-  onBreach: "hold" | null = null;
-  private readonly abort = new AbortController();
-  /**
-   * Aborts when Fences halts the run after a stop it didn't reach a checkpoint for (see
-   * stopGraceS). Pass it to fetch and other cancellable work so a stuck run really stops:
-   *     await fetch(url, { signal: getActiveRun()?.signal });
-   */
-  get signal(): AbortSignal { return this.abort.signal; }
-  /** @internal */
-  _abort(reason: unknown): void { this.abort.abort(reason); }
-
-  constructor(readonly agentName: string, public budgetUsd: number | null, public maxIterations: number,
-              public maxDurationMs: number, public maxTokens: number, readonly context: Record<string, string>) {}
-
-  get durationMs(): number { return Date.now() - this.startedAt; }
-}
-
-const store = new AsyncLocalStorage<Run>();
-
-/** The run in progress in this async context, if any. */
-export function getActiveRun(): Run | null {
-  return store.getStore() ?? null;
-}
+export type { CheckpointResult } from "./results.js";
+export { Run, getActiveRun, type Limits, type Span } from "./run.js";
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
@@ -214,10 +106,10 @@ function requireInit(): void {
   }
 }
 
-function warnUnreachable(run: Run, err: string): void {
+function warnUnreachable(run: Run, err: string, ending = false): void {
   if (run.warned) return;
   run.warned = true;
-  console.warn(`agentfences: Fences backend unreachable for run ${run.runId} (${err}); enforcing limits locally`);
+  console.warn(`agentfences: Fences backend unreachable for run ${run.runId} (${err}); ${ending ? "ending the run" : "enforcing limits locally"}`);
 }
 
 // ── governed ──────────────────────────────────────────────────────────────────
@@ -272,8 +164,6 @@ function outcome(run: Run, failed: boolean, error: unknown): [string, string | n
   return ["error", e.message ? `${e.type}: ${e.message}` : e.type];
 }
 
-const LIMIT_KEYS = { budget_usd: "budgetUsd", max_iterations: "maxIterations", max_duration_ms: "maxDurationMs", max_tokens: "maxTokens" } as const;
-
 async function startRun(agentName: string, limits: Limits): Promise<Run> {
   const run = new Run(agentName, limits.budgetUsd ?? null, limits.maxIterations ?? DEFAULTS.maxIterations,
     limits.maxDurationMs ?? DEFAULTS.maxDurationMs, limits.maxTokens ?? DEFAULTS.maxTokens, events.currentContext());
@@ -291,10 +181,7 @@ async function startRun(agentName: string, limits: Limits): Promise<Run> {
   const resp = await client.startRun(body);
   if (resp.quarantined) throw new AgentQuarantined(agentName, resp.detail);
   // The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
-  for (const [wire, field] of Object.entries(LIMIT_KEYS)) {
-    const v = resp.limits?.[wire];
-    if (typeof v === "number" || (wire === "budget_usd" && v === null)) (run as any)[field] = v;  // eslint-disable-line @typescript-eslint/no-explicit-any
-  }
+  control.adopt(run, resp.limits ?? {}, control.LIMITS, true);
   for (const n of resp.notices ?? []) {
     events.warnOnce(`${agentName}:${n.code}`, `${n.message ?? ""}${n.url ? ` ${n.url}` : ""}`);
   }
@@ -347,8 +234,10 @@ export async function checkpoint(response?: unknown, extra: Extra = {}): Promise
     throw new TypeError("checkpoint() takes the model's response first; pass a cost as checkpoint(null, { costDeltaUsd })");
   }
   const [cost, tokens] = response === undefined || response === null ? [0, 0] : costOf(response);
-  const stepCost = cost + (extra.costDeltaUsd ?? 0), stepTokens = tokens + (extra.tokensUsed ?? 0);
-  run.costUsd += stepCost;
+  const stepCost = cost + checkAmount(extra.costDeltaUsd ?? 0, "costDeltaUsd");
+  const stepTokens = tokens + checkAmount(extra.tokensUsed ?? 0, "tokensUsed");
+  run.costUsd += stepCost;  // the actual cost replaces the holds of model calls that finished
+  precheck.releaseFinished(run);
   run.tokensUsed += stepTokens;
   run.iterations += 1;
   const resp = client ? await client.checkpoint(run.runId, {
@@ -372,6 +261,13 @@ export async function checkpoint(response?: unknown, extra: Extra = {}): Promise
   return result;
 }
 
+/** @internal A cost or count must be a finite number, zero or more: a NaN or negative one would switch the budget off. */
+export function checkAmount(value: unknown, what: string): number {
+  if (typeof value !== "number" || Number.isNaN(value)) throw new TypeError(`${what} must be a number, not ${String(value)}`);
+  if (value < 0 || value === Infinity) throw new RangeError(`${what} must be zero or more and finite, not ${value}`);
+  return value;
+}
+
 /** @internal The breach the run is in by local rules, if any. */
 export function localBreach(run: Run): string | null {
   // Limits trip only once exceeded, same rule as the server; round away float drift (0.02*5 != 0.10)
@@ -385,22 +281,19 @@ export function localBreach(run: Run): string | null {
 function decide(run: Run, resp: Reply | null): CheckpointResult {
   if (!resp || resp.network_error) {
     if (resp) {
-      warnUnreachable(run, resp.network_error);
-      if (failClosed) {
+      const ending = failClosed || !!resp.auth_rejected;  // a key revoked mid-run: the run can't go on unchecked
+      warnUnreachable(run, resp.network_error, ending);
+      if (ending) {
         run.lastBreach = "fences_unreachable";
-        return breachResult(run.lastBreach, run);
+        return finalResult(run);
       }
     }
     run.lastBreach = localBreach(run);
   } else {
     control.apply(run, resp.commands);
     // The server is authoritative: adopt its totals and (on a breach) its current limits
-    run.costUsd = resp.spent_usd ?? run.costUsd;
-    run.iterations = resp.iterations ?? run.iterations;
-    run.tokensUsed = resp.tokens_used ?? run.tokensUsed;
-    for (const [wire, field] of Object.entries(LIMIT_KEYS)) {
-      if (wire in resp) (run as any)[field] = resp[wire];  // eslint-disable-line @typescript-eslint/no-explicit-any
-    }
+    control.adopt(run, resp, control.TOTALS);
+    control.adopt(run, resp, control.LIMITS, true);
     // A fresh breach, or a 409 because the run is still fenced from an earlier one
     run.lastBreach = resp.ok ? null : (resp.breach ?? run.lastBreach ?? "limit_reached");
   }
@@ -418,48 +311,13 @@ function finalResult(run: Run): CheckpointResult {
 
 // ── Decision trail and spans ──────────────────────────────────────────────────
 
-const SPAN_BATCH = 50;
-type Item = { kind: "decision"; runId: string; body: Record<string, unknown> } | { kind: "span"; runId: string; span: Span };
-const outbox: Item[] = [];
-let draining: Promise<void> | null = null;
-let spansSupported = true;
-
-function enqueue(item: Item): void {
-  outbox.push(item);
-  draining ??= drain().finally(() => { draining = null; });
-}
-
-/** Decisions and spans go to the server in the background, in order; consecutive spans of a run go together. */
-async function drain(): Promise<void> {
-  while (outbox.length) {
-    const item = outbox.shift()!;
-    const c = client;
-    if (!c) continue;
-    try {
-      if (item.kind === "decision") {
-        await c.logDecision(item.runId, item.body);
-        continue;
-      }
-      const batch = [item.span];
-      while (outbox[0]?.kind === "span" && outbox[0].runId === item.runId && batch.length < SPAN_BATCH) {
-        batch.push((outbox.shift() as Extract<Item, { kind: "span" }>).span);
-      }
-      if (spansSupported && (await c.logSpans(item.runId, batch)).unsupported) {
-        spansSupported = false;
-        console.warn("agentfences: this Fences server doesn't accept tool and model call spans yet; " +
-          "they're kept on the run locally but not sent");
-      }
-    } catch { /* never let delivery break the agent */ }
-  }
-}
-
 /**
  * Wait up to timeoutMs for queued decisions and spans to reach the server, and for onStop and
  * onQuarantine hooks to finish. Call before a serverless handler returns.
  */
 export async function flush(timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  if (draining) await Promise.race([draining, new Promise((r) => setTimeout(r, timeoutMs).unref())]);
+  await outbox.wait(timeoutMs);
   await control.drain(Math.max(0, deadline - Date.now()));
 }
 
@@ -471,7 +329,7 @@ export function logDecision(reasoning: string, action: string | null = null): vo
   if (!client) return;
   const sent = events.redact({ type: "decision", reasoning, action });
   if (sent && typeof sent.reasoning === "string" && sent.reasoning) {
-    enqueue({ kind: "decision", runId: run.runId,
+    outbox.enqueue({ kind: "decision", client, runId: run.runId,
               body: { iteration: run.iterations, reasoning: sent.reasoning, action: sent.action ?? null } });
   }
 }
@@ -496,10 +354,10 @@ export function recordSpan(name: string, elapsedMs: number, attributes: Record<s
   const span: Span = { name, start_ts: end - elapsedMs / 1000, end_ts: end, status: error === undefined ? "ok" : "error", attributes: attrs };
   run.events.push(span);
   if (run.events.length > MAX_EVENTS_PER_RUN) run.events.shift();  // a runaway agent can't eat memory
-  if (!client || !spansSupported) return;
+  if (!client || !outbox.spansSupported) return;
   const sent = events.redact({ type: "span", ...span });
   if (sent) {
     const { type: _, ...redacted } = sent;  // the type key is for the redact hook only
-    enqueue({ kind: "span", runId: run.runId, span: redacted as unknown as Span });
+    outbox.enqueue({ kind: "span", client, runId: run.runId, span: redacted as unknown as Span });
   }
 }

@@ -1,4 +1,7 @@
-/** HTTP calls to a Fences server, as specified in PROTOCOL.md. Uses the fetch built into Node 18+. */
+/**
+ * HTTP calls to a Fences server, as specified in PROTOCOL.md, with the fetch built into Node 18+.
+ * Nothing throws except a rejected key at run start.
+ */
 import { FencesAuthError } from "./errors.js";
 import { VERSION } from "./version.js";
 
@@ -13,7 +16,7 @@ export class FencesClient {
     this.headers = { "Content-Type": "application/json", "X-API-Key": apiKey, "X-Fences-SDK": `js/${VERSION}` };
   }
 
-  startRun(body: Record<string, unknown>): Promise<Reply> { return this.post("/api/runs/start", body); }
+  startRun(body: Record<string, unknown>): Promise<Reply> { return this.post("/api/runs/start", body, false, true); }
   checkpoint(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/checkpoint`, body); }
   logDecision(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/decisions`, body); }
   endRun(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/end`, body); }
@@ -27,10 +30,12 @@ export class FencesClient {
   requestApproval(runId: string, body: Record<string, unknown>): Promise<Reply> { return this.post(`/api/runs/${runId}/approvals`, body, true); }
 
   /**
-   * optional: an endpoint older servers may not have. A missing route returns
-   * { unsupported: true } and nothing throws, not even a rejected key.
+   * optional: an endpoint older servers may not have. A missing route returns { unsupported: true },
+   * and any other error { ok: false, status }.
+   * start: a rejected key throws FencesAuthError, before any agent code runs. Later in a run it
+   * returns { network_error, auth_rejected: true }: throwing there would replace the agent's own result or error.
    */
-  async post(path: string, payload: unknown, optional = false): Promise<Reply> {
+  async post(path: string, payload: unknown, optional = false, start = false): Promise<Reply> {
     let resp: Response;
     try {
       resp = await fetch(this.endpoint + path, {
@@ -43,7 +48,7 @@ export class FencesClient {
     let body: Reply = {}, isJson = false;
     try {
       const parsed = JSON.parse(text);
-      if (parsed && typeof parsed === "object") [body, isJson] = [parsed, true];
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) [body, isJson] = [parsed, true];  // a list isn't a Fences reply
     } catch { /* not JSON: the status code still decides */ }
     const detail = typeof body.detail === "string" ? body.detail : "";
     if (optional) {
@@ -52,7 +57,10 @@ export class FencesClient {
       }
       return resp.ok ? body : { ok: false, status: resp.status };
     }
-    if (resp.status === 401 || resp.status === 403) throw new FencesAuthError(`Fences API key rejected: ${text}`);
+    if (resp.status === 401 || resp.status === 403) {
+      if (start) throw new FencesAuthError(`Fences API key rejected: ${detail || text.slice(0, 200)}`);
+      return { network_error: `API key rejected (HTTP ${resp.status})`, auth_rejected: true };
+    }
     if (resp.status === 423) return { ok: false, quarantined: true, detail };  // the agent is quarantined: the run must not start
     if (resp.status === 409) return { ok: false, conflict: detail };          // e.g. checkpoint on a run already fenced
     if (!resp.ok || !isJson) return { network_error: resp.ok ? "response was not JSON" : `HTTP ${resp.status}` };

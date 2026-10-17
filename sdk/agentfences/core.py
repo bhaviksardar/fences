@@ -1,222 +1,26 @@
-import time
-import uuid
-import queue
-import atexit
+"""
+init(), @governed and checkpoint(): starting and ending runs, checking every step against
+its limits (the server decides in cloud mode, the same rules apply here otherwise), and
+recording decisions and spans.
+"""
 import asyncio
+import atexit
+import functools
 import inspect
 import logging
-import functools
 import threading
-import contextvars
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Optional, Callable
+import time
+import uuid
+from typing import Callable, Optional
 
-from .exceptions import AgentQuarantined, FencesStop
+from . import control, events, outbox
 from .client import GovClient
+from .exceptions import AgentQuarantined, FencesStop
 from .pricing import cost_of, set_custom_prices
-from . import events, control
+from .results import CheckpointResult, breach_result
+from .run import RunState, get_active_run, reserve_lock, _set_active_run, _reset_active_run
 
 log = logging.getLogger("agentfences")
-
-# The active run is per task/context, not per thread: concurrent asyncio agents
-# share one thread, and nested @governed calls must restore the outer run.
-_active = contextvars.ContextVar("agentfences_run", default=None)
-
-
-# ── CheckpointResult ──────────────────────────────────────────────────────────
-
-@dataclass
-class CheckpointResult:
-    """
-    Returned by checkpoint() after every call.
-
-    If breached is False, the agent is within all limits and should continue.
-    If breached is True, the agent has crossed a limit and should stop or
-    handle gracefully — the message field is ready to return to the user
-    or inject into the LLM conversation as a system message.
-
-    Usage — programmatic check:
-        result = await checkpoint(cost_delta_usd=0.02, tokens_used=450)
-        if result.breached:
-            return result.message
-
-    Usage — inject into LLM conversation:
-        result = await checkpoint(cost_delta_usd=0.02, tokens_used=450)
-        if result.breached:
-            messages.append({"role": "system", "content": result.system_prompt})
-            final = client.chat.completions.create(model=MODEL, messages=messages)
-            return final.choices[0].message.content
-    """
-    breached: bool = False
-    breach_type: Optional[str] = None   # "budget_exceeded" | "iteration_limit" | "time_limit" | "token_limit"
-    message: str = ""                   # human-readable, ready to return to user
-    system_prompt: str = ""             # inject into LLM conversation context
-    spent_usd: float = 0.0              # the run's total spend so far
-
-    @property
-    def ok(self) -> bool:
-        return not self.breached
-
-
-def _make_breach_result(breach_type: str, **kwargs) -> CheckpointResult:
-    messages = {
-        "budget_exceeded": (
-            f"I've reached my budget limit (spent ${kwargs.get('spent', 0):.4f} "
-            f"of ${kwargs.get('limit', 0):.4f}). I'll summarize what I found so far."
-        ),
-        "iteration_limit": (
-            f"I've reached my iteration limit ({kwargs.get('iterations', 0)} steps). "
-            f"I'll summarize what I found so far."
-        ),
-        "time_limit": (
-            f"I've reached my time limit ({kwargs.get('duration_ms', 0)}ms). "
-            f"I'll summarize what I found so far."
-        ),
-        "token_limit": (
-            f"I've reached my token limit ({kwargs.get('tokens_used', 0):,} tokens). "
-            f"I'll summarize what I found so far."
-        ),
-        "stopped_by_user": "I was stopped from the Fences dashboard. I'll summarize what I found so far.",
-        "key_daily_budget": "My daily spending cap has been reached. I'll summarize what I found so far.",
-        "key_monthly_budget": "My monthly spending cap has been reached. I'll summarize what I found so far.",
-        "fences_unreachable": (
-            "I can't reach Fences to confirm I'm within my limits, so I'm stopping to be safe. "
-            "I'll summarize what I found so far."
-        ),
-        "paused": "I was paused from the Fences dashboard and not resumed in time. I'll summarize what I found so far.",
-    }
-
-    system_prompts = {
-        "budget_exceeded": (
-            f"You have reached your budget limit (${kwargs.get('spent', 0):.4f} of "
-            f"${kwargs.get('limit', 0):.4f} spent). Stop your current task immediately "
-            f"and provide a clear summary of what you have found or completed so far. "
-            f"Tell the user you stopped due to budget and what you accomplished."
-        ),
-        "iteration_limit": (
-            f"You have reached your iteration limit ({kwargs.get('iterations', 0)} steps). "
-            f"Stop your current task immediately and summarize what you have found or "
-            f"completed so far. Tell the user you stopped due to the iteration limit."
-        ),
-        "time_limit": (
-            f"You have reached your time limit. Stop your current task immediately "
-            f"and summarize what you have found or completed so far. "
-            f"Tell the user you stopped due to the time limit."
-        ),
-        "token_limit": (
-            f"You have reached your token limit ({kwargs.get('tokens_used', 0):,} tokens used). "
-            f"Stop your current task immediately and summarize what you have found or "
-            f"completed so far. Tell the user you stopped due to the token limit."
-        ),
-        "stopped_by_user": (
-            "A person stopped this run from the Fences dashboard. Stop your current task immediately "
-            "and summarize what you have found or completed so far. Tell the user you were stopped by an operator."
-        ),
-        "key_daily_budget": (
-            "Your daily spending cap, across all of your runs, has been reached. Stop your current task "
-            "immediately and summarize what you have found or completed so far. Tell the user you stopped "
-            "because the daily cap was reached."
-        ),
-        "key_monthly_budget": (
-            "Your monthly spending cap, across all of your runs, has been reached. Stop your current task "
-            "immediately and summarize what you have found or completed so far. Tell the user you stopped "
-            "because the monthly cap was reached."
-        ),
-        "fences_unreachable": (
-            "Your governance service can't be reached and you are configured to stop when that happens. "
-            "Stop your current task immediately and summarize what you have found or completed so far."
-        ),
-        "paused": (
-            "A person paused this run from the Fences dashboard and it was not resumed in time. Stop your current "
-            "task and summarize what you have found or completed so far. Tell the user the run was paused by an operator."
-        ),
-    }
-
-    msg = messages.get(breach_type, "Governance limit reached.")
-    sys_prompt = system_prompts.get(breach_type, "A governance limit has been reached. Summarize what you have done so far.")
-
-    return CheckpointResult(
-        breached=True,
-        breach_type=breach_type,
-        message=msg,
-        system_prompt=sys_prompt,
-    )
-
-
-# ── RunState ──────────────────────────────────────────────────────────────────
-
-def _set_event() -> threading.Event:
-    e = threading.Event()
-    e.set()  # not paused
-    return e
-
-
-MAX_EVENTS_PER_RUN = 1000
-EVENT_BATCH = 50
-
-
-@dataclass
-class RunState:
-    run_id: str
-    agent_name: str
-    budget_usd: Optional[float]  # None: no budget anywhere, unlimited spend
-    max_iterations: int
-    max_duration_ms: int
-    max_tokens: int
-    cost_usd: float = 0.0
-    iterations: int = 0
-    tokens_used: int = 0
-    started_at: float = field(default_factory=time.time)
-    decisions: list = field(default_factory=list)
-    last_breach: Optional[str] = None   # breach from the latest checkpoint; cleared once limits are raised
-    warned: bool = False
-    context: dict = field(default_factory=dict)  # environment, release and agentfences.context() values
-    # Tool and model calls, newest kept. ponytail: capped per run so a runaway agent can't eat memory
-    events: deque = field(default_factory=lambda: deque(maxlen=MAX_EVENTS_PER_RUN))
-    exception: Optional[dict] = None             # type, message and stack if the run raised
-    # Live control from the dashboard (see control.py)
-    stopped: bool = False
-    paused: bool = False
-    pause_expired: bool = False
-    resumed: threading.Event = field(default_factory=lambda: _set_event())
-    approvals: dict = field(default_factory=dict)  # approval_id -> Approval, or None while waiting
-    awaiting: int = 0
-    stopped_at: Optional[float] = None  # monotonic time a stop arrived
-    stop_seen: bool = False             # the agent got the stop from a checkpoint (or a blocked tool)
-    task: Optional[asyncio.Task] = None  # an async run's task, to cancel if a stop goes unseen
-    loop: Optional[asyncio.AbstractEventLoop] = None
-    cancelled: bool = False             # Fences cancelled the task after a stop
-    reserved_usd: float = 0.0           # held by guarded tools and model calls in flight
-    holds: list = field(default_factory=list)  # model calls' worst-case costs: [amount, finished]
-    quarantined: bool = False           # the agent was quarantined from the dashboard while this ran
-    on_breach: Optional[str] = None     # "hold": wait at a limit for someone to raise it
-    held: Optional[str] = None          # while waiting at a limit: "breach" or "budget"
-    acked: set = field(default_factory=set)  # command ids already acknowledged
-
-    @property
-    def duration_ms(self) -> int:
-        return int((time.time() - self.started_at) * 1000)
-
-
-# Checking room in a budget and reserving it is one step, across threads and tasks
-reserve_lock = threading.Lock()
-
-
-def get_active_run() -> Optional[RunState]:
-    return _active.get()
-
-
-def _set_active_run(run: Optional[RunState]):
-    return _active.set(run)
-
-
-def _reset_active_run(token):
-    try:
-        _active.reset(token)
-    except ValueError:  # async generator finalized from a different context
-        pass
-
 
 _client: Optional[GovClient] = None
 _local_only: bool = False
@@ -276,7 +80,11 @@ def init(
     brings back dashboard commands (stop, pause, resume, limits, approval answers). A paused
     run waits at its next checkpoint, for up to pause_timeout_s seconds. If an async run
     doesn't reach a checkpoint within stop_grace_s seconds of a stop (say, it's stuck in a
-    tool), it's cancelled and the governed call raises FencesStop. None never cancels.
+    tool), it's cancelled and the governed call raises FencesStop. A sync run is halted the
+same way: FencesStop is raised in its thread at once if it's running Python code, or as soon
+as a blocking call it's in (a socket read, a sleep) returns (CPython only). A streaming run
+(async generator) is cancelled only while its own code runs, never its consumer's. None
+never halts.
 
     on_stop and on_quarantine run in the agent's process, in a background thread, when a
     stop or quarantine arrives from the dashboard, to contain what Fences can't reach (say,
@@ -311,7 +119,6 @@ def init(
             "Use agentfences.init(local_only=True) for local usage."
         )
     _client = GovClient(api_key=api_key, endpoint=endpoint)
-    _start_decision_worker()
     control.configure(_client, heartbeat_s, pause_timeout_s, stop_grace_s, on_stop, on_quarantine)
 
 
@@ -323,10 +130,11 @@ def _require_init():
         )
 
 
-def _warn_unreachable(run: RunState, err: str):
+def _warn_unreachable(run: RunState, err: str, ending: bool = False):
     if not run.warned:
         run.warned = True
-        log.warning("Fences backend unreachable for run %s (%s); enforcing limits locally", run.run_id, err)
+        log.warning("Fences backend unreachable for run %s (%s); %s", run.run_id, err,
+                    "ending the run" if ending else "enforcing limits locally")
 
 
 # ── Decorator ─────────────────────────────────────────────────────────────────
@@ -382,14 +190,26 @@ def governed(
             async def agen_wrapper(*args, **kwargs):
                 _require_init()
                 run = await asyncio.to_thread(start)
-                token, exc = _set_active_run(run), None
+                run.loop = asyncio.get_running_loop()
+                token, exc, stream = _set_active_run(run), None, func(*args, **kwargs)
                 try:
-                    async for item in func(*args, **kwargs):
+                    while True:
+                        # Cancellable after an unseen stop only while the stream's own code runs, never its consumer's
+                        run.task = asyncio.current_task()
+                        try:
+                            item = await stream.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        finally:
+                            run.task = None
                         yield item
                 except BaseException as e:
-                    exc = e
+                    exc = _stopped(run, e)
+                    if exc is not e:
+                        raise exc from None
                     raise
                 finally:
+                    run.task = None
                     _reset_active_run(token)
                     await asyncio.to_thread(_end_run, run, *_outcome(run, exc))
             return agen_wrapper
@@ -420,9 +240,15 @@ def governed(
             run = start()
             token, exc = _set_active_run(run), None
             try:
-                return func(*args, **kwargs)
+                try:
+                    run.thread = threading.get_ident()  # halted (control.Halt) if a stop goes unseen past stop_grace_s
+                    return func(*args, **kwargs)
+                finally:
+                    control.disarm(run)  # first, so a halt can't land in the cleanup below
             except BaseException as e:
-                exc = e
+                exc = _stopped(run, e)
+                if exc is not e:
+                    raise exc from None
                 raise
             finally:
                 _reset_active_run(token)
@@ -433,11 +259,18 @@ def governed(
 
 
 def _stopped(run: RunState, e: BaseException) -> BaseException:
-    """A cancellation Fences made after an unseen stop becomes FencesStop; anything else is unchanged."""
-    if not (run.cancelled and isinstance(e, asyncio.CancelledError)):
+    """A cancellation or halt Fences made after an unseen stop becomes FencesStop; anything else is unchanged
+    (a halt meant for an outer run passes through an inner one)."""
+    if not run.cancelled:
         return e
-    if hasattr(run.task, "uncancel"):  # 3.11+: the caller's task isn't being cancelled, only this run
-        run.task.uncancel()
+    if isinstance(e, control.Halt):
+        control.disarm(run)  # it may have landed before the code's own disarm
+        return FencesStop(_result(run))
+    if not isinstance(e, asyncio.CancelledError):
+        return e
+    task = asyncio.current_task()
+    if hasattr(task, "uncancel"):  # 3.11+: the caller's task isn't being cancelled, only this run
+        task.uncancel()
     return FencesStop(_result(run))
 
 
@@ -446,6 +279,9 @@ def _outcome(run: RunState, exc: Optional[BaseException]):
     if exc is None or isinstance(exc, GeneratorExit):  # GeneratorExit: consumer stopped a stream early
         return ("breached" if run.last_breach else "success"), None
     if isinstance(exc, FencesStop):  # a framework integration halted the agent on a breach
+        return "breached", None
+    if isinstance(exc, control.Halt):  # an outer run, halted after a stop, took this one with it
+        run.last_breach = run.last_breach or "stopped_by_user"
         return "breached", None
     run.exception = events.exception_info(exc)  # includes cancellation
     e = run.exception
@@ -486,9 +322,7 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
         if resp.get("quarantined"):  # refused before any agent code runs
             raise AgentQuarantined(agent_name, resp.get("detail"))
         # The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
-        for k, v in (resp.get("limits") or {}).items():
-            if k == "budget_usd" and v is None or k in control.LIMIT_FIELDS and isinstance(v, (int, float)):
-                setattr(run, k, v)  # a null budget means the run is unlimited in spend
+        control.adopt(run, resp.get("limits") or {}, control.LIMIT_FIELDS, null_budget=True)
         for n in resp.get("notices") or ():
             _notice(agent_name, n.get("code", ""), n.get("message", "") + (f" {n['url']}" if n.get("url") else ""))
         if "limits" not in resp and run.budget_usd is None and "network_error" not in resp:
@@ -537,21 +371,17 @@ def _decide(run: RunState, resp: Optional[dict]) -> CheckpointResult:
     """
     if resp is None or "network_error" in resp:
         if resp is not None:
-            _warn_unreachable(run, resp["network_error"])
-            if _fail_closed:
+            ending = _fail_closed or bool(resp.get("auth_rejected"))  # a key revoked mid-run: the run can't go on unchecked
+            _warn_unreachable(run, resp["network_error"], ending)
+            if ending:
                 run.last_breach = "fences_unreachable"
-                return _breach(run)
+                return _result(run)
         run.last_breach = _local_breach(run)
     else:
         control.apply(run, resp.get("commands"))
         # Backend is authoritative: adopt its totals and (on a breach) its current limits
-        run.cost_usd = resp.get("spent_usd", run.cost_usd)
-        run.iterations = resp.get("iterations", run.iterations)
-        run.tokens_used = resp.get("tokens_used", run.tokens_used)
-        run.budget_usd = resp.get("budget_usd", run.budget_usd)
-        run.max_iterations = resp.get("max_iterations", run.max_iterations)
-        run.max_tokens = resp.get("max_tokens", run.max_tokens)
-        run.max_duration_ms = resp.get("max_duration_ms", run.max_duration_ms)
+        control.adopt(run, resp, control.TOTAL_FIELDS)
+        control.adopt(run, resp, control.LIMIT_FIELDS, null_budget=True)
         if resp.get("ok"):
             run.last_breach = None
         else:  # a fresh breach, or a 409 because the run is still fenced from an earlier one
@@ -569,7 +399,7 @@ def _result(run: RunState) -> CheckpointResult:
 
 
 def _breach(run: RunState) -> CheckpointResult:
-    result = _make_breach_result(
+    result = breach_result(
         run.last_breach,
         spent=run.cost_usd,
         limit=run.budget_usd or 0,  # None (no budget) can't be formatted; only budget breaches show it
@@ -608,10 +438,27 @@ def _record_step(cost_delta_usd: float, tokens_used: int) -> Optional[RunState]:
     return run
 
 
+def check_amount(value, what: str) -> float:
+    """
+    A cost or count as a float: a finite number, zero or more (an int, float or Decimal). A NaN
+    or negative one would switch the budget off, so it raises instead.
+    """
+    if isinstance(value, (str, bytes, bool)) or not hasattr(value, "__float__"):
+        raise TypeError(f"{what} must be a number, not {value!r}")
+    number = float(value)
+    if number != number:
+        raise TypeError(f"{what} must be a number, not {value!r}")
+    if not 0 <= number < float("inf"):
+        raise ValueError(f"{what} must be zero or more and finite, not {value!r}")
+    return number
+
+
 def _measure(response, cost_delta_usd: float, tokens_used: int):
     """(cost, tokens) for one step: the response's priced usage plus any extra amounts passed."""
     if isinstance(response, (int, float)):  # checkpoint(0.02) would otherwise price 0.02 as a "response"
         raise TypeError("checkpoint() takes the model's response first; pass a cost as checkpoint(cost_delta_usd=...)")
+    cost_delta_usd = check_amount(cost_delta_usd, "cost_delta_usd")
+    check_amount(tokens_used, "tokens_used")
     if response is None:
         return cost_delta_usd, tokens_used
     cost, tokens = cost_of(response)
@@ -681,66 +528,13 @@ def checkpoint_sync(response=None, cost_delta_usd: float = 0.0, tokens_used: int
     return result
 
 
-# ── Decision trail ────────────────────────────────────────────────────────────
-
-# Decisions and events go to the backend from one background thread, in order, so
-# log_decision() and recorded calls never block the agent on a network round trip.
-# Items: ("decision", client, payload) or ("event", client, run_id, event).
-_decisions: "queue.Queue" = queue.Queue()
-_worker: Optional[threading.Thread] = None
-_events_supported = True  # off once a server says it has no events endpoint
-
-
-def _send(item, more: list):
-    """Send one item; consecutive events for the same run go in one request."""
-    global _events_supported
-    if item[0] == "decision":
-        item[1].log_decision(**item[2])
-        return
-    _, client, run_id, event = item
-    batch = [event]
-    while more and more[0][0] == "event" and more[0][2] == run_id and len(batch) < EVENT_BATCH:
-        batch.append(more.pop(0)[3])
-    if _events_supported and client.log_spans(run_id, batch).get("unsupported"):
-        _events_supported = False
-        log.warning("agentfences: this Fences server doesn't accept tool and model call events yet; "
-                    "they're kept on the run locally but not sent")
-
-
-def _decision_worker():
-    pending: list = []
-    while True:
-        if not pending:
-            pending.append(_decisions.get())
-        while True:  # take everything queued so far, so a burst of events goes out together
-            try:
-                pending.append(_decisions.get_nowait())
-            except queue.Empty:
-                break
-        item = pending.pop(0)
-        before = len(pending)
-        try:
-            _send(item, pending)
-        except Exception:
-            pass
-        finally:
-            for _ in range(1 + before - len(pending)):  # this item plus any batched with it
-                _decisions.task_done()
-
-
-def _start_decision_worker():
-    global _worker
-    if _worker is None:
-        _worker = threading.Thread(target=_decision_worker, name="agentfences-decisions", daemon=True)
-        _worker.start()
-
+# ── Decision trail and spans ──────────────────────────────────────────────────
 
 def flush(timeout: float = 5.0):
     """Wait up to `timeout` seconds for queued decisions and events to reach the backend, and for
     on_stop/on_quarantine hooks to finish. Runs automatically at exit; call it yourself in serverless handlers."""
     deadline = time.time() + timeout
-    while _decisions.unfinished_tasks and time.time() < deadline:
-        time.sleep(0.02)
+    outbox.wait(deadline)
     control.drain(max(0.0, deadline - time.time()))  # containment hooks, and command acknowledgements
 
 
@@ -764,12 +558,12 @@ def record_span(name: str, elapsed_s: float, attributes: dict, error: Optional[B
     span = {"name": name, "start_ts": end - elapsed_s, "end_ts": end, "status": "error" if error else "ok", "attributes": attrs}
     run.events.append(span)
     client = _client
-    if client is None or not _events_supported:
+    if client is None or not outbox.spans_supported:
         return
     sent = events.redact({"type": "span", **span})
     if sent:
         sent.pop("type", None)
-        _decisions.put(("event", client, run.run_id, sent))
+        outbox.put_span(client, run.run_id, sent)
 
 
 atexit.register(flush)
@@ -798,5 +592,5 @@ def log_decision(reasoning: str, action: Optional[str] = None):
     client = _client
     sent = events.redact({"type": "decision", "reasoning": reasoning, "action": action}) if client else None
     if sent and sent.get("reasoning"):
-        _decisions.put(("decision", client, {"run_id": run.run_id, "iteration": run.iterations,
-                                             "reasoning": sent["reasoning"], "action": sent.get("action")}))
+        outbox.put_decision(client, {"run_id": run.run_id, "iteration": run.iterations,
+                                     "reasoning": sent["reasoning"], "action": sent.get("action")})

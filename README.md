@@ -35,10 +35,10 @@ This README covers the Python SDK (`pip install agentfences`). There's also a Ty
 |---|---|---|
 | Limits, cost tracking, decision trail, tool calls, run context, redaction | ✅ 0.3.0 | ✅ 0.3.0 |
 | Live control: stop, pause and approvals from the dashboard | ✅ 0.3.0 | ✅ 0.4.0 |
-| Automatic OpenAI/Anthropic recording (`instrument=True`) | ✅ 0.3.0 | not yet |
+| Automatic OpenAI/Anthropic recording (`instrument=True`; TypeScript: `instrument(client)`) | ✅ 0.3.0 | ✅ 0.8.0 |
 | LangChain/LangGraph and OpenAI Agents SDK integrations | ✅ 0.3.0 | not yet |
-| Guarded tools, tool timeouts, halting a stuck run after a stop | ✅ 0.4.0 | ✅ 0.6.0 |
-| Budget prechecks before model calls (needs `instrument=True` or a framework integration) | ✅ 0.4.0 | not yet |
+| Guarded tools, tool timeouts, halting a stuck run after a stop | ✅ 0.4.0 (sync and streaming runs: 0.8.0) | ✅ 0.6.0 |
+| Budget prechecks before model calls (needs instrumentation or a framework integration) | ✅ 0.4.0 | ✅ 0.8.0 |
 | Containment hooks (`on_stop`, `on_quarantine`), acknowledging every dashboard command | ✅ 0.5.2 | ✅ 0.6.0 |
 | Waiting at a limit for someone to raise it (`on_breach="hold"`) | ✅ 0.6.0 | ✅ 0.6.0 |
 
@@ -79,7 +79,7 @@ print(result.spent_usd)  # the run's total so far
 - **Built-in prices:** about 290 models from OpenAI, Anthropic, Google, Mistral, DeepSeek, xAI and Groq, including long-context pricing. They come from [LiteLLM's price list](https://github.com/BerriAI/litellm) and are refreshed each release.
 - **Other models:** a model missing from the table still has its tokens counted, and Fences logs a warning once, because `budget_usd` can't stop a model it can't price. Add prices in USD per 1M tokens:
   ```python
-  agentfences.init(local_only=True, prices={"my-finetune": {"input": 2.0, "output": 6.0}})
+  agentfences.init(local_only=True, prices={"my-finetune": {"input": 2.0, "output": 6.0}})  # input and output are required
   ```
 - **Extra costs:** add a paid tool call or anything else to the step with `checkpoint(response, cost_delta_usd=0.01)`. Without a response, `cost_delta_usd` is the step's whole cost.
 - **Streaming:** pass the final message, or the last chunk once it carries usage (OpenAI: `stream_options={"include_usage": True}`).
@@ -121,7 +121,7 @@ A limit trips once it is exceeded, not when it is reached: a $0.10 budget allows
 
 Every limit is optional. On Fences Cloud, a limit left out of `@governed(...)` comes from the agent's page in the dashboard, so `@governed()` on its own works. Limits set nowhere default to 100 steps, 5 minutes and no token limit, and no budget: the run still starts, but its spend isn't capped, and Fences logs a warning once per agent (and flags the agent in the dashboard).
 
-On Fences Cloud a run can also stop with `stopped_by_user` (someone pressed Stop in the dashboard), `paused` (paused and not resumed in time), `key_daily_budget` or `key_monthly_budget` (the agent's daily or monthly cap across all its runs). With `init(fail_closed=True)`, an unreachable backend stops it with `fences_unreachable`. Each comes with its own `message` and `system_prompt`.
+On Fences Cloud a run can also stop with `stopped_by_user` (someone pressed Stop in the dashboard), `paused` (paused and not resumed in time), `key_daily_budget` or `key_monthly_budget` (the agent's daily or monthly cap across all its runs). With `init(fail_closed=True)`, an unreachable backend stops it with `fences_unreachable`, as does an API key revoked during the run. Each comes with its own `message` and `system_prompt`.
 
 ## Sync agents and streaming
 
@@ -180,7 +180,7 @@ With a framework integration, don't also pass `instrument=True` or decorate tool
 
 In cloud mode the SDK keeps a heartbeat with Fences, so whoever is on call can act on a run while it's going:
 
-- **Stop:** the run's next `checkpoint()` returns `breach_type="stopped_by_user"` with its message, so the agent wraps up gracefully. A stop sticks, whatever later responses say. If an async run doesn't reach a checkpoint within `stop_grace_s` (default 30 seconds) of the stop, because it's stuck in a tool say, it's cancelled and the governed call raises `FencesStop`. `init(stop_grace_s=None)` turns that off. A synchronous run can't be interrupted, so it stops at its next checkpoint or guarded tool.
+- **Stop:** the run's next `checkpoint()` returns `breach_type="stopped_by_user"` with its message, so the agent wraps up gracefully. A stop sticks, whatever later responses say. If an async run doesn't reach a checkpoint within `stop_grace_s` (default 30 seconds) of the stop, because it's stuck in a tool say, it's cancelled and the governed call raises `FencesStop`. `init(stop_grace_s=None)` turns that off. A synchronous run is halted the same way: `FencesStop` is raised in its thread at once if it's running Python code, or as soon as a blocking call it's in (a socket read, a sleep) returns. This needs CPython; elsewhere a sync run stops at its next checkpoint or guarded tool. A streaming run (async generator) is cancelled only while its own code is running, never while its consumer's is.
 - **Pause and resume:** a paused run waits inside its next `checkpoint()` until it's resumed, then carries on. If no one resumes it within `pause_timeout_s` (default one hour), the checkpoint returns `breach_type="paused"`.
 - **Change limits:** new limits apply to the run immediately.
 - **Quarantine:** calling a governed function for a quarantined agent raises `AgentQuarantined` before any of its code runs. Its runs already going hold at their next checkpoint until the quarantine is released, and their guarded tools are blocked.
@@ -328,6 +328,8 @@ If the backend can't be reached, limits are enforced locally and a warning is lo
 ```python
 agentfences.init(api_key="fc_...", endpoint="https://...", fail_closed=True)
 ```
+
+A rejected API key raises `agentfences.FencesAuthError` (a `PermissionError`) when a run starts, before any agent code runs. A key revoked during a run ends it at its next checkpoint with `fences_unreachable`, and blocks its guarded tools.
 
 ## Project layout
 

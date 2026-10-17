@@ -1,16 +1,25 @@
+"""HTTP calls to a Fences server, as specified in PROTOCOL.md. No call raises, except a rejected key at run start."""
+import threading
+from typing import Optional
+
 import requests
 
 from . import __version__
-from typing import Optional
+from .exceptions import FencesAuthError
 
 
 class GovClient:
     def __init__(self, api_key: str, endpoint: str, timeout: float = 3.0):
-        self.api_key = api_key
         # The server uses the SDK version to warn about old SDKs and to skip commands they don't understand
         self.headers = {"X-API-Key": api_key, "X-Fences-SDK": f"python/{__version__}"}
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
+        self._local = threading.local()  # a Session per thread: connections are reused, and Sessions aren't thread-safe
+
+    def _session(self) -> requests.Session:
+        if not hasattr(self._local, "session"):
+            self._local.session = requests.Session()
+        return self._local.session
 
     def start_run(self, run_id: str, agent_name: str, budget_usd: float, max_iterations: int, max_duration_ms: int, max_tokens: int,
                   context: Optional[dict] = None) -> dict:
@@ -24,7 +33,7 @@ class GovClient:
         }
         if context:
             payload["context"] = context
-        return self._post("/api/runs/start", payload)
+        return self._post("/api/runs/start", payload, start=True)
 
     def checkpoint(self, run_id: str, cost_delta_usd: float, iterations: int, duration_ms: int, tokens_used: int) -> dict:
         return self._post(f"/api/runs/{run_id}/checkpoint", {
@@ -66,26 +75,33 @@ class GovClient:
             payload["exception"] = exception
         return self._post(f"/api/runs/{run_id}/end", payload)
 
-    def _post(self, path: str, payload: dict, optional: bool = False) -> dict:
+    def _post(self, path: str, payload: dict, optional: bool = False, start: bool = False) -> dict:
         """
         optional: an endpoint older servers may not have. A missing route returns
-        {"unsupported": True} and no error raises, not even a rejected key.
+        {"unsupported": True}, and any other error {"ok": False, "status": ...}.
+        start: a rejected key raises FencesAuthError, before any agent code runs. Later in a run
+        it returns {"network_error": ..., "auth_rejected": True}: raising there would replace
+        the agent's own result or exception.
         """
         try:
-            resp = requests.post(f"{self.endpoint}{path}", json=payload, headers=self.headers, timeout=self.timeout)
-        except requests.RequestException as e:
+            resp = self._session().post(f"{self.endpoint}{path}", json=payload, headers=self.headers, timeout=self.timeout)
+        except (requests.RequestException, ValueError) as e:  # ValueError: a payload JSON can't encode
             return {"network_error": str(e)}
         try:
-            body, is_json = resp.json(), True
+            body = resp.json()
         except ValueError:  # not JSON: the status code still decides
-            body, is_json = {}, False
-        detail = body.get("detail", "") if isinstance(body, dict) else ""
+            body = None
+        is_json = isinstance(body, dict)  # a list or a bare value isn't a Fences reply either
+        body = body if is_json else {}
+        detail = body.get("detail", "") if isinstance(body.get("detail"), str) else ""
         if optional:
             if resp.status_code in (404, 405) and detail in ("Not Found", "Method Not Allowed"):
                 return {"unsupported": True}
             return body if resp.ok else {"ok": False, "status": resp.status_code}
         if resp.status_code in (401, 403):
-            raise PermissionError(f"Fences API key rejected: {resp.text}")
+            if start:
+                raise FencesAuthError(f"Fences API key rejected: {detail or resp.text[:200]}")
+            return {"network_error": f"API key rejected (HTTP {resp.status_code})", "auth_rejected": True}
         if resp.status_code == 423:  # the agent is quarantined: the run must not start
             return {"ok": False, "quarantined": True, "detail": detail}
         if resp.status_code == 409:  # e.g. checkpoint on a run the server already fenced

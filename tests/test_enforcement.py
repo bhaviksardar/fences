@@ -388,6 +388,139 @@ def check_stop_during_hanging_tool():
         agentfences.init(local_only=True)
 
 
+def _stop_the_live_run(server):
+    wait_for(lambda: server.beats and server.beats[-1])
+    server.heartbeat_commands = [{"run_id": server.beats[-1][0]["run_id"], "type": "stop"}]
+
+
+def check_stuck_sync_run_is_halted():
+    """A sync run that never checkpoints after a stop is halted with FencesStop: at once in Python
+    code (even under `except Exception`), or when a blocking call returns. A halt never lands later."""
+    server = cloud(Server(), stop_grace_s=0.2)
+    try:
+        after = []
+
+        @governed(budget_usd=1)
+        def spins():
+            checkpoint_sync(cost_delta_usd=0.01)
+            while True:
+                try:
+                    sum(range(1000))
+                except Exception:  # an agent's broad handler mustn't swallow the halt
+                    pass
+
+        @governed(budget_usd=1)
+        def sleeps():
+            checkpoint_sync(cost_delta_usd=0.01)
+            while True:
+                time.sleep(0.3)  # blocking: halted when it returns
+
+        for agent in (spins, sleeps):
+            background(lambda: _stop_the_live_run(server))
+            started = time.monotonic()
+            try:
+                agent()
+            except FencesStop as e:
+                assert e.breach_type == "stopped_by_user"
+            else:
+                raise AssertionError(f"{agent.__name__}: a stuck sync run should be halted")
+            after.append(round(time.monotonic() - started, 1))
+            assert server.of("end")[-1]["status"] == "breached", server.of("end")[-1]
+            server.beats.clear()
+        assert all(t < 3 for t in after), after
+
+        @governed(budget_usd=1)
+        def inner():
+            while True:
+                sum(range(1000))
+
+        @governed(budget_usd=1)
+        def outer():
+            checkpoint_sync(cost_delta_usd=0.01)
+            inner()
+
+        background(lambda: _stop_the_live_run(server))
+        try:
+            outer()
+        except FencesStop:
+            pass
+        else:
+            raise AssertionError("the outer run should be halted")
+        inner_end, outer_end = server.of("end")[-2:]
+        assert inner_end == {"status": "breached", "error": None, "exception": None, "breach": "stopped_by_user"}, inner_end
+        assert outer_end["status"] == "breached", outer_end
+        server.beats.clear()
+        for _ in range(200_000):  # nothing is left pending in this thread
+            pass
+
+        # A halt sent just as the run's code finishes is withdrawn, never raised in the caller. The run's
+        # thread is blocked in C, where a pending halt waits, while it's sent and then withdrawn.
+        run = agentfences.core._start_run("racer", 1, None, None, None)
+        gate, armed, outcome = threading.Lock(), threading.Event(), []
+        gate.acquire()
+
+        def run_code():
+            run.thread = threading.get_ident()
+            armed.set()
+            try:
+                gate.acquire()  # blocked here while the halt is sent and withdrawn
+                for _ in range(200_000):
+                    pass
+                outcome.append("not halted")
+            except agentfences.control.Halt:
+                outcome.append("halted after disarm")
+        worker = threading.Thread(target=run_code)
+        worker.start()
+        armed.wait()
+        run.stopped, run.stopped_at = True, time.monotonic() - 1
+        agentfences.control._halt(run)
+        assert run.cancelled
+        agentfences.control.disarm(run)
+        gate.release()
+        worker.join(5)
+        assert outcome == ["not halted"], outcome
+        agentfences.control.unregister(run)
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_stuck_stream_is_cancelled():
+    """A streaming run stuck in its own code after a stop is cancelled with FencesStop; a slow consumer isn't."""
+    server = cloud(Server(), stop_grace_s=0.2)
+    try:
+        @governed(budget_usd=1)
+        async def stream(stall_inside):
+            await checkpoint(cost_delta_usd=0.01)
+            yield 1
+            if stall_inside:
+                await asyncio.sleep(60)
+            yield 2
+
+        async def consume(stall_inside):
+            got = []
+            async for x in stream(stall_inside):
+                got.append(x)
+                if not stall_inside and x == 1:
+                    await asyncio.sleep(1)  # the consumer is slow, not the stream: it's left alone
+            return got
+
+        background(lambda: _stop_the_live_run(server))
+        started = time.monotonic()
+        try:
+            asyncio.run(consume(stall_inside=True))
+        except FencesStop as e:
+            assert e.breach_type == "stopped_by_user" and time.monotonic() - started < 3
+        else:
+            raise AssertionError("a stream stuck after a stop should end with FencesStop")
+        assert server.of("end")[-1]["status"] == "breached"
+
+        server.beats.clear()
+        background(lambda: _stop_the_live_run(server))
+        assert asyncio.run(consume(stall_inside=False)) == [1, 2]  # the stream itself never stalled
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_stop_seen_at_checkpoint_is_not_cancelled():
     """An agent that sees its stop gets to wrap up: summarizing after the stop isn't cut off."""
     server = cloud(Server(), stop_grace_s=0.1)
@@ -633,7 +766,8 @@ if __name__ == "__main__":
         check_refused_call_ends_run_breached, check_guard_counts_model_calls_in_flight,
         check_hold_at_a_breach_until_raised, check_hold_ends_on_stop_or_timeout, check_hold_only_when_someone_can_raise_it,
         check_hold_a_call_until_the_budget_is_raised, check_resume_releases_against_the_raised_limit,
-        check_stop_during_hanging_tool, check_stop_seen_at_checkpoint_is_not_cancelled, check_hanging_tool_times_out,
+        check_stop_during_hanging_tool, check_stuck_sync_run_is_halted, check_stuck_stream_is_cancelled,
+        check_stop_seen_at_checkpoint_is_not_cancelled, check_hanging_tool_times_out,
         check_network_partition,
     ]
     for check in checks:

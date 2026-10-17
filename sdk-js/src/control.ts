@@ -1,29 +1,17 @@
 /**
  * Live control from the Fences dashboard: a heartbeat that reports live runs and brings back
  * commands (stop, pause, resume, quarantine, limits, approval answers) and acknowledges them,
- * containment hooks, pausing at checkpoints, cancelling a run stuck after a stop, and approval
- * requests. Cloud mode only; a server without these endpoints gets one warning and runs carry
+ * containment hooks, pausing at checkpoints, waiting at a limit, and cancelling a run stuck after
+ * a stop. Cloud mode only; a server without these endpoints gets one warning and runs carry
  * on as before. Same behaviour as the Python SDK (PROTOCOL.md, "Live control").
  */
-import { randomUUID } from "node:crypto";
 import type { FencesClient, Reply } from "./client.js";
-import type { Run } from "./core.js";
+import type { Run } from "./run.js";
 
 /** Heartbeat statuses whose acks go again with the next heartbeat: rate limited, or a server error. */
 const retryable = (status: number | undefined) => status === undefined || status === 429 || status >= 500;
 const FAST_MS = 2000;  // heartbeat interval while a run is paused, waiting for an approval, or stopping
 const HOOK_TIMEOUT_MS = 30_000;  // a hook still running after this is reported as timed out
-
-export interface Approval {
-  granted: boolean;
-  /** Who answered, as the dashboard reports it. */
-  by?: string | null;
-  /** Their note, or why no one could answer. */
-  note?: string | null;
-  /** The amount approved, if one was asked for. */
-  amountUsd?: number | null;
-  approvalId?: string | null;
-}
 
 /** What onStop and onQuarantine receive. */
 export interface ControlEvent {
@@ -52,8 +40,8 @@ export interface Control {
   quarantined: boolean;
   /** While waiting at a limit: "breach" or "budget". */
   held: "breach" | "budget" | null;
-  /** approval id -> the answer, or null while waiting */
-  approvals: Map<string, Approval | null>;
+  /** approval id -> the dashboard's answer (an approval command), or null while waiting */
+  approvals: Map<string, Reply | null>;
   awaiting: number;
   /** command ids already acknowledged */
   acked: Set<string>;
@@ -66,6 +54,8 @@ export const newControl = (): Control => ({
 
 const live = new Map<string, Run>();  // run id -> runs in progress
 let client: FencesClient | null = null;
+/** @internal */
+export const _client = (): FencesClient | null => client;
 let intervalMs = 15_000;
 export let pauseTimeoutMs = 3_600_000;
 let stopGraceMs: number | null = 30_000;
@@ -113,7 +103,18 @@ export function unsupported(kind: keyof typeof supported, what: string, conseque
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-const LIMITS = { budget_usd: "budgetUsd", max_iterations: "maxIterations", max_duration_ms: "maxDurationMs", max_tokens: "maxTokens" } as const;
+export const LIMITS = { budget_usd: "budgetUsd", max_iterations: "maxIterations", max_duration_ms: "maxDurationMs", max_tokens: "maxTokens" } as const;
+export const TOTALS = { spent_usd: "costUsd", iterations: "iterations", tokens_used: "tokensUsed" } as const;
+
+/** Set the run's fields from a server reply: numbers only, so a null or odd value can't break local enforcement. nullBudget: a null budget_usd means unlimited spend. */
+export function adopt(run: Run, reply: Reply, fields: Record<string, string>, nullBudget = false): void {
+  for (const [wire, field] of Object.entries(fields)) {
+    const v = reply[wire];
+    if ((typeof v === "number" && !Number.isNaN(v)) || (nullBudget && wire === "budget_usd" && v === null)) {
+      (run as any)[field] = v;  // eslint-disable-line @typescript-eslint/no-explicit-any
+    }
+  }
+}
 
 /** Apply the commands addressed to this run (from a heartbeat or a checkpoint reply), and acknowledge them. Each is safe to apply twice. */
 export function apply(run: Run, commands: Reply[] | undefined): void {
@@ -130,8 +131,10 @@ export function apply(run: Run, commands: Reply[] | undefined): void {
       }
       ctl.paused = ctl.quarantined = false;
     } else if (c.type === "pause" || c.type === "quarantine") {  // a quarantined agent's runs hold at their next checkpoint
-      ctl.paused = true;
-      schedule(0);
+      if (!ctl.paused) {  // only a change wakes the heartbeat: a quarantine is re-sent on every reply while it lasts
+        ctl.paused = true;
+        schedule(0);
+      }
       if (c.type === "quarantine") {
         ctl.quarantined = true;  // guarded tools are blocked here too, even if the server can't be reached
         hook("quarantine", run, c);
@@ -139,13 +142,9 @@ export function apply(run: Run, commands: Reply[] | undefined): void {
     } else if (c.type === "resume") {
       ctl.paused = ctl.quarantined = false;  // releasing a quarantine resumes its runs
     } else if (c.type === "limits") {
-      for (const [wire, field] of Object.entries(LIMITS)) {
-        if (c[wire] !== undefined && c[wire] !== null) (run as any)[field] = c[wire];  // eslint-disable-line @typescript-eslint/no-explicit-any
-      }
+      adopt(run, c, LIMITS);
     } else if (c.type === "approval") {
-      if (ctl.approvals.has(c.approval_id)) {
-        ctl.approvals.set(c.approval_id, { granted: !!c.granted, by: c.by ?? null, note: c.note ?? null, amountUsd: c.amount_usd ?? null });
-      }
+      if (ctl.approvals.has(c.approval_id)) ctl.approvals.set(c.approval_id, c);  // approvals.ts turns it into the answer
     } else {
       continue;  // unknown: ignored, and not acknowledged
     }
@@ -232,7 +231,8 @@ const unseenStop = (r: Run) => r.control.stopped && !r.control.stopSeen && !r.co
 const busy = () => [...live.values()].some((r) => r.control.paused || r.control.awaiting > 0 || unseenStop(r));
 const nextDelay = () => (busy() ? Math.min(FAST_MS, intervalMs, stopGraceMs ?? FAST_MS) : intervalMs);  // faster while busy, never slower
 
-function schedule(delayMs: number): void {
+/** @internal Send a heartbeat after delayMs (0: now), replacing the one scheduled. */
+export function schedule(delayMs: number): void {
   if (timer) clearTimeout(timer);
   timer = null;
   if (!client || !supported.heartbeat || !(live.size || acks.length)) return;
@@ -321,53 +321,4 @@ export async function waitIfPaused(run: Run): Promise<void> {
     }
     await new Promise((ok) => setTimeout(ok, 200));
   }
-}
-
-// ── Approvals ─────────────────────────────────────────────────────────────────
-
-/**
- * Ask a person, through the Fences dashboard, to approve something, and wait for the answer:
- *
- *     const approval = await requestApproval("Refund $240 to order 1182?", { amountUsd: 240 });
- *     if (!approval.granted) return `I didn't issue the refund: ${approval.note}`;
- *
- * If an amount is approved, the run's budget goes up by that much. Returns denied right away in
- * local mode, outside a run, or when the server can't take requests, and denied after timeoutS
- * (default 600) with no answer: it never hangs and never throws.
- */
-export async function requestApproval(reason: string, options: { amountUsd?: number; timeoutS?: number } = {}): Promise<Approval> {
-  const { getActiveRun, recordSpan } = await import("./core.js");
-  const run = getActiveRun();
-  const timeoutS = options.timeoutS ?? 600, amountUsd = options.amountUsd ?? null;
-  if (!run) return { granted: false, note: "requestApproval() was called outside a governed run" };
-  if (!client) return { granted: false, note: "Local mode: there is no one to approve this request" };
-  if (!supported.approvals) return { granted: false, note: "This Fences server doesn't support approvals" };
-
-  const approvalId = randomUUID(), started = performance.now();
-  // timeout_s lets the server expire the request when we stop waiting
-  const resp = await client.requestApproval(run.runId, { approval_id: approvalId, reason, amount_usd: amountUsd, timeout_s: timeoutS });
-  if (resp.unsupported) {
-    unsupported("approvals", "approval requests", "they are denied");
-    return { granted: false, note: "This Fences server doesn't support approvals" };
-  }
-  if (resp.network_error) return { granted: false, note: "Couldn't reach Fences to ask for approval" };
-
-  run.control.approvals.set(approvalId, null);
-  run.control.awaiting += 1;
-  schedule(0);  // poll fast while someone decides
-  const deadline = Date.now() + timeoutS * 1000;
-  while (run.control.approvals.get(approvalId) === null && Date.now() < deadline) {
-    await new Promise((ok) => setTimeout(ok, 100));
-  }
-  run.control.awaiting -= 1;
-  const answer = run.control.approvals.get(approvalId) ?? { granted: false, note: "No answer before the timeout" };
-  answer.approvalId = approvalId;
-  run.control.approvals.delete(approvalId);
-  if (answer.granted && answer.amountUsd && run.budgetUsd !== null) run.budgetUsd += answer.amountUsd;  // an unlimited run stays unlimited
-  recordSpan("fences.approval", performance.now() - started, {  // one span from request to answer
-    "fences.approval.id": approvalId, "fences.approval.reason": reason, "fences.approval.amount_usd": amountUsd,
-    "fences.approval.granted": answer.granted, "fences.approval.by": answer.by, "fences.approval.note": answer.note,
-    "fences.approval.granted_usd": answer.amountUsd,
-  });
-  return answer;
 }

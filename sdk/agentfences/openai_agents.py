@@ -44,8 +44,9 @@ class FencesRunHooks(RunHooks):
     async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
         settings = getattr(agent, "model_settings", None)
         params = {"max_tokens": getattr(settings, "max_tokens", None)}
-        # Before the request goes out: refuse it (FencesStop) if it might not fit the budget.
-        # ponytail: a call that fails holds its amount until the run ends; RunHooks has no model-error hook
+        # RunHooks has no model-error hook: a hold still here belongs to a call that failed, so it was never billed
+        precheck.finish(self._holds.pop(("llm", id(agent)), None), failed=True)
+        # Before the request goes out: refuse it (FencesStop) if it might not fit the budget
         self._holds[("llm", id(agent))] = await precheck.hold_async(_model_name(agent), [system_prompt, input_items], params)
         self._started[("llm", id(agent))] = time.perf_counter()
 
@@ -74,10 +75,10 @@ class FencesRunHooks(RunHooks):
 
 async def run(agent, input: Any, *, agent_name: Optional[str] = None, budget_usd: Optional[float] = None,
               max_iterations: Optional[int] = None, max_duration_ms: Optional[int] = None,
-              max_tokens: Optional[int] = None, **runner_kwargs):
+              max_tokens: Optional[int] = None, on_breach: Optional[str] = None, **runner_kwargs):
     """
     Runner.run(agent, input, **runner_kwargs), governed as one Fences run named after the
-    agent. Limits work as in @governed and are all optional. Raises FencesStop when a
+    agent. Limits and on_breach work as in @governed and are all optional. Raises FencesStop when a
     limit is crossed. For hooks of your own, subclass FencesRunHooks (calling super())
     and pass it to Runner.run inside @governed.
     """
@@ -88,4 +89,4 @@ async def run(agent, input: Any, *, agent_name: Optional[str] = None, budget_usd
     async def governed_run():
         return await Runner.run(agent, input, hooks=FencesRunHooks(), **runner_kwargs)
     governed_run.__name__ = agent_name or getattr(agent, "name", None) or "openai_agent"  # the run's agent name
-    return await core.governed(budget_usd, max_iterations, max_duration_ms, max_tokens)(governed_run)()
+    return await core.governed(budget_usd, max_iterations, max_duration_ms, max_tokens, on_breach)(governed_run)()
