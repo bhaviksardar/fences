@@ -4,6 +4,7 @@ Offline checks for agentfences in local mode: no server, no API key, no network.
     pip install ./sdk && python tests/test_local.py
 """
 import asyncio
+import os
 import logging
 import math
 import socket
@@ -1103,7 +1104,13 @@ if __name__ == "__main__":
         check_client_replies, check_revoked_key_and_odd_replies,
     ]
     for check in checks:
-        check()
+        try:
+            check()
+        except BaseException:
+            if os.environ.get("GITHUB_ACTIONS"):  # an annotation: readable without the job's log
+                import traceback
+                print(f"::error title={check.__name__}::" + traceback.format_exc()[-1500:].replace("\n", "%0A"))
+            raise
         print("ok", check.__name__)
     agentfences.flush()
     print("all local checks passed")
