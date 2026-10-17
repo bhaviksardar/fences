@@ -1,13 +1,13 @@
 # Enforcement guarantees
 
-What Fences guarantees about an agent's limits, at each of its three levels, and what it can't. Each guarantee names the check that proves it, or is marked **(server)** when it rests on the Fences server implementing [PROTOCOL.md](PROTOCOL.md). These live in [`tests/test_enforcement.py`](tests/test_enforcement.py) unless marked otherwise, and run in CI on Python 3.9 to 3.14. This covers the Python SDK 0.5.0. The TypeScript SDK 0.5.0 has the same levels 2 and 3, tested in `sdk-js/test/enforcement.test.mjs`, with two differences. It doesn't precheck model calls (level 1), as it has no model-call instrumentation. And JavaScript can't stop running code, so a stuck run's governed call rejects with `FencesStop` and the run's `signal` aborts, but the agent's work only stops if it uses that signal (see the [support table](README.md#python-and-typescript)).
+What Fences guarantees about an agent's limits, at each of its three levels, and what it can't. Each guarantee names the check that proves it, or is marked **(server)** when it rests on the Fences server implementing [PROTOCOL.md](PROTOCOL.md). These live in [`tests/test_enforcement.py`](tests/test_enforcement.py) unless marked otherwise, and run in CI on Python 3.9 to 3.14. This covers the Python SDK 0.8.0. The TypeScript SDK 0.8.0 has the same three levels, tested in `sdk-js/test/enforcement.test.mjs` and `sdk-js/test/instrument.test.mjs`, with two differences. It prechecks model calls (level 1) made through `instrument(client)` (OpenAI and Anthropic), as it has no framework integrations yet. And JavaScript can't stop running code, so a stuck run's governed call rejects with `FencesStop` and the run's `signal` aborts, but the agent's work only stops if it uses that signal (see the [support table](README.md#python-and-typescript)).
 
 ## The three levels
 
 | Level | What it does | Strength |
 |---|---|---|
 | 1. Budgets and checkpoints | Each model call is prechecked against the budget before it's sent; `checkpoint()` after each step checks spend, steps, time and tokens | **Prevents** overspend on model calls Fences sees; **detects** the other limits after the step that crossed them |
-| 2. Live control | A heartbeat brings stop, pause and limit changes from the dashboard; a stuck async run is cancelled | **Interrupts** a run, including one that isn't checkpointing |
+| 2. Live control | A heartbeat brings stop, pause and limit changes from the dashboard; a stuck run is cancelled or halted | **Interrupts** a run, including one that isn't checkpointing |
 | 3. Guarded tools | `@tool(guard=True)` asks Fences before the tool runs, and reserves its cost | **Prevents** the action: the tool's code never runs unless allowed |
 
 Levels 1 and 2 are cooperative: they work through the agent's own loop. Level 3 is the boundary for actions with consequences. The model can't get past it, because the check sits in the tool's own code, ahead of anything it does.
@@ -21,6 +21,8 @@ Levels 1 and 2 are cooperative: they work through the agent's own loop. Level 3 
 - In cloud mode the server is authoritative. It sees spend from other processes and the key's daily and monthly caps across all of an agent's runs, and the SDK adopts its totals and limits on every reply. Checks: `test_local.py`: `check_server_limits_are_adopted`, `check_dashboard_owned_limits`; key caps **(server)**, tested in `fences-platform` `tests/test_auth.py`.
 - **Network partition:** if the server can't be reached, the SDK enforces the same limits locally with the numbers it last had, or, with `init(fail_closed=True)`, stops the run with `fences_unreachable`. Check: `check_network_partition`.
 - **No retries, no double counting:** the SDK never retries a checkpoint. A checkpoint lost in transit is enforced locally instead of being sent twice.
+- **Costs can't switch the budget off.** A cost that isn't a finite number of zero or more (`NaN`, negative, infinite, a string) raises instead of being added, in `checkpoint()` and in a guarded tool's `cost_usd`; a custom price without an input and an output price is refused at `init()`. A null or non-numeric value in a server reply is ignored rather than adopted. Checks: `test_local.py`: `check_bad_amounts_are_refused`, `check_custom_prices_are_validated`, `check_revoked_key_and_odd_replies`.
+- **A key revoked during a run ends it.** Its next checkpoint returns `fences_unreachable`, and guarded tools are blocked; nothing raises over the agent's own result or exception. Check: `test_local.py`: `check_revoked_key_and_odd_replies`.
 
 **Not guaranteed**
 - **Model calls Fences doesn't see aren't prechecked.** If you call a model yourself and only report it with `checkpoint(response)`, the step that crosses the budget has already been paid for, so the run can overspend by one call. Use `instrument=True` or a framework integration to have every call prechecked.
@@ -34,6 +36,7 @@ Levels 1 and 2 are cooperative: they work through the agent's own loop. Level 3 
 **Guaranteed**
 - **A stop reaches the agent within one heartbeat** (15 seconds by default), even between checkpoints. Its next checkpoint returns `stopped_by_user`, and a stop sticks whatever later replies say. Check: `test_local.py`: `check_heartbeat_stop_and_limits`.
 - **A stop during a hanging tool:** an async run that doesn't reach a checkpoint within `stop_grace_s` (default 30 seconds) of a stop is cancelled. The governed call raises `FencesStop`, the run ends as `breached`, and the heartbeat has already told the server the stop was received. Check: `check_stop_during_hanging_tool`.
+- **A stuck sync run is halted too.** `FencesStop` is raised in its thread: at once in Python code, even under an `except Exception`, or when a blocking call it's in returns. A halt is never left to land after the run's own code has finished. A streaming run stuck in its own code is cancelled, but a slow consumer isn't. Checks: `check_stuck_sync_run_is_halted`, `check_stuck_stream_is_cancelled`.
 - **An agent that saw its stop isn't cut off.** Once a checkpoint (or a blocked tool) has handed the agent its stop, it's never cancelled, so it can write its summary. Check: `check_stop_seen_at_checkpoint_is_not_cancelled`.
 - **Tool timeouts:** `@tool(timeout_s=...)` raises `TimeoutError` in time, whether the tool is async or sync. Check: `check_hanging_tool_times_out`.
 - **Pause** holds the agent at its next checkpoint and expires after `pause_timeout_s`. Check: `test_local.py`: `check_pause_resume_and_timeout`.
@@ -42,9 +45,9 @@ Levels 1 and 2 are cooperative: they work through the agent's own loop. Level 3 
 - **A quarantine blocks guarded tools at once,** in the SDK as well as on the server, without waiting for the pause it brings. Check: `test_local.py`: `check_quarantine_blocks_guarded_tools`.
 
 **Not guaranteed**
-- **Synchronous agents can't be interrupted.** Python can't stop a thread from outside, so a sync run stops at its next checkpoint or guarded tool. A timed-out sync tool keeps running in a background thread; the agent just stops waiting for it.
+- **A sync run stuck inside a blocking call is halted only when that call returns.** Python can't interrupt a thread waiting in C (a socket read with no timeout, a lock), and the halt needs CPython: elsewhere a sync run stops at its next checkpoint or guarded tool. Code that catches `BaseException` and carries on can swallow the halt. A timed-out sync tool keeps running in a background thread; the agent just stops waiting for it.
 - **A dead or cut-off process** can't hear a stop or run its hooks. The server sees no heartbeat and no acknowledgement; it can't end the process. Containment that must happen anyway belongs on the server side: webhooks the server fires, and credentials it can revoke itself.
-- Cancelling covers `async def` agents, not async generators (streaming agents), which stop at their next checkpoint.
+- A streaming run is cancelled only while its own code runs. If its consumer is the part that's stuck, the stream stops at its next checkpoint.
 
 ## Level 3: guarded tools
 

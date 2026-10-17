@@ -166,10 +166,24 @@ def check_model_on_its_own():
         agentfences.init(local_only=True)
 
 
+def check_on_breach_is_passed_on():
+    from uuid import uuid4
+    handler, root = FencesCallbackHandler(on_breach="hold"), uuid4()
+    handler._enter(root, None, "graph")
+    assert handler._runs[root][0].on_breach == "hold"
+    handler._exit(root, None)
+    try:
+        FencesCallbackHandler(on_breach="wait")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("on_breach is checked")
+
+
 if __name__ == "__main__":
     agentfences.init(local_only=True)
     for check in [check_graph_stops_on_budget, check_success_and_tool_errors, check_joins_a_governed_run,
-                  check_async_graph, check_model_on_its_own]:
+                  check_async_graph, check_model_on_its_own, check_on_breach_is_passed_on]:
         check()
         print("ok", check.__name__)
     print("langchain checks passed")

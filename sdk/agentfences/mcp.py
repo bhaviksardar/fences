@@ -40,7 +40,7 @@ def wrap(session, *, guard: Union[bool, Iterable[str]] = (), cost_usd: Mapping[s
             return await original(name, arguments, *args, **kwargs)
         c = costs.get(name)
         guarded = guard is True or name in named or name in costs or name in approve
-        cost = guarded and (lambda: float((c(arguments or {}) if callable(c) else c) or 0))
+        cost = guarded and (lambda: (c(arguments or {}) if callable(c) else c) or 0)
 
         async def call():
             result = await original(name, arguments, *args, **kwargs)

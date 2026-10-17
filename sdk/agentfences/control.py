@@ -1,17 +1,16 @@
 """
 Live control from the Fences dashboard: a heartbeat that reports live runs and brings
 back commands (stop, pause, resume, quarantine, limits, approval answers) and
-acknowledges them, containment hooks, pausing at checkpoints, and approval requests.
+acknowledges them, containment hooks, waiting at a limit, and pausing at checkpoints.
 Cloud mode only; an older server without these endpoints gets one warning and runs
 carry on as before.
 """
 import asyncio
 import atexit
+import ctypes
 import logging
 import threading
 import time
-import uuid
-from dataclasses import dataclass
 from typing import Callable, Optional
 
 log = logging.getLogger("agentfences")
@@ -29,20 +28,10 @@ _interval = 15.0
 pause_timeout_s = 3600.0
 _stop_grace_s: Optional[float] = 30.0
 _supported = {"heartbeat": True, "approvals": True, "guard": True}
-_asked: dict = {}              # approval_id -> (perf_counter at request, reason, amount_usd)
 _hooks: dict = {"stop": None, "quarantine": None}  # init(on_stop=, on_quarantine=)
 _acks: list = []               # acknowledgements waiting for the next heartbeat
 _hooked: set = set()           # quarantine ids whose hook has run in this process
 _running_hooks: list = []      # hook threads still going, waited for at exit
-
-
-@dataclass
-class Approval:
-    granted: bool
-    by: Optional[str] = None          # who answered, as the dashboard reports it
-    note: Optional[str] = None        # their note, or why no one could answer
-    amount_usd: Optional[float] = None  # the amount approved, if one was asked for
-    approval_id: Optional[str] = None
 
 
 def configure(client, heartbeat_s: float, pause_timeout: float, stop_grace_s: Optional[float] = 30.0,
@@ -76,6 +65,21 @@ def unsupported(kind: str, what: str, consequence: str):
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 LIMIT_FIELDS = ("budget_usd", "max_iterations", "max_duration_ms", "max_tokens")
+TOTAL_FIELDS = (("spent_usd", "cost_usd"), ("iterations", "iterations"), ("tokens_used", "tokens_used"))
+
+
+def is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v  # v == v: not NaN
+
+
+def adopt(run, reply: dict, fields, null_budget: bool = False):
+    """Set the run's fields from a server reply: numbers only, so a null or odd value can't break local enforcement.
+    fields: names, or (reply name, run attribute) pairs. null_budget: a null budget_usd means unlimited spend."""
+    for f in fields:
+        src, dst = f if isinstance(f, tuple) else (f, f)
+        v = reply.get(src)
+        if is_number(v) or (null_budget and src == "budget_usd" and src in reply and v is None):
+            setattr(run, dst, v)
 
 
 def apply(run, commands):
@@ -102,13 +106,10 @@ def apply(run, commands):
         elif kind == "resume":
             _resume(run)
         elif kind == "limits":
-            for f in LIMIT_FIELDS:
-                if c.get(f) is not None:
-                    setattr(run, f, c[f])
+            adopt(run, c, LIMIT_FIELDS)
         elif kind == "approval":
             if c.get("approval_id") in run.approvals:
-                run.approvals[c["approval_id"]] = Approval(
-                    granted=bool(c.get("granted")), by=c.get("by"), note=c.get("note"), amount_usd=c.get("amount_usd"))
+                run.approvals[c["approval_id"]] = c  # approvals.py turns it into the answer
         else:
             continue  # unknown: ignored, and not acknowledged
         if c.get("id") and c["id"] not in run.acked:
@@ -206,27 +207,65 @@ def dispatch(commands):
             apply(runs[run_id], commands)
 
 
+# ── Halting a run stuck after a stop ──────────────────────────────────────────
+
+class Halt(BaseException):
+    """
+    Raised inside a sync run's thread when it hasn't seen a stop within stop_grace_s; the
+    governed call turns it into FencesStop. A BaseException, so `except Exception` in the
+    agent doesn't swallow it.
+    """
+
+
+# CPython's way to raise in another thread; elsewhere (PyPy) a stuck sync run isn't halted
+_raise_in = getattr(getattr(ctypes, "pythonapi", None), "PyThreadState_SetAsyncExc", None)
+if _raise_in is not None:
+    _raise_in.argtypes, _raise_in.restype = [ctypes.c_ulong, ctypes.py_object], ctypes.c_int
+
+
 def _unseen_stop(run) -> bool:
-    return run.stopped and not run.stop_seen and run.task is not None and not run.cancelled
+    return (run.stopped and not run.stop_seen and not run.cancelled
+            and (run.task is not None or (run.thread is not None and _raise_in is not None)))
 
 
 def _cancel(run):
     """On the run's event loop: cancel a run that hasn't seen its stop. core turns it into FencesStop."""
-    if _unseen_stop(run):
+    if _unseen_stop(run) and run.task is not None:
         run.cancelled = True
         run.task.cancel()
 
 
+def _halt(run):
+    """Raise Halt in a sync run's thread, once. It lands at the thread's next Python instruction:
+    at once in Python code, or when a blocking call (a socket read, a sleep) returns."""
+    with _lock:  # disarm() takes it too: a halt never lands after the run's code is done
+        if _unseen_stop(run) and run.task is None and run.thread is not None:
+            run.cancelled = True
+            _raise_in(run.thread, Halt)
+
+
+def disarm(run):
+    """The run's own code is done: no halt from here on, and one sent but not yet raised is withdrawn."""
+    with _lock:
+        thread, run.thread = run.thread, None
+        if run.cancelled and thread is not None:
+            _raise_in(thread, ctypes.py_object())  # NULL: clears a pending exception
+
+
 def cancel_overdue(runs):
-    """Cancel async runs that haven't reached a checkpoint within stop_grace_s of a stop."""
+    """Cancel async runs, and halt sync ones, that haven't reached a checkpoint within stop_grace_s of a stop."""
     if _stop_grace_s is None:
         return
     for r in runs:
-        if _unseen_stop(r) and time.monotonic() - r.stopped_at >= _stop_grace_s:
-            try:
-                r.loop.call_soon_threadsafe(_cancel, r)
-            except RuntimeError:  # the loop has closed: the run is over anyway
-                pass
+        if not (_unseen_stop(r) and time.monotonic() - r.stopped_at >= _stop_grace_s):
+            continue
+        if r.task is None:
+            _halt(r)
+            continue
+        try:
+            r.loop.call_soon_threadsafe(_cancel, r)
+        except RuntimeError:  # the loop has closed: the run is over anyway
+            pass
 
 
 def _heartbeat():
@@ -315,85 +354,3 @@ async def wait_if_paused_async(run):
     deadline = time.monotonic() + pause_timeout_s
     while not _pause_over(run, deadline):
         await asyncio.sleep(0.2)
-
-
-# ── Approvals ─────────────────────────────────────────────────────────────────
-
-def _ask(reason: str, amount_usd: Optional[float], timeout_s: float):
-    """Send the request; returns (run, approval_id) to wait on, or an Approval already decided."""
-    from .core import get_active_run
-    run = get_active_run()
-    if run is None:
-        return Approval(False, note="request_approval() was called outside a governed run")
-    if _client is None:
-        return Approval(False, note="Local mode: there is no one to approve this request")
-    if not _supported["approvals"]:
-        return Approval(False, note="This Fences server doesn't support approvals")
-    approval_id = str(uuid.uuid4())
-    _asked[approval_id] = (time.perf_counter(), reason, amount_usd)
-    resp = _client.request_approval(run.run_id, approval_id, reason, amount_usd, timeout_s)  # so the server expires it in step
-    if resp.get("unsupported") or "network_error" in resp:
-        _asked.pop(approval_id, None)
-    if resp.get("unsupported"):
-        unsupported("approvals", "approval requests", "they are denied")
-        return Approval(False, note="This Fences server doesn't support approvals")
-    if "network_error" in resp:
-        return Approval(False, note="Couldn't reach Fences to ask for approval")
-    run.approvals[approval_id] = None
-    run.awaiting += 1
-    _wake.set()  # poll fast while someone decides
-    return run, approval_id
-
-
-def _waiting(run, approval_id: str, deadline: float) -> bool:
-    return run.approvals.get(approval_id) is None and time.monotonic() < deadline
-
-
-def _settle(run, approval_id: str) -> Approval:
-    from .core import record_span
-    run.awaiting -= 1
-    answer = run.approvals.pop(approval_id, None) or Approval(False, note="No answer before the timeout")
-    answer.approval_id = approval_id
-    if answer.granted and answer.amount_usd and run.budget_usd is not None:  # an unlimited run stays unlimited
-        run.budget_usd += answer.amount_usd
-    started, reason, asked_usd = _asked.pop(approval_id, (time.perf_counter(), None, None))
-    record_span("fences.approval", time.perf_counter() - started, {  # one span from request to answer
-        "fences.approval.id": approval_id, "fences.approval.reason": reason,
-        "fences.approval.amount_usd": asked_usd, "fences.approval.granted": answer.granted,
-        "fences.approval.by": answer.by, "fences.approval.note": answer.note,
-        "fences.approval.granted_usd": answer.amount_usd})
-    return answer
-
-
-def request_approval_sync(reason: str, amount_usd: Optional[float] = None, timeout_s: float = 600) -> Approval:
-    """request_approval() for synchronous agents. Same arguments and result."""
-    asked = _ask(reason, amount_usd, timeout_s)
-    if isinstance(asked, Approval):
-        return asked
-    run, approval_id = asked
-    deadline = time.monotonic() + timeout_s
-    while _waiting(run, approval_id, deadline):
-        time.sleep(0.1)
-    return _settle(run, approval_id)
-
-
-async def request_approval(reason: str, amount_usd: Optional[float] = None, timeout_s: float = 600) -> Approval:
-    """
-    Ask a person, through the Fences dashboard, to approve something, and wait for the answer:
-
-        approval = await agentfences.request_approval("Refund $240 to order 1182?", amount_usd=240)
-        if not approval.granted:
-            return f"I didn't issue the refund: {approval.note}"
-
-    If an amount is approved, the run's budget goes up by that much. Returns denied right
-    away in local mode, outside a run, or when the server can't take requests, and denied
-    after timeout_s seconds with no answer: it never hangs and never raises.
-    """
-    asked = await asyncio.to_thread(_ask, reason, amount_usd, timeout_s)
-    if isinstance(asked, Approval):
-        return asked
-    run, approval_id = asked
-    deadline = time.monotonic() + timeout_s
-    while _waiting(run, approval_id, deadline):
-        await asyncio.sleep(0.1)
-    return _settle(run, approval_id)

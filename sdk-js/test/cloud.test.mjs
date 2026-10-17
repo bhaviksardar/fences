@@ -10,9 +10,10 @@ console.warn = (m) => warnings.push(String(m));
 
 // ── fake server ───────────────────────────────────────────────────────────────
 const server = { requests: [], budget: null, spent: 0, limits: null, notices: null, quarantine: false,
-                 rejectKey: false, spansRoute: true };
+                 rejectKey: false, spansRoute: true, revokeAfterStart: false, checkpointReplies: [], refuseApprovals: false };
 const reset = () => Object.assign(server, { requests: [], budget: null, spent: 0, limits: null, notices: null,
-                                             quarantine: false, rejectKey: false, spansRoute: true });
+                                             quarantine: false, rejectKey: false, spansRoute: true, revokeAfterStart: false,
+                                             checkpointReplies: [], refuseApprovals: false });
 const sent = (path) => server.requests.filter((r) => r.path.endsWith(path));
 let base, srv;
 
@@ -24,7 +25,9 @@ before(async () => {
       const body = JSON.parse(raw || "{}");
       server.requests.push({ path: req.url, body, sdk: req.headers["x-fences-sdk"], key: req.headers["x-api-key"] });
       const reply = (status, obj) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
-      if (server.rejectKey) return reply(401, { detail: "Invalid or revoked API key" });
+      if (server.rejectKey || (server.revokeAfterStart && req.url !== "/api/runs/start")) {
+        return reply(401, { detail: "Invalid or revoked API key" });
+      }
       if (req.url === "/api/runs/start") {
         if (server.quarantine) return reply(423, { detail: "quarantined after 3 loops" });
         server.spent = 0;
@@ -33,6 +36,11 @@ before(async () => {
         if (server.notices) r.notices = server.notices;
         return reply(200, r);
       }
+      if (req.url.endsWith("/checkpoint") && server.checkpointReplies.length) {
+        const [status, obj] = server.checkpointReplies.shift();
+        return reply(status, obj);
+      }
+      if (req.url.endsWith("/approvals") && server.refuseApprovals) return reply(422, { detail: "bad request" });
       if (req.url.endsWith("/checkpoint")) {
         server.spent += body.cost_delta_usd;
         if (server.budget !== null && Math.round(server.spent * 1e9) / 1e9 > server.budget) {
@@ -177,4 +185,30 @@ test("context and redaction on run start and end", async () => {
   assert.deepEqual(sent("/api/runs/start")[0].body.context, { environment: "prod", session_id: "s_1" });
   assert.deepEqual(sent("/end")[0].body, { status: "error", error: "redacted" });
   assert.ok(!JSON.stringify(server.requests).includes("alice"));
+});
+
+test("a key revoked mid-run ends the run at its next checkpoint; the agent's result still comes back", async () => {
+  cloud();
+  server.revokeAfterStart = true;
+  const results = await governed(async () => [await checkpoint(null, { costDeltaUsd: 0.01 }), "agent result"], { budgetUsd: 1 })();
+  assert.equal(results[0].breachType, "fences_unreachable");
+  assert.equal(results[1], "agent result");  // endRun's 401 doesn't throw over it
+  await assert.rejects(governed(async () => { throw new TypeError("boom"); }, { budgetUsd: 1 })(), TypeError);  // its own error, not FencesAuthError
+});
+
+test("null or odd numbers in a reply never break local enforcement later", async () => {
+  cloud();
+  server.checkpointReplies = [[200, { ok: true, spent_usd: null, iterations: "3", max_iterations: null, budget_usd: null }],
+                              [500, { detail: "oops" }], [200, ["not", "a", "reply"]]];
+  const [a, b, c] = await governed(async () => [await checkpoint(null, { costDeltaUsd: 0.1 }),
+    await checkpoint(null, { costDeltaUsd: 0.1 }), await checkpoint(null, { costDeltaUsd: 0.1 })], { budgetUsd: 1 })();
+  assert.ok(a.ok && b.ok && c.ok, JSON.stringify([a, b, c]));  // unlimited (null budget); no false iteration_limit
+});
+
+test("an approval request the server refuses is denied at once, not after the timeout", async () => {
+  cloud();
+  server.refuseApprovals = true;
+  const started = Date.now();
+  const answer = await governed(async () => fences.requestApproval("Refund?", { timeoutS: 5 }), { budgetUsd: 1 })();
+  assert.ok(!answer.granted && /HTTP 422/.test(answer.note) && Date.now() - started < 1000, JSON.stringify(answer));
 });

@@ -269,9 +269,9 @@ def check_unknown_model_warns_and_custom_prices():
 
 def check_breach_messages():
     # Server-side stop reasons get their own wording, so an agent can tell the user why it stopped
-    from agentfences.core import _make_breach_result
+    from agentfences.results import breach_result
     for breach in ("stopped_by_user", "key_daily_budget", "key_monthly_budget", "fences_unreachable"):
-        result = _make_breach_result(breach)
+        result = breach_result(breach)
         assert result.breached and result.breach_type == breach
         assert "Governance limit reached" not in result.message, breach
         assert "governance limit has been reached" not in result.system_prompt, breach
@@ -321,7 +321,9 @@ class RecordingClient:
             return {"unsupported": True}
         self.approval_requests.append({"run_id": run_id, "approval_id": approval_id, "reason": reason,
                                        "amount_usd": amount_usd, "timeout_s": timeout_s})
-        return {"ok": True}
+        return self.approval_reply
+
+    approval_reply = {"ok": True}  # set to {"ok": False, "status": 422} for a server that refuses the request
 
     def log_decision(self, run_id, iteration, reasoning, action):
         self.sent.append(("decision", {"reasoning": reasoning, "action": action}))
@@ -547,7 +549,7 @@ def check_old_server_without_events():
         assert len([m for m in seen if "doesn't accept tool and model call events" in m]) == 1, seen
     finally:
         agentfences.init(local_only=True)
-        agentfences.core._events_supported = True
+        agentfences.outbox.spans_supported = True
         logging.getLogger("agentfences").removeHandler(handler)
 
 
@@ -666,6 +668,13 @@ def check_approvals():
             return agentfences.request_approval_sync("Delete the staging DB?", timeout_s=0.3)
         answer = ask_sync()  # nobody answers
         assert not answer.granted and "timeout" in answer.note
+
+        sent.approval_reply = {"ok": False, "status": 422}  # refused: denied now, not after the 600 s timeout
+        started = time.monotonic()
+        approval, _ = asyncio.run(ask())
+        assert not approval.granted and "HTTP 422" in approval.note and time.monotonic() - started < 1, approval
+        assert not agentfences.approvals._asked
+        sent.approval_reply = {"ok": True}
 
         sent.approvals_supported = False
         approval, _ = asyncio.run(ask())
@@ -937,6 +946,123 @@ def check_quarantine():
         agentfences.init(local_only=True)
 
 
+def check_bad_amounts_are_refused():
+    """A NaN, negative or non-number cost would switch the budget off: refused loudly instead."""
+    @agentfences.tool(cost_usd=lambda amount: amount)
+    def pay(amount):
+        ran.append(amount)
+
+    @governed(budget_usd=0.01)
+    def agent(**step):
+        checkpoint_sync(**step)
+
+    for step, error in (({"cost_delta_usd": float("nan")}, TypeError), ({"cost_delta_usd": -100}, ValueError),
+                        ({"cost_delta_usd": float("inf")}, ValueError), ({"cost_delta_usd": "0.02"}, TypeError),
+                        ({"cost_delta_usd": True}, TypeError), ({"tokens_used": -5}, ValueError)):
+        try:
+            agent(**step)
+        except error as e:
+            assert "cost_delta_usd" in str(e) or "tokens_used" in str(e), e
+        else:
+            raise AssertionError(f"checkpoint({step}) should raise {error.__name__}")
+
+    ran = []
+
+    @governed(budget_usd=1)
+    def tools(amount):
+        try:
+            pay(amount)
+        except (TypeError, ValueError) as e:
+            return type(e).__name__, get_active_run().reserved_usd, get_active_run().cost_usd
+    assert tools(-50) == ("ValueError", 0.0, 0.0) and tools(float("nan")) == ("TypeError", 0.0, 0.0) and not ran
+
+    from decimal import Decimal  # money often is: accepted, as a float
+
+    @governed(budget_usd=1)
+    def decimal_amounts():
+        pay(Decimal("0.25"))
+        checkpoint_sync(cost_delta_usd=Decimal("0.05"))
+        return get_active_run().cost_usd, get_active_run().reserved_usd
+    assert decimal_amounts() == (0.3, 0.0) and ran == [Decimal("0.25")]
+
+
+def check_custom_prices_are_validated():
+    for prices in ({"m": {"input": 1.0}}, {"m": {"output": 1.0}}, {"m": {"input": -1, "output": 1}},
+                   {"m": {"input": float("nan"), "output": 1}}, {"m": {"input": "1", "output": 1}}, {"m": 3.0}):
+        try:
+            agentfences.init(local_only=True, prices=prices)
+        except ValueError as e:
+            assert "'m'" in str(e), e
+        else:
+            raise AssertionError(f"init(prices={prices}) should raise ValueError")
+    agentfences.init(local_only=True, prices={"m": {"input": 1.0, "output": 2.0}})
+    assert price_of("m") == {"in": 1e-6, "out": 2e-6}
+    agentfences.init(local_only=True)
+
+
+def check_client_replies():
+    """GovClient never raises mid-run: a revoked key or an odd reply comes back as a value the SDK handles."""
+    from agentfences.client import GovClient
+
+    class Reply:
+        def __init__(self, status, body):
+            self.status_code, self.ok, self._body = status, status < 400, body
+            self.text = body if isinstance(body, str) else str(body)
+
+        def json(self):
+            if isinstance(self._body, str):
+                raise ValueError("not JSON")
+            return self._body
+
+    client, replies = GovClient("fc_test", "http://fences.invalid"), []
+    client._session = lambda: NS(post=lambda *a, **k: replies.pop(0))
+
+    def call(status, body, fn):
+        replies.append(Reply(status, body))
+        return fn()
+    start = lambda: client.start_run("r", "a", 1, None, None, None)
+    try:
+        call(401, {"detail": "Invalid or revoked API key"}, start)
+    except agentfences.FencesAuthError as e:
+        assert isinstance(e, PermissionError) and "revoked" in str(e)
+    else:
+        raise AssertionError("a rejected key at run start should raise FencesAuthError")
+    assert call(403, {"detail": "no"}, lambda: client.checkpoint("r", 0, 1, 0, 0)) == {
+        "network_error": "API key rejected (HTTP 403)", "auth_rejected": True}
+    assert call(401, {"detail": "no"}, lambda: client.end_run("r", "success"))["auth_rejected"]
+    assert call(200, ["not", "a", "dict"], lambda: client.checkpoint("r", 0, 1, 0, 0)) == {"network_error": "response was not JSON"}
+    assert call(200, "<html>", lambda: client.checkpoint("r", 0, 1, 0, 0)) == {"network_error": "response was not JSON"}
+    assert call(404, {"detail": "Not Found"}, lambda: client.guard("r", {})) == {"unsupported": True}
+    assert call(401, {"detail": "no"}, lambda: client.guard("r", {})) == {"ok": False, "status": 401}
+    assert call(200, [1], lambda: client.guard("r", {})) == {}  # not a reply: the guard then fails closed
+
+
+def check_revoked_key_and_odd_replies():
+    """A key revoked mid-run ends the run at its next checkpoint, and the agent's result still comes back.
+    Null or odd numbers in a reply never break local enforcement later."""
+    sent = cloud()
+    try:
+        replies = []
+        sent.checkpoint = lambda *a: replies.pop(0)
+
+        @governed(budget_usd=1)
+        def agent():
+            return [checkpoint_sync(cost_delta_usd=0.1) for _ in range(len(replies))]
+
+        replies[:] = [{"ok": True, "spent_usd": None, "iterations": "3", "max_iterations": None, "budget_usd": None},
+                      {"network_error": "HTTP 500"}]
+        first, second = agent()
+        assert first.ok and second.ok, (first, second)  # unlimited (null budget), 2 steps of 100, no TypeError
+        end = sent.of("end")[-1]
+        assert end["status"] == "success", end
+
+        replies[:] = [{"ok": True}, {"network_error": "API key rejected (HTTP 401)", "auth_rejected": True}]
+        first, second = agent()
+        assert first.ok and second.breach_type == "fences_unreachable" and sent.of("end")[-1]["status"] == "breached"
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_old_server_without_control():
     seen = []
     handler = logging.Handler()
@@ -973,7 +1099,8 @@ if __name__ == "__main__":
         check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit,
         check_resent_quarantine_doesnt_flood_heartbeats, check_acks_survive_a_rate_limited_heartbeat, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
         check_version_is_sent, check_quarantine,
-        check_old_server_without_control,
+        check_old_server_without_control, check_bad_amounts_are_refused, check_custom_prices_are_validated,
+        check_client_replies, check_revoked_key_and_odd_replies,
     ]
     for check in checks:
         check()

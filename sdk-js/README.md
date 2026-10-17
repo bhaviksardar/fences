@@ -30,7 +30,7 @@ const research = governed(async (question: string) => {
 
 Pass the model's response to `checkpoint()` and Fences works out what the call cost from its model and token usage, including cache reads and writes. It understands results from the OpenAI and Anthropic SDKs, the Vercel AI SDK (`generateText`), Gemini and LangChain.js, or any object with the same usage fields. Prices come from a built-in table of about 290 models (the same one as the Python SDK).
 
-- Unknown model: its tokens are counted and Fences warns once. Add prices in USD per 1M tokens: `init({ localOnly: true, prices: { "my-finetune": { input: 2, output: 6 } } })`.
+- Unknown model: its tokens are counted and Fences warns once. Add prices in USD per 1M tokens: `init({ localOnly: true, prices: { "my-finetune": { input: 2, output: 6 } } })`. Both prices are required; an invalid one throws at `init()`.
 - Extra costs, or no response at all: `checkpoint(response, { costDeltaUsd: 0.01 })` or `checkpoint(null, { costDeltaUsd: 0.02, tokensUsed: 450 })`.
 
 ## Limits
@@ -57,7 +57,7 @@ await context({ user_id: "u_123", session_id: "s_9" }, () => research(question))
 init({ apiKey: process.env.FENCES_API_KEY, endpoint: "https://your-fences-host", environment: "prod", release: "v1.4.2" });
 ```
 
-The server is authoritative for limits and sees spend across processes. If it can't be reached, limits are enforced locally; pass `failClosed: true` to stop instead. A rejected key throws `FencesAuthError`; a quarantined agent throws `AgentQuarantined` before any of its code runs. In serverless handlers, `await flush()` before returning so queued decisions and spans are sent.
+The server is authoritative for limits and sees spend across processes. If it can't be reached, limits are enforced locally; pass `failClosed: true` to stop instead. A rejected key throws `FencesAuthError` when the run starts, and a key revoked during a run ends it at its next checkpoint (`fences_unreachable`); a quarantined agent throws `AgentQuarantined` before any of its code runs. A cost that isn't a finite number of zero or more throws instead of being counted. In serverless handlers, `await flush()` before returning so queued decisions and spans are sent.
 
 ## Live control (from 0.4.0)
 
@@ -117,6 +117,23 @@ mcp.wrap(client, { guard: ["send_email"], costUsd: { refund: (args) => args.amou
 
 `guard: true` guards every tool, and `approve: [...]` names tools a person approves first. A result with `isError` is recorded as a failed call and still comes back to the agent.
 
+## Model calls (from 0.8.0)
+
+`instrument(client)` records every OpenAI and Anthropic call made inside a governed run (model, tokens, cost, latency, errors) and checks it against the budget **before** it's sent:
+
+```ts
+import OpenAI from "openai";
+import { instrument } from "agentfences";
+
+const openai = instrument(new OpenAI());  // one call covers every client of that SDK
+```
+
+- If a call's worst case could take the run past its budget, it rejects with `FencesStop` (`budget_exceeded`) and never reaches the provider. The worst case is the request's input, estimated high, plus its output cap: `max_tokens` (or `max_completion_tokens`, `max_output_tokens`) if set, otherwise the model's whole output limit, so **set `max_tokens` on calls in runs with small budgets**.
+- Each call's worst case is held while it's in flight, so parallel calls can't overspend together. A failed call is released; a finished one is replaced by its actual cost, and the next `checkpoint()` releases it. With `onBreach: "hold"`, a call that doesn't fit waits for someone to raise the budget.
+- Calls are recorded, not counted as steps: keep calling `checkpoint(response)`, which adds the cost and checks the other limits.
+- The SDK's own promise comes back, with `.withResponse()` and `.asResponse()`. After `.asResponse()` the call is recorded without usage, and its worst case stays held until the next checkpoint.
+- OpenAI: `chat.completions.create` and `responses.create`, including OpenAI-compatible clients. Anthropic: `messages.create`. Streams are recorded when they start; pass the final usage to `checkpoint()`.
+
 ## Not yet in the TypeScript SDK
 
-The Python SDK also records OpenAI/Anthropic calls automatically (`instrument`) and integrates with LangGraph and the OpenAI Agents SDK. Those are also how it checks a model call against the budget **before** it's sent, so the TypeScript SDK doesn't do that yet: a model call is checked afterwards, by `checkpoint()`, and a run can go over its budget by one call. Everything here follows the same server protocol ([PROTOCOL.md](../PROTOCOL.md)).
+The Python SDK also integrates with LangGraph and the OpenAI Agents SDK. Model calls made without `instrument(client)` are checked afterwards, by `checkpoint()`, so a run can go over its budget by one such call. Everything here follows the same server protocol ([PROTOCOL.md](../PROTOCOL.md)).

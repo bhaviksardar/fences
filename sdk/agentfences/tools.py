@@ -13,8 +13,8 @@ import time
 import uuid
 from typing import Callable, Optional, Union
 
-from . import control, events
-from .core import get_active_run, _local_breach, reserve_lock as _reserve_lock
+from . import approvals, control, events
+from .core import check_amount, get_active_run, _local_breach, reserve_lock as _reserve_lock
 from .exceptions import ToolBlocked
 from .spans import MAX_ARGS, record_tool_call
 
@@ -92,7 +92,7 @@ def _local_check(run, amount: float):
 
 
 def _approve(run, label: str, summary: str, amount: float) -> str:
-    answer = control.request_approval_sync(f"{label}({summary})", amount_usd=amount or None)
+    answer = approvals.request_approval_sync(f"{label}({summary})", amount_usd=amount or None)
     if not answer.granted:
         _block(run, label, f"not approved: {answer.note}" if answer.note else "not approved")
     return answer.approval_id
@@ -164,7 +164,7 @@ def _ask_server(run, client, label: str, summary: str, amount: float, approval_i
         control.unsupported("guard", "guarded tools", "they are blocked")
         _block(run, label, "this Fences server doesn't support guarded tools")
     if "network_error" in resp or "allow" not in resp:  # no answer: fail closed
-        _block(run, label, "couldn't reach Fences to check this call")
+        _block(run, label, "Fences rejected the API key" if resp.get("status") in (401, 403) else "couldn't reach Fences to check this call")
     _block(run, label, resp.get("reason") or "not allowed", resp.get("breach"))
 
 
@@ -185,7 +185,7 @@ async def call_async(run, label: str, summary: str, cost, approve: bool, call: C
     started, gate = time.perf_counter(), None
     try:
         if cost:
-            amount = cost()
+            amount = check_amount(cost(), f"{label}'s cost_usd")  # a NaN or negative amount would let calls past the budget
             gate = (await asyncio.to_thread(_open, run, label, summary, amount, approve), amount)
         out = await call()
     except BaseException as e:
@@ -239,7 +239,7 @@ def tool(func: Optional[Callable] = None, *, name: Optional[str] = None, timeout
         label = name or f.__name__
 
         def amount(args, kwargs) -> float:
-            return float((cost_usd(*args, **kwargs) if callable(cost_usd) else cost_usd) or 0)
+            return (cost_usd(*args, **kwargs) if callable(cost_usd) else cost_usd) or 0
 
         if inspect.iscoroutinefunction(f):
             @functools.wraps(f)
@@ -259,7 +259,7 @@ def tool(func: Optional[Callable] = None, *, name: Optional[str] = None, timeout
             summary, started, gate = args_summary(f, args, kwargs), time.perf_counter(), None
             try:
                 if guarded:
-                    cost = amount(args, kwargs)
+                    cost = check_amount(amount(args, kwargs), f"{label}'s cost_usd")
                     gate = (_open(run, label, summary, cost, approve), cost)
                 out = _timed_sync(f, args, kwargs, timeout_s, label)
             except BaseException as e:

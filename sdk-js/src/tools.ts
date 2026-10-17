@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import * as approvals from "./approvals.js";
 import * as control from "./control.js";
-import { _client, getActiveRun, localBreach, type Run } from "./core.js";
+import { _client, checkAmount, getActiveRun, localBreach, type Run } from "./core.js";
 import { ToolBlocked } from "./errors.js";
 import * as events from "./events.js";
 import { MAX_ARGS, recordToolCall } from "./spans.js";
@@ -27,13 +28,14 @@ const fits = (run: Run, amount: number) =>
   run.budgetUsd === null || Math.round((run.costUsd + run.reservedUsd + amount) * 1e9) / 1e9 <= run.budgetUsd;
 
 async function approve(run: Run, name: string, summary: string, amount: number): Promise<string> {
-  const answer = await control.requestApproval(`${name}(${summary})`, { amountUsd: amount || undefined });
+  const answer = await approvals.requestApproval(`${name}(${summary})`, { amountUsd: amount || undefined });
   if (!answer.granted) block(run, name, answer.note ? `not approved: ${answer.note}` : "not approved");
   return answer.approvalId!;
 }
 
 /** Check a guarded call and reserve its amount; returns the guard id, or throws ToolBlocked. */
 async function open(run: Run, name: string, summary: string, amount: number, needsApproval: boolean): Promise<string> {
+  checkAmount(amount, `${name}'s costUsd`);  // a NaN or negative amount would let calls past the budget
   if (run.control.quarantined) block(run, name, "the agent is quarantined in Fences");  // now, not when the quarantine's pause ends
   if (run.control.paused) await control.waitIfPaused(run);
   if (run.control.pauseExpired) block(run, name, "the run was paused from the Fences dashboard and not resumed in time", "paused");
@@ -83,7 +85,9 @@ async function check(run: Run, client: NonNullable<ReturnType<typeof _client>>, 
       control.unsupported("guard", "guarded tools", "they are blocked");
       block(run, name, "this Fences server doesn't support guarded tools");
     }
-    if (resp.network_error || !("allow" in resp)) block(run, name, "couldn't reach Fences to check this call");  // no answer: fail closed
+    if (resp.network_error || !("allow" in resp)) {  // no answer: fail closed
+      block(run, name, resp.status === 401 || resp.status === 403 ? "Fences rejected the API key" : "couldn't reach Fences to check this call");
+    }
     block(run, name, resp.reason ?? "not allowed", resp.breach ?? null);
   } catch (e) {
     run.reservedUsd -= amount;
@@ -178,7 +182,7 @@ export function tool<A extends unknown[], R>(fn: (...args: A) => R, options: Too
       const run = getActiveRun();
       if (!run) return timed(Promise.resolve().then(() => fn(...args)), options.timeoutS, name) as Promise<Awaited<R>>;
       const c = options.costUsd;
-      return callAsync(run, name, argsSummary(args), guarded ? () => Number((typeof c === "function" ? c(...args) : c) ?? 0) : null,
+      return callAsync(run, name, argsSummary(args), guarded ? () => (typeof c === "function" ? c(...args) : c) ?? 0 : null,
                        !!options.approve, () => timed(Promise.resolve().then(() => fn(...args)), options.timeoutS, name) as Promise<Awaited<R>>);
     };
   }

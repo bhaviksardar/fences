@@ -5,6 +5,11 @@ class FencesError(Exception):
     pass
 
 
+class FencesAuthError(FencesError, PermissionError):
+    """The Fences server rejected the API key when a run started. Raised so a bad key is noticed, not silently ignored.
+    A key revoked during a run ends it at its next checkpoint instead (breach "fences_unreachable")."""
+
+
 class AgentQuarantined(FencesError):
     """Raised when a governed function is called for an agent quarantined in the dashboard.
     No agent code runs; the run never starts."""
@@ -16,9 +21,11 @@ class AgentQuarantined(FencesError):
 
 class FencesStop(FencesError):
     """
-    Raised by framework integrations (e.g. FencesCallbackHandler) when a limit is crossed,
-    because a framework callback can't return a result to the agent. Carries the same
-    breach_type, message and system_prompt as a breached CheckpointResult.
+    Raised when a run is halted from outside the agent's own checkpoint() calls: a framework
+    integration at a crossed limit (a callback can't return a result to the agent), a model
+    call refused by the budget precheck, or an async run stuck after a dashboard stop
+    (stop_grace_s). Carries the same breach_type, message and system_prompt as a breached
+    CheckpointResult.
     """
     def __init__(self, result):
         self.result = result
