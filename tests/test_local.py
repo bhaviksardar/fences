@@ -302,7 +302,7 @@ class RecordingClient:
             resp["notices"] = self.start_notices
         return resp
 
-    def checkpoint(self, *args):
+    def checkpoint(self, *args, **kwargs):
         out, self.checkpoint_commands = self.checkpoint_commands, []
         return {"ok": True, "commands": out}
 
@@ -1044,7 +1044,7 @@ def check_revoked_key_and_odd_replies():
     sent = cloud()
     try:
         replies = []
-        sent.checkpoint = lambda *a: replies.pop(0)
+        sent.checkpoint = lambda *a, **k: replies.pop(0)
 
         @governed(budget_usd=1)
         def agent():
@@ -1060,6 +1060,96 @@ def check_revoked_key_and_odd_replies():
         replies[:] = [{"ok": True}, {"network_error": "API key rejected (HTTP 401)", "auth_rejected": True}]
         first, second = agent()
         assert first.ok and second.breach_type == "fences_unreachable" and sent.of("end")[-1]["status"] == "breached"
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_circuit_breaker():
+    """After 3 failed calls in a row, calls are skipped (no waiting on timeouts) until one test call gets through."""
+    import requests
+    from agentfences.client import GovClient, FAILURES_TO_OPEN
+
+    client, tried, replies = GovClient("fc_test", "http://fences.invalid"), [], []
+
+    def post(*a, **k):
+        tried.append(1)
+        r = replies.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return NS(status_code=r, ok=r < 400, text="", json=lambda: {"ok": True})
+    client._session = lambda: NS(post=post)
+    call = lambda: client.checkpoint("r", 0, 1, 0, 0)
+
+    replies[:] = [requests.ConnectionError("refused"), 503, 429]  # each kind of failure counts
+    assert all("network_error" in call() for _ in range(FAILURES_TO_OPEN)) and len(tried) == 3
+    assert call()["network_error"].startswith("Fences unreachable") and len(tried) == 3  # skipped: open
+
+    client.breaker.open_until = 0  # the pause is over: one test call goes through, and fails again
+    replies[:] = [requests.Timeout("slow")]
+    assert "network_error" in call() and len(tried) == 4
+    assert "network_error" in call() and len(tried) == 4  # open again
+
+    client.breaker.open_until = 0  # the server is back: closed, calls go through again
+    replies[:] = [200, 200]
+    assert call() == {"ok": True} and call() == {"ok": True} and len(tried) == 6
+
+    replies[:] = [400, 422, 401, 200]  # the server answering, even with an error, isn't a failure
+    for _ in range(4):
+        call()
+    assert client.breaker.failures == 0
+
+    replies[:] = [429] * 5  # heartbeats over their own budget don't cut off checkpoints
+    for _ in range(5):
+        client.heartbeat([])
+    assert client.breaker.failures == 0 and len(tried) == 15
+
+
+def check_step_ids_and_one_retry():
+    """Each checkpoint carries its own step_id; once the server shows it counts a step once (by echoing it),
+    a checkpoint that hits a connection error goes once more. Guards always may. Timeouts aren't retried."""
+    import requests
+    from agentfences.client import GovClient
+
+    client, posts, replies = GovClient("fc_test", "http://fences.invalid"), [], []
+
+    def post(url, json=None, **k):
+        posts.append((url.rsplit("/", 1)[-1], json))
+        r = replies.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return NS(status_code=200, ok=True, text="", json=lambda: r)
+    client._session = lambda: NS(post=post)
+    step = lambda sid: client.checkpoint("r", 0.01, 1, 0, 0, step_id=sid)
+
+    replies[:] = [requests.ConnectionError("reset")]  # the server hasn't shown it dedupes: no retry
+    assert "network_error" in step("s1") and len(posts) == 1 and posts[0][1]["step_id"] == "s1"
+    replies[:] = [{"ok": True, "step_id": "s2"}]       # now it has
+    assert step("s2")["ok"] and client.dedupes_steps
+    posts.clear()
+    replies[:] = [requests.ConnectionError("reset"), {"ok": True, "step_id": "s3"}]
+    assert step("s3")["ok"] and [p[1]["step_id"] for p in posts] == ["s3", "s3"]  # the same step, twice
+    posts.clear()
+    replies[:] = [requests.ReadTimeout("slow")]
+    assert "network_error" in step("s4") and len(posts) == 1  # a timeout isn't retried
+    posts.clear()
+    replies[:] = [requests.ConnectTimeout("slow connect")]  # a ConnectionError too, but a timeout
+    assert "network_error" in step("s5") and len(posts) == 1
+    posts.clear()
+    replies[:] = [requests.ConnectionError("reset"), {"allow": True}]
+    assert client.guard("r", {"guard_id": "g1", "phase": "check"}) == {"allow": True} and len(posts) == 2
+
+    # The SDK gives every step its own id
+    sent = cloud()
+    try:
+        ids = []
+        sent.checkpoint = lambda *a, step_id=None, **k: ids.append(step_id) or {"ok": True}
+
+        @governed(budget_usd=1)
+        def agent():
+            checkpoint_sync(cost_delta_usd=0.01)
+            checkpoint_sync(cost_delta_usd=0.01)
+        agent()
+        assert len(ids) == 2 and len(set(ids)) == 2 and all(ids), ids
     finally:
         agentfences.init(local_only=True)
 
@@ -1101,7 +1191,8 @@ if __name__ == "__main__":
         check_resent_quarantine_doesnt_flood_heartbeats, check_acks_survive_a_rate_limited_heartbeat, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
         check_version_is_sent, check_quarantine,
         check_old_server_without_control, check_bad_amounts_are_refused, check_custom_prices_are_validated,
-        check_client_replies, check_revoked_key_and_odd_replies,
+        check_client_replies, check_revoked_key_and_odd_replies, check_circuit_breaker,
+        check_step_ids_and_one_retry,
     ]
     for check in checks:
         try:

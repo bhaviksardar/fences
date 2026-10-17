@@ -12,6 +12,7 @@ import type { Run } from "./run.js";
 const retryable = (status: number | undefined) => status === undefined || status === 429 || status >= 500;
 const FAST_MS = 2000;  // heartbeat interval while a run is paused, waiting for an approval, or stopping
 const HOOK_TIMEOUT_MS = 30_000;  // a hook still running after this is reported as timed out
+const MAX_BACKOFF_MS = 60_000;   // longest wait between heartbeats after failures (jittered)
 
 /** What onStop and onQuarantine receive. */
 export interface ControlEvent {
@@ -63,6 +64,7 @@ const hooks: { stop: Hook | null; quarantine: Hook | null } = { stop: null, quar
 export const supported = { heartbeat: true, approvals: true, guard: true };
 let timer: NodeJS.Timeout | null = null;
 let beating = false;
+const backoff = { failed: 0, nextTry: 0 };  // heartbeats failed in a row, and when the next may go
 let acks: Record<string, unknown>[] = [];   // acknowledgements waiting for the next heartbeat
 const hooked = new Set<string>();           // quarantine ids whose hook has run in this process
 const runningHooks = new Set<Promise<void>>();
@@ -83,6 +85,7 @@ export function configure(c: FencesClient | null, o: ControlOptions): void {
   hooks.stop = o.onStop ?? null;
   hooks.quarantine = o.onQuarantine ?? null;
   supported.heartbeat = supported.approvals = supported.guard = true;
+  Object.assign(backoff, { failed: 0, nextTry: 0 });
   schedule(0);  // a new client or interval takes effect now, not after the old wait
 }
 
@@ -240,6 +243,14 @@ export function schedule(delayMs: number): void {
   timer.unref();  // the heartbeat never keeps the process alive on its own
 }
 
+/** After a failed heartbeat: wait longer before the next, doubling from the shortest interval in use, with jitter,
+ *  so SDKs coming back from the same outage don't all beat at once. */
+function backOff(): void {
+  backoff.failed += 1;
+  const wait = Math.min(Math.min(FAST_MS, intervalMs) * 2 ** (backoff.failed - 1), MAX_BACKOFF_MS);
+  backoff.nextTry = Date.now() + wait * (0.5 + Math.random() / 2);
+}
+
 /** Halt governed calls that haven't reached a checkpoint within stopGraceS of a stop. */
 function cancelOverdue(): void {
   if (stopGraceMs === null) return;
@@ -253,8 +264,8 @@ function cancelOverdue(): void {
 
 async function beat(): Promise<void> {
   timer = null;
-  cancelOverdue();
-  if (beating || !client || !(live.size || acks.length)) return schedule(nextDelay());
+  cancelOverdue();  // local, so it keeps its schedule while heartbeats back off
+  if (beating || !client || !(live.size || acks.length) || Date.now() < backoff.nextTry) return schedule(nextDelay());
   beating = true;
   const runs = [...live.values()], batch = acks;
   acks = [];
@@ -263,15 +274,20 @@ async function beat(): Promise<void> {
       tokens_used: r.tokensUsed, paused: r.control.paused, stopped: r.control.stopped,
       ...(r.control.held ? { held: r.control.held } : {}) })), batch);
     if (resp.network_error || (resp.ok === false && !resp.unsupported)) {
-      if (resp.network_error || retryable(resp.status)) acks = [...batch, ...acks];  // at least once; any other 4xx won't get better
+      if (resp.network_error || retryable(resp.status)) {
+        acks = [...batch, ...acks];  // at least once; any other 4xx won't get better
+        backOff();
+      }
     } else if (resp.unsupported) {
       unsupported("heartbeat", "the heartbeat", "a stop from the dashboard applies at the next checkpoint and pause isn't available");
       return;
     } else {
+      Object.assign(backoff, { failed: 0, nextTry: 0 });
       for (const run of runs) apply(run, (resp.commands as Reply[] | undefined)?.filter((c) => c.run_id === run.runId));
     }
   } catch {
     acks = [...batch, ...acks];  // a failed heartbeat is retried next time
+    backOff();
   } finally {
     beating = false;
   }

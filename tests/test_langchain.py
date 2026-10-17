@@ -80,7 +80,7 @@ class BudgetServer(test_local.RecordingClient):
         super().__init__()
         self.budget, self.spent = budget, 0.0
 
-    def checkpoint(self, run_id, cost_delta_usd, *args):
+    def checkpoint(self, run_id, cost_delta_usd, *args, **kwargs):
         self.spent += cost_delta_usd
         if round(self.spent, 9) > self.budget:
             return {"ok": False, "breach": "budget_exceeded", "spent_usd": self.spent, "budget_usd": self.budget}

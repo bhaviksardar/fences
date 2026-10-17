@@ -9,6 +9,7 @@ import asyncio
 import atexit
 import ctypes
 import logging
+import random
 import threading
 import time
 from typing import Callable, Optional
@@ -18,6 +19,7 @@ log = logging.getLogger("agentfences")
 FAST_S = 2.0  # heartbeat interval while a run is paused or waiting for an approval
 RETRY = {429, *range(500, 600)}  # heartbeat statuses whose acks go again with the next heartbeat
 HOOK_TIMEOUT_S = 30.0  # a hook still running after this is reported as timed out
+MAX_BACKOFF_S = 60.0   # longest wait between heartbeats after failures (jittered)
 
 _live: dict = {}               # run_id -> RunState, for runs in progress
 _lock = threading.Lock()
@@ -40,6 +42,7 @@ def configure(client, heartbeat_s: float, pause_timeout: float, stop_grace_s: Op
     _client, _interval, pause_timeout_s, _stop_grace_s = client, heartbeat_s, pause_timeout, stop_grace_s
     _hooks.update(stop=on_stop, quarantine=on_quarantine)
     _supported.update(heartbeat=True, approvals=True, guard=True)
+    _backoff.update(failed=0, next_try=0.0)
     _wake.set()  # a running heartbeat picks up the new client and interval now, not after its old wait
     if client is not None and (_thread is None or not _thread.is_alive()):  # it ends on a server without the heartbeat
         _thread = threading.Thread(target=_heartbeat, name="agentfences-heartbeat", daemon=True)
@@ -268,6 +271,9 @@ def cancel_overdue(runs):
             pass
 
 
+_backoff = {"failed": 0, "next_try": 0.0}  # heartbeats failed in a row, and when the next may go
+
+
 def _heartbeat():
     while True:
         with _lock:
@@ -276,10 +282,11 @@ def _heartbeat():
         _wake.clear()
         with _lock:
             runs = list(_live.values())
-            acks, _acks[:] = list(_acks), []
-        cancel_overdue(runs)
-        if not (runs or acks) or _client is None:
+        cancel_overdue(runs)  # local, so it keeps its schedule while heartbeats back off
+        if not (runs or _acks) or _client is None or time.monotonic() < _backoff["next_try"]:
             continue
+        with _lock:
+            acks, _acks[:] = list(_acks), []
         try:
             resp = _client.heartbeat([{"run_id": r.run_id, "iterations": r.iterations, "spent_usd": r.cost_usd,
                                        "tokens_used": r.tokens_used, "paused": r.paused, "stopped": r.stopped,
@@ -291,7 +298,13 @@ def _heartbeat():
             if "network_error" in resp or resp.get("status", 500) in RETRY:  # any other 4xx won't get better by resending
                 with _lock:
                     _acks[:0] = acks  # at least once: they go with the next heartbeat
+                # Back off, doubling from the shortest interval in use, with jitter, so SDKs coming back
+                # from the same outage don't all beat at once
+                _backoff["failed"] += 1
+                wait = min(min(FAST_S, _interval) * 2 ** (_backoff["failed"] - 1), MAX_BACKOFF_S)
+                _backoff["next_try"] = time.monotonic() + wait * random.uniform(0.5, 1.0)
             continue
+        _backoff.update(failed=0, next_try=0.0)
         if resp.get("unsupported"):
             unsupported("heartbeat", "the heartbeat", "a stop from the dashboard applies at the next checkpoint and pause isn't available")
             return  # stops then arrive only in checkpoint replies, which the agent sees

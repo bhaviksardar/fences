@@ -331,6 +331,18 @@ agentfences.init(api_key="fc_...", endpoint="https://...", fail_closed=True)
 
 A rejected API key raises `agentfences.FencesAuthError` (a `PermissionError`) when a run starts, before any agent code runs. A key revoked during a run ends it at its next checkpoint with `fences_unreachable`, and blocks its guarded tools.
 
+**When Fences is down.** Agents keep working, and keep their limits:
+
+- Each call to Fences times out after 3 seconds. After 3 failed calls in a row (no connection, a timeout, a 5xx, or a 429 on anything but the heartbeat), the SDK stops calling for about 30 seconds and then lets one call through to test the server (a circuit breaker). An outage costs at most a few slow steps, not 3 seconds on every step.
+- Meanwhile checkpoints are enforced locally with the numbers the SDK last had (or end the run with `fences_unreachable` under `fail_closed=True`), guarded tools are blocked, approvals are denied, and heartbeats back off with jitter.
+- A checkpoint that hits a connection error is sent once more, with the same `step_id`, so the server counts it once. That's only on servers that show they deduplicate steps; a timeout is never retried.
+- Overshoot during a network split: up to one step per process for a limit the server enforces across processes (a daily cap shared with other runs, say), plus any model call that wasn't checked before it was sent. Guarded tools never overshoot: they're blocked.
+- Records that were never sent (decisions, tool and model calls) are lost if the process crashes. Limits aren't affected.
+
+**Overhead per step.** Local mode: about 5 microseconds for `checkpoint(response)` in Python, under 1 in TypeScript. Cloud mode adds one round trip to your Fences server per checkpoint (off the event loop in async agents). Decisions and call records are sent in the background and never add to a step.
+
+**Serverless and short-lived processes.** Call `agentfences.flush()` (TypeScript: `await flush()`) before the handler returns: it sends queued records and lets `on_stop` / `on_quarantine` hooks finish. Behind an HTTP proxy, `requests` (Python) reads `HTTPS_PROXY` and `NO_PROXY` as usual; Node's built-in `fetch` doesn't, so pass a dispatcher yourself if you need a proxy there.
+
 ## Project layout
 
 ```

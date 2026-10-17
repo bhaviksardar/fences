@@ -10,10 +10,10 @@ console.warn = (m) => warnings.push(String(m));
 
 // ── fake server ───────────────────────────────────────────────────────────────
 const server = { requests: [], budget: null, spent: 0, limits: null, notices: null, quarantine: false,
-                 rejectKey: false, spansRoute: true, revokeAfterStart: false, checkpointReplies: [], refuseApprovals: false };
+                 rejectKey: false, spansRoute: true, revokeAfterStart: false, checkpointReplies: [], refuseApprovals: false, echoSteps: false, dropNext: 0 };
 const reset = () => Object.assign(server, { requests: [], budget: null, spent: 0, limits: null, notices: null,
                                              quarantine: false, rejectKey: false, spansRoute: true, revokeAfterStart: false,
-                                             checkpointReplies: [], refuseApprovals: false });
+                                             checkpointReplies: [], refuseApprovals: false, echoSteps: false, dropNext: 0 });
 const sent = (path) => server.requests.filter((r) => r.path.endsWith(path));
 let base, srv;
 
@@ -23,6 +23,11 @@ before(async () => {
     req.on("data", (c) => raw += c);
     req.on("end", () => {
       const body = JSON.parse(raw || "{}");
+      if (server.dropNext && req.url.endsWith("/checkpoint")) {  // the connection drops before any reply
+        server.dropNext -= 1;
+        server.requests.push({ path: req.url, body, dropped: true });
+        return req.socket.destroy();
+      }
       server.requests.push({ path: req.url, body, sdk: req.headers["x-fences-sdk"], key: req.headers["x-api-key"] });
       const reply = (status, obj) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
       if (server.rejectKey || (server.revokeAfterStart && req.url !== "/api/runs/start")) {
@@ -46,7 +51,7 @@ before(async () => {
         if (server.budget !== null && Math.round(server.spent * 1e9) / 1e9 > server.budget) {
           return reply(200, { ok: false, breach: "budget_exceeded", spent_usd: server.spent, budget_usd: server.budget });
         }
-        return reply(200, { ok: true, spent_usd: server.spent });
+        return reply(200, { ok: true, spent_usd: server.spent, ...(server.echoSteps && body.step_id ? { step_id: body.step_id } : {}) });
       }
       if (req.url.endsWith("/spans") && !server.spansRoute) return reply(404, { detail: "Not Found" });
       reply(200, { ok: true });
@@ -211,4 +216,25 @@ test("an approval request the server refuses is denied at once, not after the ti
   const started = Date.now();
   const answer = await governed(async () => fences.requestApproval("Refund?", { timeoutS: 5 }), { budgetUsd: 1 })();
   assert.ok(!answer.granted && /HTTP 422/.test(answer.note) && Date.now() - started < 1000, JSON.stringify(answer));
+});
+
+test("every checkpoint has its own step_id; a dropped one is sent once more once the server dedupes", async () => {
+  cloud();
+  server.dropNext = 1;  // an old server (no echo): the dropped step isn't resent
+  await governed(async () => { await checkpoint(null, { costDeltaUsd: 0.01 }); await checkpoint(null, { costDeltaUsd: 0.01 }); }, { budgetUsd: 1 })();
+  let steps = sent("/checkpoint").map((r) => r.body.step_id);
+  assert.equal(steps.length, 2);
+  assert.ok(steps.every((id) => /^[0-9a-f]{32}$/.test(id)) && steps[0] !== steps[1], JSON.stringify(steps));
+
+  cloud();
+  server.echoSteps = true;
+  await governed(async () => {
+    await checkpoint(null, { costDeltaUsd: 0.01 });  // echoed: this server dedupes
+    server.dropNext = 1;
+    const r = await checkpoint(null, { costDeltaUsd: 0.01 });  // dropped, then sent again with the same step_id
+    assert.ok(r.ok && !r.breached);
+  }, { budgetUsd: 1 })();
+  steps = sent("/checkpoint").map((r) => r.body.step_id);
+  assert.equal(steps.length, 3);
+  assert.equal(steps[1], steps[2]);
 });
