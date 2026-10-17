@@ -183,27 +183,28 @@
       <p class="eyebrow">How it works</p>
       <h2>Wrap the loop. <em>Checkpoint</em> each step.</h2>
       <div class="steps">
-        <div><b>01</b><span><code>pip install agentfences</code> and point it at your Fences key.</span></div>
-        <div><b>02</b><span>Decorate the agent with its limits.</span></div>
-        <div><b>03</b><span>Call <code>checkpoint()</code> after each model call. Breaches come back as a result, not an exception.</span></div>
+        <div><b>01</b><span><code>pip install agentfences</code> (or <code>npm install agentfences</code>) and point it at your Fences key.</span></div>
+        <div><b>02</b><span>Decorate the agent with its limits, and guard the tools that act on the world.</span></div>
+        <div><b>03</b><span>Pass each model response to <code>checkpoint()</code>: Fences prices it. Breaches come back as a result, not an exception.</span></div>
       </div>
     </div>
 <pre><span class="k">import</span> agentfences
 <span class="k">from</span> agentfences <span class="k">import</span> governed, checkpoint, log_decision
 
-agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="s">"https://your-fences-instance.com"</span>)
+agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="s">"https://your-fences-instance.com"</span>,
+                 instrument=<span class="k">True</span>)  <span class="c"># model calls checked against the budget before they're sent</span>
 
-<span class="k">@governed</span>(budget_usd=<span class="s">5.00</span>, max_iterations=<span class="s">300</span>, max_tokens=<span class="s">500_000</span>)
-<span class="k">async def</span> research(messages):
+<span class="k">@agentfences.tool</span>(cost_usd=<span class="k">lambda</span> order, amount: amount, approve=<span class="k">True</span>)
+<span class="k">def</span> issue_refund(order, amount): ...  <span class="c"># runs only if Fences allows it</span>
+
+<span class="k">@governed</span>(budget_usd=<span class="s">5.00</span>, max_iterations=<span class="s">300</span>)
+<span class="k">async def</span> support(messages):
     <span class="k">while True</span>:
-        log_decision(reasoning=<span class="s">"searching sources"</span>, action=<span class="s">"search"</span>)
-        response = call_llm(messages)
+        log_decision(reasoning=<span class="s">"checking the order"</span>, action=<span class="s">"lookup"</span>)
+        response = client.chat.completions.create(model=<span class="s">"gpt-4o"</span>, messages=messages, max_tokens=<span class="s">800</span>)
 
-        result = <span class="k">await</span> checkpoint(
-            cost_delta_usd=cost(response.usage),
-            tokens_used=response.usage.total_tokens,
-        )
-        <span class="k">if</span> result.breached:  <span class="c"># budget_exceeded, iteration_limit, ...</span>
+        result = <span class="k">await</span> checkpoint(response)  <span class="c"># priced from its usage</span>
+        <span class="k">if</span> result.breached:  <span class="c"># budget_exceeded, iteration_limit, stopped_by_user, ...</span>
             messages.append({<span class="s">"role"</span>: <span class="s">"system"</span>, <span class="s">"content"</span>: result.system_prompt})
             <span class="k">return</span> call_llm(messages)  <span class="c"># wrap up gracefully</span></pre>
   </div>
@@ -220,6 +221,9 @@ agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="
       <div class="feature"><span class="num">04</span><h3>Limits agents can't change</h3><p>Per-run ceilings plus daily and monthly spend caps, enforced on the server and set only from the dashboard.</p><div class="chips"><span>agent limits</span><span>server-side</span></div></div>
       <div class="feature"><span class="num">05</span><h3>Raise and resume</h3><p>A run hit its fence but should finish? Raise the limit and it carries on at the next checkpoint. No redeploy.</p><div class="chips"><span>resume</span></div></div>
       <div class="feature"><span class="num">06</span><h3>One key per agent</h3><p>Each agent gets its own key, so one runaway can't spend another's budget, read its runs or report as it.</p><div class="chips"><span>add agent</span><span>isolation</span></div></div>
+      <div class="feature"><span class="num">07</span><h3>Guarded tools</h3><p>Refunds, payments and deploys ask Fences before they run, reserve what they cost, and can wait for a person to approve. Blocked means the code never ran.</p><div class="chips"><span>@tool(guard=True)</span><span>approve</span><span>MCP</span></div></div>
+      <div class="feature"><span class="num">08</span><h3>Budgets checked before the call</h3><p>Each OpenAI or Anthropic call is checked against what's left of the budget, at its worst-case cost, before it's sent. Parallel calls hold their share, so they can't overspend together.</p><div class="chips"><span>instrument</span><span>prechecks</span></div></div>
+      <div class="feature"><span class="num">09</span><h3>Stops that reach a stuck agent</h3><p>A run stuck in a tool after Stop is cut off after a grace period, and your own hook can revoke what it holds. Every command is acknowledged, so you know it landed.</p><div class="chips"><span>on_stop</span><span>quarantine</span><span>acks</span></div></div>
     </div>
   </div>
 </section>
@@ -229,9 +233,9 @@ agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="
     <p class="eyebrow">FAQ</p>
     <h2>Questions.</h2>
     <div class="faq">
-      <details><summary>Does Fences call my LLM or see my prompts?</summary><p>No. Your agent reports cost, tokens and an optional short reasoning note at each checkpoint. Prompts and completions never leave your infrastructure.</p></details>
-      <details><summary>What happens when a limit is crossed?</summary><p>The checkpoint returns <code>breached</code> with the reason: a run limit (<code>budget_exceeded</code>, <code>iteration_limit</code>, <code>time_limit</code>, <code>token_limit</code>), the agent's daily or monthly cap, or <code>stopped_by_user</code> when someone stopped it. The agent gets a ready-made message to wrap up with, and further checkpoints are refused until you raise the limit.</p></details>
-      <details><summary>Which frameworks does it work with?</summary><p>Anything with a loop. Fences doesn't care whether you use raw API calls, LangChain or your own orchestrator. You call <code>checkpoint()</code> where a step ends.</p></details>
+      <details><summary>Does Fences call my LLM or see my prompts?</summary><p>No. Your agent reports cost, tokens, the model's name, an optional reasoning note, and short summaries of tool calls (name and arguments, capped at 300 characters). Prompts and completions never leave your infrastructure, and a <code>redact</code> hook sees everything before it's sent, so you can change or drop any of it.</p></details>
+      <details><summary>What happens when a limit is crossed?</summary><p>The checkpoint returns <code>breached</code> with the reason: a run limit (<code>budget_exceeded</code>, <code>iteration_limit</code>, <code>time_limit</code>, <code>token_limit</code>), the agent's daily or monthly cap, or <code>stopped_by_user</code> when someone stopped it. The agent gets a ready-made message to wrap up with, and further checkpoints are refused until you raise the limit. With <code>on_breach="hold"</code> the run waits instead, and carries on once someone raises the limit.</p></details>
+      <details><summary>Which frameworks does it work with?</summary><p>Anything with a loop, in Python or TypeScript. Raw OpenAI and Anthropic calls are recorded and checked against the budget before they're sent (<code>instrument=True</code>, or <code>instrument(client)</code> in TypeScript); LangChain, LangGraph and the OpenAI Agents SDK need no decorators; MCP tool calls are recorded and can be guarded. Otherwise you call <code>checkpoint()</code> where a step ends.</p></details>
       <details><summary>Can I try it without an account?</summary><p>Yes. <code>agentfences.init(local_only=True)</code> enforces limits in-process with no key. Add an API key when you want the dashboard and the stored audit trail.</p></details>
       <details><summary>How do I sign in?</summary><p>Google, GitHub, Microsoft, Apple, email and password, or your company's SAML/OIDC SSO.</p></details>
     </div>
@@ -251,7 +255,7 @@ agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="
     <div><span class="logo">(|=|) Fences</span><p style="margin-top:8px">© 2026 Fences</p></div>
     <div class="cols">
       <div><b>Product</b><a href="#workflow">Workflow</a><a href="#how">How it works</a><a href="#features">Features</a><a href="docs/">Docs</a></div>
-      <div><b>Code</b><a href="https://github.com/bhaviksardar/fences">GitHub</a><a href="https://pypi.org/project/agentfences/">PyPI</a><a href="docs/">Docs</a></div>
+      <div><b>Code</b><a href="https://github.com/bhaviksardar/fences">GitHub</a><a href="https://pypi.org/project/agentfences/">PyPI</a><a href="https://www.npmjs.com/package/agentfences">npm</a><a href="docs/">Docs</a></div>
     </div>
   </div>
 </footer>
