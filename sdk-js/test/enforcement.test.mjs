@@ -164,7 +164,7 @@ test("guards fail closed: unreachable or unsupported servers block the tool", as
   cloud();
   server.down = true;
   assert.match((await agent()).reason, /couldn't reach Fences/);
-  server.down = false;
+  cloud();  // a fresh client: the outage opened this one's circuit breaker
   server.guardRoute = false;
   warnings.length = 0;
   assert.match((await agent()).reason, /doesn't support guarded tools/);
@@ -424,4 +424,51 @@ test("a guarded tool denied for budget waits for a raise, then runs, re-checked 
   const checks = server.guards.filter((g) => g.phase === "check");
   assert.deepEqual(ran, [1]);
   assert.ok(checks.length >= 2 && new Set(checks.map((g) => g.guard_id)).size === 1);
+});
+
+test("the circuit breaker: after 3 failed calls in a row, calls are skipped until one test call gets through", async () => {
+  const { FencesClient, FAILURES_TO_OPEN } = await import("../dist/client.js");
+  const client = new FencesClient("fc_test", base);
+  let tried = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (...a) => { tried += 1; return realFetch(...a); };
+  try {
+    server.down = true;  // 503s
+    for (let i = 0; i < FAILURES_TO_OPEN; i++) assert.ok((await client.checkpoint("r", {})).network_error);
+    assert.equal(tried, 3);
+    assert.match((await client.checkpoint("r", {})).network_error, /calls paused/);
+    assert.equal(tried, 3, "skipped while open: no waiting on a timeout");
+    client.breaker.openUntil = 0;  // the pause is over: one test call, which fails, and it's open again
+    await client.checkpoint("r", {});
+    await client.checkpoint("r", {});
+    assert.equal(tried, 4);
+    server.down = false;
+    client.breaker.openUntil = 0;  // back up: closed again
+    await client.checkpoint("r", {});
+    await client.checkpoint("r", {});
+    assert.equal(tried, 6);
+    assert.equal(client.breaker.failures, 0);
+    server.rateLimitAcks = true;  // a heartbeat over its own budget (429) doesn't count against checkpoints
+    await client.heartbeat([], [{ id: "x" }]);
+    assert.equal(client.breaker.failures, 0);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("heartbeats back off while they fail, and recover once the server answers", async () => {
+  cloud({ heartbeatS: 0.05 });
+  server.down = true;
+  const client = (await import("../dist/core.js"))._client();
+  const attempts = [];
+  const heartbeat = client.heartbeat.bind(client);
+  client.heartbeat = (...a) => { attempts.push(Date.now()); return heartbeat(...a); };  // counted before the breaker
+  await governed(async () => {
+    await checkpoint(null, { costDeltaUsd: 0.01 });
+    await sleep(1500);  // without backoff: about 30 heartbeats
+  }, { budgetUsd: 1 })();
+  server.down = false;
+  assert.ok(attempts.length >= 2 && attempts.length <= 9, String(attempts.length));
+  const gaps = attempts.slice(1).map((t, i) => t - attempts[i]);
+  assert.ok(gaps.at(-1) > gaps[0], JSON.stringify(gaps));  // the waits grow
 });

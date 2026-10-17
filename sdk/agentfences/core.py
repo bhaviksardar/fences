@@ -360,7 +360,8 @@ def _local_breach(run: RunState) -> Optional[str]:
 
 
 def _server_check(run: RunState, cost_delta_usd: float, tokens_delta: int) -> dict:
-    return _client.checkpoint(run.run_id, cost_delta_usd, run.iterations, run.duration_ms, tokens_delta)
+    # A step_id per step: a retried checkpoint is counted once on servers that support it
+    return _client.checkpoint(run.run_id, cost_delta_usd, run.iterations, run.duration_ms, tokens_delta, step_id=uuid.uuid4().hex)
 
 
 def _decide(run: RunState, resp: Optional[dict]) -> CheckpointResult:

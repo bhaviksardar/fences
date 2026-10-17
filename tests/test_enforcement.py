@@ -29,7 +29,7 @@ class Server(RecordingClient):
 
     breach = None  # set to make every checkpoint reply breached, like a run over its limit
 
-    def checkpoint(self, *args):
+    def checkpoint(self, *args, **kwargs):
         if not self.reachable:
             return {"network_error": "connection refused"}
         if self.breach:
@@ -738,6 +738,31 @@ async def _tick(ticks):
 
 # ── Level 1: limits hold when the server doesn't answer ───────────────────────
 
+def check_heartbeats_back_off_while_failing():
+    """A failing server gets fewer and fewer heartbeats (with jitter), not one every interval; they recover once it answers."""
+    server = cloud(Server())  # heartbeats every 0.05 s
+    try:
+        server.reachable = False
+        failed = []
+        real = server.heartbeat
+        server.heartbeat = lambda runs, acks=None: (failed.append(time.monotonic()) or {"network_error": "down"}) \
+            if not server.reachable else real(runs, acks)
+
+        @governed(budget_usd=1)
+        def agent():
+            checkpoint_sync(cost_delta_usd=0.01)
+            time.sleep(1.5)  # without backoff: about 30 heartbeats
+            server.reachable = True
+            wait_for(lambda: server.beats)  # back to normal once the server answers
+            return len(failed)
+        n = agent()
+        assert 2 <= n <= 9, n
+        gaps = [b - a for a, b in zip(failed, failed[1:])]
+        assert gaps[-1] > gaps[0], gaps  # the waits grow
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_network_partition():
     server = cloud(Server())
     server.reachable = False
@@ -770,7 +795,7 @@ if __name__ == "__main__":
         check_hold_a_call_until_the_budget_is_raised, check_resume_releases_against_the_raised_limit,
         check_stop_during_hanging_tool, check_stuck_sync_run_is_halted, check_stuck_stream_is_cancelled,
         check_stop_seen_at_checkpoint_is_not_cancelled, check_hanging_tool_times_out,
-        check_network_partition,
+        check_network_partition, check_heartbeats_back_off_while_failing,
     ]
     for check in checks:
         try:

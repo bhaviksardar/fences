@@ -3,6 +3,7 @@
  * its limits (the server decides in cloud mode, the same rules apply here otherwise), and
  * recording decisions and spans.
  */
+import { randomUUID } from "node:crypto";
 import { FencesClient, type Reply } from "./client.js";
 import * as control from "./control.js";
 import { AgentQuarantined, FencesStop } from "./errors.js";
@@ -240,8 +241,9 @@ export async function checkpoint(response?: unknown, extra: Extra = {}): Promise
   precheck.releaseFinished(run);
   run.tokensUsed += stepTokens;
   run.iterations += 1;
-  const resp = client ? await client.checkpoint(run.runId, {
-    cost_delta_usd: stepCost, tokens_used: stepTokens, iterations: run.iterations, duration_ms: run.durationMs }) : null;
+  // A step_id per step: a retried checkpoint is counted once on servers that support it
+  const resp = client ? await client.checkpoint(run.runId, { cost_delta_usd: stepCost, tokens_used: stepTokens,
+    iterations: run.iterations, duration_ms: run.durationMs, step_id: randomUUID().replaceAll("-", "") }) : null;
   const result = decide(run, resp);
   // onBreach "hold": wait here for someone to raise the limit. Only a breach the server decided: an unreachable one can't be raised
   if (result.breachType && control.HOLDABLE.has(result.breachType) && control.holds(run) && resp && !resp.network_error) {
