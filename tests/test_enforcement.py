@@ -6,6 +6,7 @@ No network: the server is a stand-in.
     pip install ./sdk && python tests/test_enforcement.py
 """
 import asyncio
+import os
 import contextvars
 import logging
 import math
@@ -772,6 +773,12 @@ if __name__ == "__main__":
         check_network_partition,
     ]
     for check in checks:
-        check()
+        try:
+            check()
+        except BaseException:
+            if os.environ.get("GITHUB_ACTIONS"):  # an annotation: readable without the job's log
+                import traceback
+                print(f"::error title={check.__name__}::" + traceback.format_exc()[-1500:].replace("\n", "%0A"))
+            raise
         print("ok", check.__name__)
     print("all enforcement checks passed")
