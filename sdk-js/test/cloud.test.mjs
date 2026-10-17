@@ -149,7 +149,7 @@ test("quarantine, bad keys and an unreachable server", async () => {
 });
 
 test("spans are sent in batches, redacted; an older server without /spans gets one warning", async () => {
-  cloud({ redact: (e) => {
+  cloud({ toolArguments: "full", redact: (e) => {  // values, so the redact hook has something to scrub
     if (e.type !== "span") return e;
     if (e.attributes["gen_ai.tool.name"] === "secret") return null;
     e.attributes["gen_ai.tool.call.arguments"] = e.attributes["gen_ai.tool.call.arguments"].replace("hunter2", "***");

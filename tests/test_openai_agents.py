@@ -80,7 +80,7 @@ def check_stops_on_budget():
         assert len(llm) == 3 and all(math.isclose(a["fences.cost_usd"], PER_CALL) for a in llm), llm
         assert llm[0]["gen_ai.request.model"] == "gpt-4o" and llm[0]["gen_ai.provider.name"] == "openai"
         assert llm[0]["gen_ai.usage.input_tokens"] == 1000 and llm[0]["gen_ai.usage.cache_read.input_tokens"] == 400
-        assert len(tools) == 3 and tools[0]["gen_ai.tool.name"] == "lookup" and tools[0]["gen_ai.tool.call.arguments"] == '{"query": "q1"}'
+        assert len(tools) == 3 and tools[0]["gen_ai.tool.name"] == "lookup" and tools[0]["gen_ai.tool.call.arguments"] == "query"
         assert tools[0]["gen_ai.tool.call.id"] == "c1", tools[0]
     finally:
         agentfences.init(local_only=True)

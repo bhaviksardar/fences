@@ -113,6 +113,7 @@ def check_parallel_calls_cannot_overspend():
         assert round(server.spent, 9) == 0.8 and not server.held, (server.spent, server.held)
         checks = [g for g in server.guards if g["phase"] == "check"]
         assert {"guard_id", "tool", "arguments", "amount_usd", "approval_id"} <= set(checks[0]) and checks[0]["tool"] == "refund"
+        assert checks[0]["arguments"] == "amount=0.4"  # the check gets values (rules need them); the span only names
     finally:
         agentfences.init(local_only=True)
 
@@ -257,7 +258,7 @@ def check_mcp_session_calls_are_recorded_and_guarded():
     a = [e["attributes"] for e in spans]
     assert [(x["gen_ai.tool.name"], e["status"]) for x, e in zip(a, spans)] == [
         ("search", "ok"), ("broken", "error"), ("send_email", "ok"), ("refund", "ok"), ("refund", "error")], spans
-    assert a[0]["gen_ai.tool.call.arguments"] == "q='cats'" and a[1]["error.type"] == "MCPToolError"
+    assert a[0]["gen_ai.tool.call.arguments"] == "q" and a[1]["error.type"] == "MCPToolError"
     checks = [(g["tool"], g["amount_usd"]) for g in server.guards if g["phase"] == "check"]
     assert checks == [("send_email", 0.0), ("refund", 0.7)], checks  # the second refund is refused here, over what the run already spent
     assert round(server.spent, 9) == 0.7 and not server.held

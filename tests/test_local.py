@@ -484,8 +484,21 @@ def check_tool_calls():
     assert [(c["name"], c["status"]) for c in calls] == [
         ("execute_tool web_search", "ok"), ("execute_tool fetch", "ok"), ("execute_tool web_search", "error")], calls
     assert a[0]["gen_ai.operation.name"] == "execute_tool" and a[0]["gen_ai.tool.name"] == "web_search"
-    assert a[0]["gen_ai.tool.call.arguments"] == "query='cats', limit=2" and a[0]["fences.iteration"] == 0
-    assert len(a[1]["gen_ai.tool.call.arguments"]) <= 300 and calls[1]["end_ts"] - calls[1]["start_ts"] >= 0.01
+    assert a[0]["gen_ai.tool.call.arguments"] == "query, limit" and a[0]["fences.iteration"] == 0  # names by default
+    assert a[1]["gen_ai.tool.call.arguments"] == "url" and calls[1]["end_ts"] - calls[1]["start_ts"] >= 0.01
+
+    agentfences.init(local_only=True, tool_arguments="full")
+    a = [c["attributes"] for c in asyncio.run(agent())]
+    assert a[0]["gen_ai.tool.call.arguments"] == "query='cats', limit=2" and len(a[1]["gen_ai.tool.call.arguments"]) <= 300
+    agentfences.init(local_only=True, tool_arguments="none")
+    assert all("gen_ai.tool.call.arguments" not in c["attributes"] for c in asyncio.run(agent()))
+    try:
+        agentfences.init(local_only=True, tool_arguments="values")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("tool_arguments is checked")
+    agentfences.init(local_only=True)
     assert a[2]["error.type"] == "PermissionError" and a[2]["fences.error.message"] == "PermissionError: 403 from search API"
 
 
@@ -497,7 +510,7 @@ def check_events_are_sent_batched_and_redacted():
             return None
         args = e["attributes"]["gen_ai.tool.call.arguments"].replace("hunter2", "***")
         return dict(e, attributes={**e["attributes"], "gen_ai.tool.call.arguments": args})
-    sent = cloud(redact=scrub)
+    sent = cloud(redact=scrub, tool_arguments="full")  # values, so the redact hook has something to scrub
     try:
         @agentfences.tool
         def login(password):

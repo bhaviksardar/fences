@@ -1,0 +1,46 @@
+# Publishes sdk/ to PyPI when a tag like v0.9.0 is pushed, after the tests pass.
+# Uses PyPI trusted publishing (OIDC): no PyPI token is stored anywhere, and the release
+# carries a provenance attestation tying it to this workflow and commit.
+# One-time setup on pypi.org: project agentfences -> Manage -> Publishing -> Add a trusted
+# publisher -> GitHub, owner bhaviksardar, repository fences, workflow publish-pypi.yml,
+# environment pypi. (And on GitHub: Settings -> Environments -> New environment "pypi".)
+name: publish-pypi
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag matches __version__
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          grep -q "__version__ = \"$tag\"" sdk/agentfences/__init__.py
+      - run: pip install ./sdk && python tests/test_local.py && python tests/test_enforcement.py
+      - run: pip install build && python -m build -o dist sdk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # lets PyPI verify this workflow's identity
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

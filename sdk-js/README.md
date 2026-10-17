@@ -47,7 +47,7 @@ const webSearch = tool(async ({ query }: { query: string }) => search(query));  
 await context({ user_id: "u_123", session_id: "s_9" }, () => research(question));  // tags every run inside
 ```
 
-- Tool and model calls are recorded as OpenTelemetry-shaped spans (`execute_tool webSearch`, `gen_ai.*` attributes), on `getActiveRun().events`.
+- Tool and model calls are recorded as OpenTelemetry-shaped spans (`execute_tool webSearch`, `gen_ai.*` attributes), on `getActiveRun().events`. A tool call carries its argument names (`query, limit`), not their values; `init({ toolArguments: "full" })` records the values as JSON (300 characters at most), `"none"` neither (from 0.9.0). A guarded tool's check and an approval request still send the values.
 - When a governed run throws, Fences records the error's type, message and stack with the run; the error still reaches your code.
 - `init({ redact: (event) => ... })` sees everything before it leaves the process and can change or drop it.
 

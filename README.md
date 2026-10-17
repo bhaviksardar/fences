@@ -259,7 +259,9 @@ def web_search(query: str, limit: int = 5) -> list: ...
 async def fetch_page(url: str) -> str: ...
 ```
 
-Each call records the tool's name, a short summary of its arguments (`query='cats', limit=5`), whether it succeeded (and the error if not) and how long it took. Exceptions still reach your code, and outside a governed run the tool is just called.
+Each call records the tool's name, its argument names (`query, limit`), whether it succeeded (and the error if not) and how long it took. Exceptions still reach your code, and outside a governed run the tool is just called.
+
+**Argument values stay in your process by default** (from 0.9.0). `init(tool_arguments="full")` records a short summary of the values too (`query='cats', limit=5`, each value shortened, 300 characters at most), and `"none"` records neither. A guarded tool's check and an approval request still send the values, since dashboard rules and the person approving need them; the `redact` hook can change or drop those.
 
 **Model calls.** Pass `instrument=True` to record every OpenAI and Anthropic call made inside a governed run, and precheck it against the budget, with no other code changes:
 

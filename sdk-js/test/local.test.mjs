@@ -148,18 +148,28 @@ test("tool() records calls as execute_tool spans", async () => {
   const fetchPage = tool(async (url) => { await new Promise((ok) => setTimeout(ok, 10)); return "<html>"; }, { name: "fetch" });
   assert.deepEqual(webSearch({ query: "outside", limit: 1 }), ["outside"]);  // no run: just calls through, stays sync
 
-  const spans = await governed(async () => {
+  const agent = governed(async () => {
     assert.equal(webSearch({ query: "cats", limit: 2 }).length, 2);  // sync tools stay sync
     await fetchPage("https://example.com/" + "x".repeat(500));
     assert.throws(() => webSearch({ query: "blocked" }), /403/);
     return getActiveRun().events;
-  }, { budgetUsd: 1 })();
+  }, { budgetUsd: 1 });
+  const spans = await agent();
   assert.deepEqual(spans.map((s) => [s.name, s.status]),
     [["execute_tool webSearch", "ok"], ["execute_tool fetch", "ok"], ["execute_tool webSearch", "error"]]);
   const a = spans.map((s) => s.attributes);
-  assert.equal(a[0]["gen_ai.tool.call.arguments"], '{"query":"cats","limit":2}');
+  assert.equal(a[0]["gen_ai.tool.call.arguments"], "query, limit");  // names by default
+  assert.equal(a[1]["gen_ai.tool.call.arguments"], "0");             // a positional argument: its position
   assert.equal(a[0]["gen_ai.operation.name"], "execute_tool");
-  assert.ok(a[1]["gen_ai.tool.call.arguments"].length <= 300 && spans[1].end_ts - spans[1].start_ts >= 0.009);
+  assert.ok(spans[1].end_ts - spans[1].start_ts >= 0.009);
+  init({ localOnly: true, toolArguments: "full" });
+  const full = (await agent()).map((s) => s.attributes);
+  assert.equal(full[0]["gen_ai.tool.call.arguments"], '{"query":"cats","limit":2}');
+  assert.ok(full[1]["gen_ai.tool.call.arguments"].length <= 300);
+  init({ localOnly: true, toolArguments: "none" });
+  assert.ok((await agent()).every((s) => !("gen_ai.tool.call.arguments" in s.attributes)));
+  assert.throws(() => init({ localOnly: true, toolArguments: "values" }), TypeError);
+  init({ localOnly: true });
   assert.equal(a[2]["error.type"], "PermissionError");
   assert.equal(a[2]["fences.error.message"], "PermissionError: 403 from search API");
   assert.equal(argsSummary([1, "two"]), '[1,"two"]');
