@@ -29,6 +29,10 @@ def args_summary(func: Callable, args: tuple, kwargs: dict) -> str:
         items = [(k, v) for k, v in bound.arguments.items() if k not in ("self", "cls")]
     except (TypeError, ValueError):  # builtins or odd signatures: fall back to positions
         items = [(str(i), v) for i, v in enumerate(args)] + list(kwargs.items())
+    return items_summary(items)
+
+
+def items_summary(items) -> str:
     text = ", ".join(f"{k}={_short.repr(v)}" for k, v in items)
     return text if len(text) <= MAX_ARGS else text[:MAX_ARGS - 1] + "…"
 
@@ -176,6 +180,25 @@ def _settle(run, guard_id: str, amount: float, error: Optional[BaseException]):
         core._client.guard(run.run_id, {"guard_id": guard_id, "phase": "settle", "outcome": outcome, "cost_usd": charged})
 
 
+async def call_async(run, label: str, summary: str, cost, approve: bool, call: Callable):
+    """Record an async tool call; cost is None/False for an unguarded call, else a function giving its amount."""
+    started, gate = time.perf_counter(), None
+    try:
+        if cost:
+            amount = cost()
+            gate = (await asyncio.to_thread(_open, run, label, summary, amount, approve), amount)
+        out = await call()
+    except BaseException as e:
+        record_tool_call(label, summary, started, e)
+        if gate:
+            await asyncio.to_thread(_settle, run, *gate, e)
+        raise
+    record_tool_call(label, summary, started)
+    if gate:
+        await asyncio.to_thread(_settle, run, *gate, None)
+    return out
+
+
 # ── @tool ─────────────────────────────────────────────────────────────────────
 
 def tool(func: Optional[Callable] = None, *, name: Optional[str] = None, timeout_s: Optional[float] = None,
@@ -224,21 +247,8 @@ def tool(func: Optional[Callable] = None, *, name: Optional[str] = None, timeout
                 run = get_active_run()
                 if run is None:
                     return await _timed_async(f(*args, **kwargs), timeout_s, label)
-                summary, started, gate = args_summary(f, args, kwargs), time.perf_counter(), None
-                try:
-                    if guarded:
-                        cost = amount(args, kwargs)
-                        gate = (await asyncio.to_thread(_open, run, label, summary, cost, approve), cost)
-                    out = await _timed_async(f(*args, **kwargs), timeout_s, label)
-                except BaseException as e:
-                    record_tool_call(label, summary, started, e)
-                    if gate:
-                        await asyncio.to_thread(_settle, run, *gate, e)
-                    raise
-                record_tool_call(label, summary, started)
-                if gate:
-                    await asyncio.to_thread(_settle, run, *gate, None)
-                return out
+                return await call_async(run, label, args_summary(f, args, kwargs), guarded and (lambda: amount(args, kwargs)),
+                                        approve, lambda: _timed_async(f(*args, **kwargs), timeout_s, label))
             return async_wrapper
 
         @functools.wraps(f)

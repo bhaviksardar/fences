@@ -222,6 +222,46 @@ def check_server_required_approval():
         agentfences.init(local_only=True)
 
 
+def check_mcp_session_calls_are_recorded_and_guarded():
+    """agentfences.mcp.wrap: every call_tool is a tool span; named tools are guarded; isError is a failed call."""
+    from types import SimpleNamespace as NS
+
+    class Session:  # stands in for mcp.ClientSession
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, arguments=None, read_timeout_seconds=None):
+            self.calls.append(name)
+            return NS(isError=name == "broken", content=[NS(type="text", text="disk full")])
+
+    session = agentfences.mcp.wrap(Session(), guard="send_email", cost_usd={"refund": lambda a: a["amount"]})
+    assert asyncio.run(session.call_tool("search", {"q": "x"})).isError is False  # outside a run: straight through
+
+    @governed(budget_usd=1)
+    async def agent():
+        await session.call_tool("search", {"q": "cats"})
+        failed = await session.call_tool("broken", {})
+        await session.call_tool("send_email", {"to": "a@b.c"})
+        await session.call_tool("refund", {"amount": 0.7})
+        denied = await asyncio.gather(session.call_tool("refund", {"amount": 0.7}), return_exceptions=True)
+        return failed, denied[0], list(get_active_run().events)
+
+    server = cloud(Server())
+    try:
+        failed, denied, spans = asyncio.run(agent())
+    finally:
+        agentfences.init(local_only=True)
+    assert failed.isError and isinstance(denied, ToolBlocked) and denied.breach_type == "budget_exceeded", denied
+    assert session.calls == ["search", "search", "broken", "send_email", "refund"], session.calls  # the refused refund never ran
+    a = [e["attributes"] for e in spans]
+    assert [(x["gen_ai.tool.name"], e["status"]) for x, e in zip(a, spans)] == [
+        ("search", "ok"), ("broken", "error"), ("send_email", "ok"), ("refund", "ok"), ("refund", "error")], spans
+    assert a[0]["gen_ai.tool.call.arguments"] == "q='cats'" and a[1]["error.type"] == "MCPToolError"
+    checks = [(g["tool"], g["amount_usd"]) for g in server.guards if g["phase"] == "check"]
+    assert checks == [("send_email", 0.0), ("refund", 0.7)], checks  # the second refund is refused here, over what the run already spent
+    assert round(server.spent, 9) == 0.7 and not server.held
+
+
 # ── Level 1: model calls are prechecked against the budget ───────────────────
 
 def check_model_call_worst_case():
@@ -588,7 +628,7 @@ if __name__ == "__main__":
     agentfences.init(local_only=True)
     checks = [
         check_parallel_calls_cannot_overspend, check_blocked_tools_never_run, check_failed_and_timed_out_calls_are_settled,
-        check_guard_fails_closed, check_server_required_approval,
+        check_guard_fails_closed, check_server_required_approval, check_mcp_session_calls_are_recorded_and_guarded,
         check_model_call_worst_case, check_parallel_model_calls_cannot_overspend, check_holds_are_released_exactly,
         check_refused_call_ends_run_breached, check_guard_counts_model_calls_in_flight,
         check_hold_at_a_breach_until_raised, check_hold_ends_on_stop_or_timeout, check_hold_only_when_someone_can_raise_it,

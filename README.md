@@ -237,6 +237,14 @@ async def deploy(service: str): ...
 
 `timeout_s` works on any tool, guarded or not: past it, the call raises `TimeoutError`. An async tool is cancelled; a sync one can't be, so it finishes in a background thread while the agent moves on.
 
+**MCP tools** (from 0.7.0): wrap an MCP `ClientSession` and every `call_tool` is recorded, with no decorator per tool. The tools you name are guarded as above:
+
+```python
+session = agentfences.mcp.wrap(session, guard=["send_email"], cost_usd={"refund": lambda args: args["amount"]})
+```
+
+`guard=True` guards every tool, and `approve=[...]` names tools a person approves first. A result with `isError` is recorded as a failed call and still comes back to the agent.
+
 ## Evidence: tool calls and model calls
 
 On-call can only explain what was recorded. Fences records two kinds of call on the run automatically, alongside your `log_decision()` entries.
