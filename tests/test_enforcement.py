@@ -56,7 +56,7 @@ class Server(RecordingClient):
 
 
 def cloud(server, **init_args):
-    agentfences.init(api_key="fc_test", endpoint="http://fences.invalid", heartbeat_s=0.05, **init_args)
+    agentfences.init(api_key="fc_test", endpoint="https://fences.invalid", heartbeat_s=0.05, **init_args)
     agentfences.core._client = agentfences.control._client = server
     return server
 
@@ -213,7 +213,7 @@ def check_server_required_approval():
         def approver():
             wait_for(lambda: server.approval_requests)
             req = server.approval_requests[-1]
-            assert req["reason"] == "issue_refund(order_id='1182', amount=0.5)" and req["amount_usd"] == 0.5, req
+            assert req["reason"] == 'issue_refund({"order_id": "1182", "amount": 0.5})' and req["amount_usd"] == 0.5, req
             server.heartbeat_commands = [{"run_id": req["run_id"], "type": "approval", "approval_id": req["approval_id"],
                                           "granted": True, "by": "dana@example.com"}]
         background(approver)

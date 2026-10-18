@@ -345,7 +345,7 @@ class RecordingClient:
 
 def cloud(**init_args):
     """Cloud-mode init with the network replaced by a RecordingClient."""
-    agentfences.init(api_key="fc_test", endpoint="http://fences.invalid", **init_args)
+    agentfences.init(api_key="fc_test", endpoint="https://fences.invalid", **init_args)
     agentfences.core._client = agentfences.control._client = recorder = RecordingClient()
     return recorder
 
@@ -635,7 +635,7 @@ def check_pause_resume_and_timeout():
         background(operator)
         assert sync_agent().ok, "synchronous agents wait and resume too"
 
-        agentfences.init(api_key="fc_test", endpoint="http://fences.invalid", heartbeat_s=0.05, pause_timeout_s=0.3)
+        agentfences.init(api_key="fc_test", endpoint="https://fences.invalid", heartbeat_s=0.05, pause_timeout_s=0.3)
         agentfences.core._client = sent = RecordingClient()
         agentfences.control._client = sent
 
@@ -765,7 +765,7 @@ def on_stop(event):
     time.sleep(0.5)  # revoking a credential takes a moment
     open({out!r}, "w").write("revoked")
 
-agentfences.init(api_key="fc", endpoint="http://x.invalid", heartbeat_s=60, on_stop=on_stop)
+agentfences.init(api_key="fc", endpoint="https://x.invalid", heartbeat_s=60, on_stop=on_stop)
 sent = RecordingClient()
 agentfences.core._client = agentfences.control._client = sent
 acks = sent.acks
@@ -937,7 +937,7 @@ def check_version_is_sent():
     from importlib.metadata import version
     from agentfences.client import GovClient
     assert version("agentfences") == agentfences.__version__  # the package build reads the one version
-    headers = GovClient("fc_x", "http://fences.invalid").headers
+    headers = GovClient("fc_x", "https://fences.invalid").headers
     assert headers["X-Fences-SDK"] == f"python/{agentfences.__version__}" and headers["X-API-Key"] == "fc_x"
 
 
@@ -1028,7 +1028,7 @@ def check_client_replies():
                 raise ValueError("not JSON")
             return self._body
 
-    client, replies = GovClient("fc_test", "http://fences.invalid"), []
+    client, replies = GovClient("fc_test", "https://fences.invalid"), []
     client._session = lambda: NS(post=lambda *a, **k: replies.pop(0))
 
     def call(status, body, fn):
@@ -1050,6 +1050,21 @@ def check_client_replies():
     assert call(401, {"detail": "no"}, lambda: client.guard("r", {})) == {"ok": False, "status": 401}
     assert call(200, [1], lambda: client.guard("r", {})) == {}  # not a reply: the guard then fails closed
 
+    # A redirect isn't followed (it would carry the API key elsewhere): it reads as no answer
+    sent_kwargs = []
+    client._session = lambda: NS(post=lambda *a, **k: sent_kwargs.append(k) or replies.pop(0))
+    redirect = Reply(307, {})
+    redirect.headers = {"Location": "http://attacker.example/steal"}
+    replies.append(redirect)
+    out = client.checkpoint("r", 0, 1, 0, 0)
+    assert "redirect" in out["network_error"] and "attacker.example" in out["network_error"], out
+    assert sent_kwargs[-1]["allow_redirects"] is False
+
+    from agentfences.tools import approval_text  # what the person approving reads: a crafted value stays a value
+    assert approval_text([("order_id", "1182', amount=5)  # "), ("amount", 5000)]) == \
+        '{"order_id": "1182\', amount=5)  # ", "amount": 5000}'
+    assert approval_text([("note", "x" * 400)]).endswith("x…") and len(approval_text([("note", "x" * 400)])) == 300
+
 
 def check_revoked_key_and_odd_replies():
     """A key revoked mid-run ends the run at its next checkpoint, and the agent's result still comes back.
@@ -1066,7 +1081,8 @@ def check_revoked_key_and_odd_replies():
         replies[:] = [{"ok": True, "spent_usd": None, "iterations": "3", "max_iterations": None, "budget_usd": None},
                       {"network_error": "HTTP 500"}]
         first, second = agent()
-        assert first.ok and second.ok, (first, second)  # unlimited (null budget), 2 steps of 100, no TypeError
+        assert first.ok and second.ok, (first, second)  # odd values ignored, no TypeError
+        assert sent.of("end")[-1]["status"] == "success"
         end = sent.of("end")[-1]
         assert end["status"] == "success", end
 
@@ -1082,7 +1098,7 @@ def check_circuit_breaker():
     import requests
     from agentfences.client import GovClient, FAILURES_TO_OPEN
 
-    client, tried, replies = GovClient("fc_test", "http://fences.invalid"), [], []
+    client, tried, replies = GovClient("fc_test", "https://fences.invalid"), [], []
 
     def post(*a, **k):
         tried.append(1)
@@ -1123,7 +1139,7 @@ def check_step_ids_and_one_retry():
     import requests
     from agentfences.client import GovClient
 
-    client, posts, replies = GovClient("fc_test", "http://fences.invalid"), [], []
+    client, posts, replies = GovClient("fc_test", "https://fences.invalid"), [], []
 
     def post(url, json=None, **k):
         posts.append((url.rsplit("/", 1)[-1], json))
@@ -1167,6 +1183,48 @@ def check_step_ids_and_one_retry():
         agentfences.init(local_only=True)
 
 
+def check_endpoint_and_budget_hardening():
+    """A remote endpoint must use HTTPS (the key and the limits cross the network); a reply can't make a
+    budget set in code unlimited, though it can raise it (the dashboard does) or set one where the code had none."""
+    for ok in ("https://fences.example.com", "http://localhost:8000", "http://127.0.0.1:9", "http://[::1]:8000",
+               "http://LOCALHOST"):
+        agentfences.init(api_key="fc_test", endpoint=ok)
+    for bad in ("http://fences.example.com", "http://10.0.0.5:8000", "ftp://fences.example.com", "fences.example.com",
+                "http://evil.com\\@localhost", "http://localhost@evil.com", "https://user:pw@fences.example.com", "http://evil.localhost"):
+        try:
+            agentfences.init(api_key="fc_test", endpoint=bad)
+        except ValueError as e:
+            assert "https" in str(e), e
+        else:
+            raise AssertionError(f"{bad} should be refused")
+    agentfences.init(api_key="fc_test", endpoint="http://10.0.0.5:8000", allow_http=True)  # a trusted private network
+
+    sent = cloud()
+    try:
+        replies = []
+        sent.checkpoint = lambda *a, **k: replies.pop(0)
+
+        @governed(budget_usd=1)
+        def capped():
+            checkpoint_sync(cost_delta_usd=0.1)
+            after_null = get_active_run().budget_usd
+            checkpoint_sync(cost_delta_usd=0.1)
+            return after_null, get_active_run().budget_usd
+
+        replies[:] = [{"ok": True, "budget_usd": None}, {"ok": True, "budget_usd": 5}]
+        assert capped() == (1, 5)  # null ignored; a raise from the dashboard still applies
+
+        @governed()
+        def uncapped():
+            checkpoint_sync(cost_delta_usd=0.1)
+            return get_active_run().budget_usd
+        replies[:] = [{"ok": True, "budget_usd": None}]
+        sent.start_limits = {"budget_usd": 2}
+        assert uncapped() is None  # no budget in code: the server's null (unlimited) stands
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_old_server_without_control():
     seen = []
     handler = logging.Handler()
@@ -1205,7 +1263,7 @@ if __name__ == "__main__":
         check_version_is_sent, check_quarantine,
         check_old_server_without_control, check_bad_amounts_are_refused, check_custom_prices_are_validated,
         check_client_replies, check_revoked_key_and_odd_replies, check_circuit_breaker,
-        check_step_ids_and_one_retry,
+        check_step_ids_and_one_retry, check_endpoint_and_budget_hardening,
     ]
     for check in checks:
         try:

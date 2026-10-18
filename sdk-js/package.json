@@ -1,6 +1,6 @@
 {
   "name": "agentfences",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "On-call for AI agents: limits your agents can't raise, cost tracking, a decision trail, and a stop button",
   "license": "MIT",
   "author": "Bhavik Sardar",

@@ -57,7 +57,7 @@ await context({ user_id: "u_123", session_id: "s_9" }, () => research(question))
 init({ apiKey: process.env.FENCES_API_KEY, endpoint: "https://your-fences-host", environment: "prod", release: "v1.4.2" });
 ```
 
-The server is authoritative for limits and sees spend across processes. If it can't be reached, limits are enforced locally; pass `failClosed: true` to stop instead. A rejected key throws `FencesAuthError` when the run starts, and a key revoked during a run ends it at its next checkpoint (`fences_unreachable`); a quarantined agent throws `AgentQuarantined` before any of its code runs. A cost that isn't a finite number of zero or more throws instead of being counted. In serverless handlers, `await flush()` before returning so queued decisions and spans are sent.
+The server is authoritative for limits and sees spend across processes. If it can't be reached, limits are enforced locally; pass `failClosed: true` to stop instead. `endpoint` must be an `https://` URL unless the server is on the same machine; `allowHttp: true` permits plain HTTP for a trusted private network (from 0.9.1). A server reply can raise a budget, but can't make a budget set in code unlimited. A rejected key throws `FencesAuthError` when the run starts, and a key revoked during a run ends it at its next checkpoint (`fences_unreachable`); a quarantined agent throws `AgentQuarantined` before any of its code runs. A cost that isn't a finite number of zero or more throws instead of being counted. In serverless handlers, `await flush()` before returning so queued decisions and spans are sent.
 
 ## Live control (from 0.4.0)
 

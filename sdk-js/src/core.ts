@@ -68,6 +68,12 @@ export interface InitOptions {
    * still send the values, which rules and approvers need; the redact hook can change or drop them.
    */
   toolArguments?: ToolArguments;
+  /**
+   * endpoint must use https://, except on this machine (localhost, 127.0.0.1, ::1): over plain HTTP anyone
+   * on the network path could read the API key and rewrite the server's replies, limits included.
+   * true permits it, for a trusted private network.
+   */
+  allowHttp?: boolean;
 }
 
 let client: FencesClient | null = null;
@@ -94,7 +100,9 @@ export function init(options: InitOptions = {}): void {
   } else if (!options.apiKey) {
     throw new Error("apiKey is required unless localOnly is set. Use init({ localOnly: true }) for local usage.");
   } else {
-    client = new FencesClient(options.apiKey, options.endpoint ?? "http://localhost:8000");
+    const endpoint = options.endpoint ?? "http://localhost:8000";
+    checkEndpoint(endpoint, !!options.allowHttp);
+    client = new FencesClient(options.apiKey, endpoint);
   }
   control.configure(client, { heartbeatS: options.heartbeatS ?? 15, pauseTimeoutS: options.pauseTimeoutS ?? 3600,
     stopGraceS: options.stopGraceS === undefined ? 30 : options.stopGraceS, onStop: options.onStop, onQuarantine: options.onQuarantine });
@@ -108,6 +116,25 @@ export function _setClient(c: FencesClient | null): void {
 
 /** @internal */
 export const _client = (): FencesClient | null => client;
+
+function checkEndpoint(endpoint: string, allowHttp: boolean): void {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    throw new TypeError(`endpoint must be an https:// URL, not ${JSON.stringify(endpoint)}`);
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || endpoint.includes("\\")) {
+    throw new TypeError(`endpoint must be an https:// URL with no username or backslash, not ${JSON.stringify(endpoint)}`);
+  }
+  if (url.protocol === "https:") return;
+  const host = url.hostname;  // parsed as fetch will: the host checked is the host connected to
+  const local = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+  if (!local && !allowHttp) {
+    throw new TypeError(`endpoint ${JSON.stringify(endpoint)} uses plain HTTP: the API key and the server's replies, limits ` +
+      "included, would cross the network unencrypted. Use https://, or pass allowHttp: true for a trusted private network.");
+  }
+}
 
 function requireInit(): void {
   if (!localOnly && !client) {
@@ -176,6 +203,7 @@ function outcome(run: Run, failed: boolean, error: unknown): [string, string | n
 async function startRun(agentName: string, limits: Limits): Promise<Run> {
   const run = new Run(agentName, limits.budgetUsd ?? null, limits.maxIterations ?? DEFAULTS.maxIterations,
     limits.maxDurationMs ?? DEFAULTS.maxDurationMs, limits.maxTokens ?? DEFAULTS.maxTokens, events.currentContext());
+  run.budgetInCode = limits.budgetUsd != null;
   if (!client) {
     if (run.budgetUsd === null) noBudget(agentName, "Set one with governed(fn, { budgetUsd: ... }).");
     return run;
@@ -190,7 +218,8 @@ async function startRun(agentName: string, limits: Limits): Promise<Run> {
   const resp = await client.startRun(body);
   if (resp.quarantined) throw new AgentQuarantined(agentName, resp.detail);
   // The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
-  control.adopt(run, resp.limits ?? {}, control.LIMITS, true);
+  // A null budget (unlimited) is taken only for a run whose code set none: a reply can't lift a budget from the code
+  control.adopt(run, resp.limits ?? {}, control.LIMITS, limits.budgetUsd == null);
   for (const n of resp.notices ?? []) {
     events.warnOnce(`${agentName}:${n.code}`, `${n.message ?? ""}${n.url ? ` ${n.url}` : ""}`);
   }
@@ -303,7 +332,7 @@ function decide(run: Run, resp: Reply | null): CheckpointResult {
     control.apply(run, resp.commands);
     // The server is authoritative: adopt its totals and (on a breach) its current limits
     control.adopt(run, resp, control.TOTALS);
-    control.adopt(run, resp, control.LIMITS, true);
+    control.adopt(run, resp, control.LIMITS, !run.budgetInCode);
     // A fresh breach, or a 409 because the run is still fenced from an earlier one
     run.lastBreach = resp.ok ? null : (resp.breach ?? run.lastBreach ?? "limit_reached");
   }

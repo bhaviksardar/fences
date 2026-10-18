@@ -88,7 +88,7 @@ class BudgetServer(test_local.RecordingClient):
 
 
 def cloud_with(server):
-    agentfences.init(api_key="fc_test", endpoint="http://fences.invalid")
+    agentfences.init(api_key="fc_test", endpoint="https://fences.invalid")
     agentfences.core._client = agentfences.control._client = server
     return server
 

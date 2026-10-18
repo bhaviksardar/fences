@@ -61,6 +61,7 @@ class RunState:
     on_breach: Optional[str] = None     # "hold": wait at a limit for someone to raise it
     held: Optional[str] = None          # while waiting at a limit: "breach" or "budget"
     acked: set = field(default_factory=set)  # command ids already acknowledged
+    budget_in_code: bool = False        # @governed set a budget: no server reply can make the run unlimited
 
     @property
     def duration_ms(self) -> int:

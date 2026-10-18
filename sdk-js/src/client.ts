@@ -93,8 +93,9 @@ export class FencesClient {
       this.breaker.record(true);
       return { network_error: String(e) };
     }
+    // Redirects aren't followed: one would carry the API key (and the request) to wherever it points
     const send = () => fetch(this.endpoint + path, {
-      method: "POST", headers: this.headers, body: json, signal: AbortSignal.timeout(this.timeoutMs),
+      method: "POST", headers: this.headers, body: json, signal: AbortSignal.timeout(this.timeoutMs), redirect: "manual",
     });
     let resp: Response;
     try {
@@ -111,6 +112,10 @@ export class FencesClient {
     }
     // A 429 on the heartbeat is its own budget, not an outage: it mustn't cut off checkpoints
     this.breaker.record(resp.status < 500 && (resp.status !== 429 || path === "/api/heartbeat"));
+    if (resp.type === "opaqueredirect" || (resp.status >= 300 && resp.status < 400)) {  // not followed: treated as no answer
+      return { network_error: `Fences answered with a redirect (HTTP ${resp.status} to ${JSON.stringify(resp.headers.get("location") ?? "?")}), ` +
+        "which isn't followed; check the endpoint" };
+    }
     const text = await resp.text().catch(() => "");
     let body: Reply = {}, isJson = false;
     try {

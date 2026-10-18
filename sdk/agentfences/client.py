@@ -136,14 +136,17 @@ class GovClient:
         """
         if not self.breaker.allow():
             return {"network_error": "Fences unreachable: calls paused after repeated failures"}
+        # Redirects aren't followed: one would carry the API key (and the request) to wherever it points
+        send = lambda: self._session().post(f"{self.endpoint}{path}", json=payload, headers=self.headers,
+                                            timeout=self.timeout, allow_redirects=False)
         try:
             try:
-                resp = self._session().post(f"{self.endpoint}{path}", json=payload, headers=self.headers, timeout=self.timeout)
+                resp = send()
             except requests.ConnectionError as e:
                 if not retry or isinstance(e, requests.Timeout):  # a connect timeout is both; timeouts aren't retried
                     raise
                 time.sleep(random.uniform(0.1, 0.3))  # a blip: once more, after a moment
-                resp = self._session().post(f"{self.endpoint}{path}", json=payload, headers=self.headers, timeout=self.timeout)
+                resp = send()
         except requests.RequestException as e:
             self.breaker.record(False)
             return {"network_error": str(e)}
@@ -152,6 +155,9 @@ class GovClient:
             return {"network_error": str(e)}
         # A 429 on the heartbeat is its own budget, not an outage: it mustn't cut off checkpoints
         self.breaker.record(resp.status_code < 500 and (resp.status_code != 429 or path == "/api/heartbeat"))
+        if 300 <= resp.status_code < 400:  # not followed: treated as no answer (guards fail closed, limits apply locally)
+            return {"network_error": f"Fences answered with a redirect (HTTP {resp.status_code} to "
+                                     f"{resp.headers.get('Location', '?')!r}), which isn't followed; check the endpoint"}
         try:
             body = resp.json()
         except ValueError:  # not JSON: the status code still decides

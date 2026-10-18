@@ -23,6 +23,10 @@ before(async () => {
     req.on("data", (c) => raw += c);
     req.on("end", () => {
       const body = JSON.parse(raw || "{}");
+      if (server.redirectTo && req.url.endsWith("/checkpoint")) {
+        res.writeHead(307, { location: server.redirectTo });
+        return res.end();
+      }
       if (server.dropNext && req.url.endsWith("/checkpoint")) {  // the connection drops before any reply
         server.dropNext -= 1;
         server.requests.push({ path: req.url, body, dropped: true });
@@ -237,4 +241,47 @@ test("every checkpoint has its own step_id; a dropped one is sent once more once
   steps = sent("/checkpoint").map((r) => r.body.step_id);
   assert.equal(steps.length, 3);
   assert.equal(steps[1], steps[2]);
+});
+
+test("a remote endpoint must use HTTPS; a reply can't make a budget set in code unlimited", async () => {
+  for (const ok of ["https://fences.example.com", "http://localhost:8000", "http://127.0.0.1:9", "http://[::1]:8000", "http://LOCALHOST"]) {
+    init({ apiKey: "fc_test", endpoint: ok });
+  }
+  for (const bad of ["http://fences.example.com", "http://10.0.0.5:8000", "ftp://fences.example.com", "fences.example.com",
+                     "http://evil.com\\@localhost", "http://localhost@evil.com", "https://user:pw@fences.example.com", "http://evil.localhost"]) {
+    assert.throws(() => init({ apiKey: "fc_test", endpoint: bad }), (e) => e instanceof TypeError && /https/.test(e.message), bad);
+  }
+  init({ apiKey: "fc_test", endpoint: "http://10.0.0.5:8000", allowHttp: true });  // a trusted private network
+
+  cloud();
+  server.checkpointReplies = [[200, { ok: true, budget_usd: null }], [200, { ok: true, budget_usd: 5 }]];
+  const capped = await governed(async () => {
+    await checkpoint(null, { costDeltaUsd: 0.1 });
+    const afterNull = getActiveRun().budgetUsd;
+    await checkpoint(null, { costDeltaUsd: 0.1 });
+    return [afterNull, getActiveRun().budgetUsd];
+  }, { budgetUsd: 1 })();
+  assert.deepEqual(capped, [1, 5]);  // null ignored; a raise from the dashboard still applies
+
+  server.limits = { budget_usd: 2 };
+  server.checkpointReplies = [[200, { ok: true, budget_usd: null }]];
+  const uncapped = await governed(async () => { await checkpoint(null, { costDeltaUsd: 0.1 }); return getActiveRun().budgetUsd; })();
+  assert.equal(uncapped, null);  // no budget in code: the server's null (unlimited) stands
+});
+
+test("a redirect isn't followed: it would carry the API key to another host", async () => {
+  const stolen = [];
+  const attacker = http.createServer((req, res) => { stolen.push(req.headers["x-api-key"]); res.end("{}"); });
+  await new Promise((ok) => attacker.listen(0, "127.0.0.1", ok));
+  try {
+    cloud();
+    server.redirectTo = `http://127.0.0.1:${attacker.address().port}/steal`;
+    const result = await governed(async () => checkpoint(null, { costDeltaUsd: 0.01 }), { budgetUsd: 1 })();
+    assert.ok(result.ok);  // enforced locally, as with no answer
+    assert.deepEqual(stolen, []);
+    assert.ok(warnings.some((w) => /redirect \(HTTP 307/.test(w)), warnings.join("\n"));
+  } finally {
+    server.redirectTo = null;
+    attacker.close();
+  }
 });

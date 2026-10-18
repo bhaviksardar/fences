@@ -48,6 +48,8 @@ export class Run {
   reservedUsd = 0;
   /** Model calls' worst-case costs (see precheck.ts), released at the next checkpoint once they finish. */
   holds: Hold[] = [];
+  /** governed() set a budget: no server reply can make the run unlimited. */
+  budgetInCode = false;
   /** "hold": wait at a limit for someone to raise it (see InitOptions.onBreach). */
   onBreach: "hold" | null = null;
   private readonly abort = new AbortController();

@@ -51,6 +51,7 @@ def init(
     on_quarantine: Optional[Callable[[dict], None]] = None,
     on_breach: Optional[str] = None,
     tool_arguments: str = "names",
+    allow_http: bool = False,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -93,6 +94,10 @@ never halts.
     "by", "reason"}. on_stop runs once per run, on_quarantine once per quarantine; whether
     each worked, failed or timed out (30 s) is reported to Fences.
 
+    endpoint must use https://, except on this machine (localhost, 127.0.0.1, ::1): over plain
+    HTTP anyone on the network path could read the API key and rewrite the server's replies,
+    limits included. allow_http=True permits it, for a trusted private network.
+
     tool_arguments: what a recorded tool call carries of its arguments: "names" (the default:
     `query, limit`), "full" (`query='cats', limit=5`, each value shortened) or "none". A guarded
     tool's check and an approval request still send the values, which rules and approvers need;
@@ -128,8 +133,31 @@ never halts.
             "api_key is required unless local_only=True. "
             "Use agentfences.init(local_only=True) for local usage."
         )
+    _check_endpoint(endpoint, allow_http)
     _client = GovClient(api_key=api_key, endpoint=endpoint)
     control.configure(_client, heartbeat_s, pause_timeout_s, stop_grace_s, on_stop, on_quarantine)
+
+
+LOOPBACK = ("localhost", "127.0.0.1", "::1", "[::1]")
+
+
+def _check_endpoint(endpoint: str, allow_http: bool):
+    # Parsed the way requests (urllib3) will parse it, so the host checked is the host connected to;
+    # a username or a backslash in it could otherwise make the two disagree
+    from urllib3.util import parse_url
+    try:
+        url = parse_url(endpoint)
+    except ValueError:
+        url = None
+    if url is None or url.scheme not in ("http", "https") or not url.host or url.auth or "\\" in endpoint:
+        raise ValueError(f"endpoint must be an https:// URL with no username or backslash, not {endpoint!r}")
+    if url.scheme == "https":
+        return
+    local = url.host.lower() in LOOPBACK
+    if not (local or allow_http):
+        raise ValueError(
+            f"endpoint {endpoint!r} uses plain HTTP: the API key and the server's replies, limits included, "
+            "would cross the network unencrypted. Use https://, or pass allow_http=True for a trusted private network.")
 
 
 def _require_init():
@@ -318,6 +346,7 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
         **{k: DEFAULT_LIMITS[k] if v is None else v for k, v in in_code.items()},
         context=events.current_context(),
         on_breach=on_breach or _on_breach,
+        budget_in_code=budget_usd is not None,
     )
     client = _client
     if not client and budget_usd is None:
@@ -332,7 +361,8 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
         if resp.get("quarantined"):  # refused before any agent code runs
             raise AgentQuarantined(agent_name, resp.get("detail"))
         # The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
-        control.adopt(run, resp.get("limits") or {}, control.LIMIT_FIELDS, null_budget=True)
+        # A null budget (unlimited) is taken only for a run whose code set none: a reply can't lift a budget from the code
+        control.adopt(run, resp.get("limits") or {}, control.LIMIT_FIELDS, null_budget=budget_usd is None)
         for n in resp.get("notices") or ():
             _notice(agent_name, n.get("code", ""), n.get("message", "") + (f" {n['url']}" if n.get("url") else ""))
         if "limits" not in resp and run.budget_usd is None and "network_error" not in resp:
@@ -392,7 +422,7 @@ def _decide(run: RunState, resp: Optional[dict]) -> CheckpointResult:
         control.apply(run, resp.get("commands"))
         # Backend is authoritative: adopt its totals and (on a breach) its current limits
         control.adopt(run, resp, control.TOTAL_FIELDS)
-        control.adopt(run, resp, control.LIMIT_FIELDS, null_budget=True)
+        control.adopt(run, resp, control.LIMIT_FIELDS, null_budget=not run.budget_in_code)
         if resp.get("ok"):
             run.last_breach = None
         else:  # a fresh breach, or a 409 because the run is still fenced from an earlier one

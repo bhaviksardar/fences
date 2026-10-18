@@ -5,6 +5,7 @@ timeout, and guard it: ask Fences before it runs, reserving what it may cost.
 """
 import asyncio
 import contextvars
+import json
 import functools
 import inspect
 import reprlib
@@ -38,6 +39,15 @@ def args_summary(func: Callable, args: tuple, kwargs: dict) -> str:
 def arg_names(func: Callable, args: tuple, kwargs: dict) -> str:
     """`query, limit`: what a tool call span carries by default (init(tool_arguments=...))."""
     return ", ".join(k for k, _ in _items(func, args, kwargs))
+
+
+def approval_text(items) -> str:
+    """
+    `{"order_id": "1182", "amount": 5000}`, for the person approving a call: JSON, so a value the
+    model chose can't pass for another argument, and cut only at the end, never in the middle.
+    """
+    text = json.dumps(dict(items), default=repr, ensure_ascii=False)
+    return text if len(text) <= MAX_ARGS else text[:MAX_ARGS - 1] + "…"
 
 
 def items_summary(items) -> str:
@@ -99,14 +109,14 @@ def _local_check(run, amount: float):
     return None
 
 
-def _approve(run, label: str, summary: str, amount: float) -> str:
-    answer = approvals.request_approval_sync(f"{label}({summary})", amount_usd=amount or None)
+def _approve(run, label: str, reason: str, amount: float) -> str:
+    answer = approvals.request_approval_sync(f"{label}({reason})", amount_usd=amount or None)
     if not answer.granted:
         _block(run, label, f"not approved: {answer.note}" if answer.note else "not approved")
     return answer.approval_id
 
 
-def _open(run, label: str, summary: str, amount: float, approve: bool) -> str:
+def _open(run, label: str, summary: str, amount: float, approve: bool, reason: Optional[str] = None) -> str:
     """Check a guarded call and reserve its amount; returns the guard id, or raises ToolBlocked."""
     from . import core
     if run.quarantined:  # before waiting out the pause a quarantine brings: blocked now, not when it's released
@@ -115,7 +125,8 @@ def _open(run, label: str, summary: str, amount: float, approve: bool) -> str:
         control.wait_if_paused(run)
     if run.pause_expired:
         _block(run, label, "the run was paused from the Fences dashboard and not resumed in time", "paused")
-    approval_id = _approve(run, label, summary, amount) if approve else None
+    reason = summary if reason is None else reason  # what the person approving reads
+    approval_id = _approve(run, label, reason, amount) if approve else None
     client = core._client
     if client is None:  # local mode: the same rules, applied here
         with _reserve_lock:
@@ -128,7 +139,7 @@ def _open(run, label: str, summary: str, amount: float, approve: bool) -> str:
     guard_id = str(uuid.uuid4())  # one per call: the server answers a re-check of a denied id afresh
     while True:
         try:
-            return _check_with_server(run, client, label, summary, amount, approval_id, guard_id)
+            return _check_with_server(run, client, label, summary, amount, approval_id, guard_id, reason)
         except ToolBlocked as e:
             if e.breach_type not in control.BUDGET_BREACHES or not control.holds(run):
                 raise
@@ -140,7 +151,8 @@ def _open(run, label: str, summary: str, amount: float, approve: bool) -> str:
                 raise
 
 
-def _check_with_server(run, client, label: str, summary: str, amount: float, approval_id: Optional[str], guard_id: str) -> str:
+def _check_with_server(run, client, label: str, summary: str, amount: float, approval_id: Optional[str], guard_id: str,
+                       reason: str) -> str:
     if run.stopped:
         _block(run, label, "the run was stopped from the Fences dashboard", "stopped_by_user")
     with _reserve_lock:  # the server can't see this process's in-flight model calls, so check against them here first
@@ -150,14 +162,15 @@ def _check_with_server(run, client, label: str, summary: str, amount: float, app
     if not fits:
         _block(run, label, f"${amount:.2f} more could take the run past its ${run.budget_usd:.2f} budget", "budget_exceeded")
     try:
-        return _ask_server(run, client, label, summary, amount, approval_id, guard_id)
+        return _ask_server(run, client, label, summary, amount, approval_id, guard_id, reason)
     except BaseException:
         with _reserve_lock:
             run.reserved_usd -= amount
         raise
 
 
-def _ask_server(run, client, label: str, summary: str, amount: float, approval_id: Optional[str], guard_id: str) -> str:
+def _ask_server(run, client, label: str, summary: str, amount: float, approval_id: Optional[str], guard_id: str,
+                reason: str) -> str:
     sent = events.redact({"type": "guard", "tool": label, "arguments": summary}) or {}  # the check goes ahead without them
     for _ in range(2):  # once more after an approval the server asked for
         resp = client.guard(run.run_id, {"guard_id": guard_id, "phase": "check", "tool": label, "arguments": sent.get("arguments"),
@@ -167,7 +180,7 @@ def _ask_server(run, client, label: str, summary: str, amount: float, approval_i
             return guard_id
         if not (resp.get("needs_approval") and approval_id is None):
             break
-        approval_id = _approve(run, label, summary, amount)
+        approval_id = _approve(run, label, reason, amount)
     if resp.get("unsupported"):
         control.unsupported("guard", "guarded tools", "they are blocked")
         _block(run, label, "this Fences server doesn't support guarded tools")
@@ -188,7 +201,8 @@ def _settle(run, guard_id: str, amount: float, error: Optional[BaseException]):
         core._client.guard(run.run_id, {"guard_id": guard_id, "phase": "settle", "outcome": outcome, "cost_usd": charged})
 
 
-async def call_async(run, label: str, summary: str, cost, approve: bool, call: Callable, names: Optional[str] = None):
+async def call_async(run, label: str, summary: str, cost, approve: bool, call: Callable, names: Optional[str] = None,
+                     reason: Optional[str] = None):
     """
     Record an async tool call; cost is None/False for an unguarded call, else a function giving its
     amount. summary (the values) goes to the guard and an approval request; the span gets names.
@@ -197,7 +211,7 @@ async def call_async(run, label: str, summary: str, cost, approve: bool, call: C
     try:
         if cost:
             amount = check_amount(cost(), f"{label}'s cost_usd")  # a NaN or negative amount would let calls past the budget
-            gate = (await asyncio.to_thread(_open, run, label, summary, amount, approve), amount)
+            gate = (await asyncio.to_thread(_open, run, label, summary, amount, approve, reason), amount)
         out = await call()
     except BaseException as e:
         record_tool_call(label, summary, started, e, arg_names=names)
@@ -260,7 +274,7 @@ def tool(func: Optional[Callable] = None, *, name: Optional[str] = None, timeout
                     return await _timed_async(f(*args, **kwargs), timeout_s, label)
                 return await call_async(run, label, args_summary(f, args, kwargs), guarded and (lambda: amount(args, kwargs)),
                                         approve, lambda: _timed_async(f(*args, **kwargs), timeout_s, label),
-                                        arg_names(f, args, kwargs))
+                                        arg_names(f, args, kwargs), approval_text(_items(f, args, kwargs)))
             return async_wrapper
 
         @functools.wraps(f)
@@ -272,7 +286,7 @@ def tool(func: Optional[Callable] = None, *, name: Optional[str] = None, timeout
             try:
                 if guarded:
                     cost = check_amount(amount(args, kwargs), f"{label}'s cost_usd")
-                    gate = (_open(run, label, summary, cost, approve), cost)
+                    gate = (_open(run, label, summary, cost, approve, approval_text(_items(f, args, kwargs))), cost)
                 out = _timed_sync(f, args, kwargs, timeout_s, label)
             except BaseException as e:
                 record_tool_call(label, summary, started, e, arg_names=names)

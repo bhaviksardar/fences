@@ -331,6 +331,8 @@ If the backend can't be reached, limits are enforced locally and a warning is lo
 agentfences.init(api_key="fc_...", endpoint="https://...", fail_closed=True)
 ```
 
+**Use HTTPS.** `endpoint` must be an `https://` URL unless the server is on the same machine (`localhost`, `127.0.0.1`, `::1`): over plain HTTP anyone on the network path could read the API key and rewrite the server's replies, limits included. For a trusted private network, `init(..., allow_http=True)` permits it (from 0.9.1). The server is authoritative for limits, so a reply can raise a budget (that's how the dashboard lets a fenced run carry on), but it can't make a budget set in code unlimited.
+
 A rejected API key raises `agentfences.FencesAuthError` (a `PermissionError`) when a run starts, before any agent code runs. A key revoked during a run ends it at its next checkpoint with `fences_unreachable`, and blocks its guarded tools.
 
 **When Fences is down.** Agents keep working, and keep their limits:
@@ -340,6 +342,7 @@ A rejected API key raises `agentfences.FencesAuthError` (a `PermissionError`) wh
 - A checkpoint that hits a connection error is sent once more, with the same `step_id`, so the server counts it once. That's only on servers that show they deduplicate steps; a timeout is never retried.
 - Overshoot during a network split: up to one step per process for a limit the server enforces across processes (a daily cap shared with other runs, say), plus any model call that wasn't checked before it was sent. Guarded tools never overshoot: they're blocked.
 - Records that were never sent (decisions, tool and model calls) are lost if the process crashes. Limits aren't affected.
+- Redirects aren't followed: a redirect from the endpoint reads as no answer, so the API key never goes to another host (from 0.9.1).
 
 **Overhead per step.** Local mode: about 5 microseconds for `checkpoint(response)` in Python, under 1 in TypeScript. Cloud mode adds one round trip to your Fences server per checkpoint (off the event loop in async agents). Decisions and call records are sent in the background and never add to a step.
 
