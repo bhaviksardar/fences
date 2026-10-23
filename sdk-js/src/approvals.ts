@@ -53,7 +53,9 @@ export async function requestApproval(reason: string, options: { amountUsd?: num
   const c = run.control.approvals.get(approvalId);  // the dashboard's approval command, or null: no answer in time
   run.control.approvals.delete(approvalId);
   const answer: Approval = c
-    ? { granted: !!c.granted, by: c.by ?? null, note: c.note ?? null, amountUsd: c.amount_usd ?? null, approvalId }
+    // granted only when it's true, and an amount only when it's a real one
+    ? { granted: c.granted === true, by: c.by ?? null, note: c.note ?? null,
+        amountUsd: typeof c.amount_usd === "number" && Number.isFinite(c.amount_usd) && c.amount_usd > 0 ? c.amount_usd : null, approvalId }
     : { granted: false, note: "No answer before the timeout", approvalId };
   if (answer.granted && answer.amountUsd && run.budgetUsd !== null) run.budgetUsd += answer.amountUsd;  // an unlimited run stays unlimited
   recordSpan("fences.approval", performance.now() - started, {  // one span from request to answer

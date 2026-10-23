@@ -4,6 +4,7 @@ snapshot of LiteLLM's price list refreshed by scripts/update_prices.py at each r
 """
 import json
 import logging
+import math
 import re
 from importlib import resources
 from typing import Optional, Tuple
@@ -60,7 +61,8 @@ def _get(obj, *path):
 
 
 def _num(*values) -> int:
-    return next((int(v) for v in values if isinstance(v, (int, float))), 0)
+    """The first finite count, or 0: a NaN or infinite one from a response is ignored."""
+    return next((int(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)), 0)
 
 
 def read_usage(response) -> Optional[dict]:
@@ -85,7 +87,8 @@ def read_usage(response) -> Optional[dict]:
             u = dict(input=_num(_get(usage, "input_tokens")), cache_read=_num(_get(usage, "cache_read_input_tokens")),
                      cache_write=_num(_get(usage, "cache_creation_input_tokens")), output=_num(_get(usage, "output_tokens")))
         cost = _get(usage, "cost")                             # gateways like OpenRouter report the billed cost
-        u["reported_cost"] = cost if isinstance(cost, (int, float)) else None
+        # Only a finite cost of zero or more: a NaN or negative one would switch the budget off
+        u["reported_cost"] = cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0 else None
         return dict(u, model=model)
 
     meta = _get(response, "usage_metadata")
@@ -116,6 +119,7 @@ def cost_of(response) -> Tuple[float, int]:
                    "agentfences: %s has no token usage, so this step costs $0. For streams, pass the final "
                    "message or a chunk that includes usage.", type(response).__name__)
         return 0.0, 0
+    u.update({k: max(u[k], 0) for k in ("input", "cache_read", "cache_write", "output")})  # odd counts never lower the cost
     tokens = u["input"] + u["cache_read"] + u["cache_write"] + u["output"]
     if u["reported_cost"] is not None:
         return float(u["reported_cost"]), tokens

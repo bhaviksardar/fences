@@ -6,14 +6,17 @@ import type { FencesClient } from "./client.js";
 import type { Span } from "./run.js";
 
 const SPAN_BATCH = 50;
+const MAX_QUEUED = 10_000;  // a slow server can't make a runaway agent eat memory; extra items are dropped
 type Item = { kind: "decision"; client: FencesClient; runId: string; body: Record<string, unknown> }
   | { kind: "span"; client: FencesClient; runId: string; span: Span };
 const queue: Item[] = [];
 let draining: Promise<void> | null = null;
 /** Off once a server says it has no spans endpoint. */
 export let spansSupported = true;
+export const resetSpans = (): void => { spansSupported = true; };
 
 export function enqueue(item: Item): void {
+  if (queue.length >= MAX_QUEUED) return;
   queue.push(item);
   draining ??= drain().finally(() => { draining = null; });
 }

@@ -563,7 +563,7 @@ def check_old_server_without_events():
         assert len([m for m in seen if "doesn't accept tool and model call events" in m]) == 1, seen
     finally:
         agentfences.init(local_only=True)
-        agentfences.outbox.spans_supported = True
+        assert agentfences.outbox.spans_supported, "init() asks the new server again"
         logging.getLogger("agentfences").removeHandler(handler)
 
 
@@ -1063,7 +1063,46 @@ def check_client_replies():
     from agentfences.tools import approval_text  # what the person approving reads: a crafted value stays a value
     assert approval_text([("order_id", "1182', amount=5)  # "), ("amount", 5000)]) == \
         '{"order_id": "1182\', amount=5)  # ", "amount": 5000}'
-    assert approval_text([("note", "x" * 400)]).endswith("x…") and len(approval_text([("note", "x" * 400)])) == 300
+    assert approval_text([("note", "x" * 400)]) == '{"note": "' + "x" * 299 + '…"}'
+    hidden = [(f"k{i}", "\u200b" * 50) for i in range(200)]  # escaping makes text longer: the cap still holds
+    assert len(approval_text(hidden)) <= 2000 and len(approval_text([("note", "\u200b" * 3000)])) <= 2000
+    shown = approval_text([("memo", "x" * 290), ("to", "acct-EVIL")])  # padding can't push an argument out of view
+    assert '"to": "acct-EVIL"' in shown and len(shown) <= 320, shown
+    assert approval_text([("note", "pay \u201d, \u201cto\u201d: \u201cme\u202e")]) == \
+        '{"note": "pay \\u201d, \\u201cto\\u201d: \\u201cme\\u202e"}'  # lookalike quotes and bidi controls are escaped
+    assert approval_text([("city", "Zürich")]) == '{"city": "Zürich"}'
+
+
+def check_malformed_replies_and_usage():
+    """Malformed values from the server or a model's usage can't break a checkpoint, lift a limit, grant
+    an approval or lower a cost."""
+    from agentfences import approvals
+    from agentfences.pricing import cost_of
+    sent = cloud()
+    try:
+        replies = [{"ok": False, "breach": ["x"]}, {"ok": "false", "breach": "budget_exceeded"},
+                   {"ok": True, "commands": [{"type": "limits", "budget_usd": float("inf")}]}]
+        sent.checkpoint = lambda *a, **k: replies.pop(0)
+
+        @governed(budget_usd=1)
+        def agent():
+            first, second = checkpoint_sync(cost_delta_usd=0.01), checkpoint_sync(cost_delta_usd=0.01)
+            checkpoint_sync(cost_delta_usd=0.01)
+            return first.breach_type, second.breach_type, get_active_run().budget_usd
+        assert agent() == ("limit_reached", "budget_exceeded", 1), "a breach stays one, and an infinite limit isn't taken"
+    finally:
+        agentfences.init(local_only=True)
+
+    for granted, amount in [("false", 5), (1, 5), (True, float("nan")), (True, "1e9"), (True, -5), (True, float("inf"))]:
+        run = NS(awaiting=1, approvals={"a": {"granted": granted, "amount_usd": amount}}, budget_usd=1.0)
+        answer = approvals._answer(run, "a")
+        assert answer.granted is (granted is True) and run.budget_usd == 1.0, (granted, amount, answer, run.budget_usd)
+
+    usage = lambda **u: NS(model="gpt-4o", usage=NS(**dict(dict(prompt_tokens=100, completion_tokens=50, cost=None), **u)))
+    for odd in (usage(cost=float("nan")), usage(cost=-1.0), usage(prompt_tokens=float("nan")), usage(completion_tokens=-10**9),
+                usage(prompt_tokens=10, prompt_tokens_details=NS(cached_tokens=10_000))):
+        cost, tokens = cost_of(odd)
+        assert math.isfinite(cost) and cost >= 0 and tokens >= 0, (odd, cost, tokens)
 
 
 def check_revoked_key_and_odd_replies():
@@ -1262,7 +1301,7 @@ if __name__ == "__main__":
         check_resent_quarantine_doesnt_flood_heartbeats, check_acks_survive_a_rate_limited_heartbeat, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,
         check_version_is_sent, check_quarantine,
         check_old_server_without_control, check_bad_amounts_are_refused, check_custom_prices_are_validated,
-        check_client_replies, check_revoked_key_and_odd_replies, check_circuit_breaker,
+        check_client_replies, check_malformed_replies_and_usage, check_revoked_key_and_odd_replies, check_circuit_breaker,
         check_step_ids_and_one_retry, check_endpoint_and_budget_hardening,
     ]
     for check in checks:

@@ -132,6 +132,21 @@ test("a hold shrinks to the actual cost, and the checkpoint that records it rele
   assert.ok(Math.abs(after[0]) < 1e-12 && Math.abs(after[1] - PER_CALL) < 1e-12, JSON.stringify(after));
 });
 
+test("a checkpoint releases only the call it prices: another finished call still counts until its own", { skip }, async () => {
+  reset();
+  const [counted, third] = await governed(async () => {
+    const [r0, r1] = await Promise.all([chat(), chat()]);
+    await checkpoint(r0);
+    const run = getActiveRun(), counted = run.costUsd + run.reservedUsd;
+    const third = await chat().then(() => "sent", (e) => e.constructor.name);
+    await checkpoint(r1);
+    return [counted, third];
+  }, { budgetUsd: 0.0025 })();  // fits two calls capped at 100 output tokens
+  assert.ok(Math.abs(counted - 2 * PER_CALL) < 1e-12, String(counted));
+  assert.equal(third, "FencesStop");  // the second call was spent: a third could go over the budget
+  assert.equal(model.requests.length, 2);
+});
+
 test("a call handled only with .catch() or .finally() is still recorded and settled", { skip }, async () => {
   reset();
   model.fail = true;

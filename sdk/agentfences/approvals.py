@@ -58,7 +58,9 @@ def _waiting(run, approval_id: str, deadline: float) -> bool:
 def _answer(run, approval_id: str) -> Approval:
     run.awaiting -= 1
     c = run.approvals.pop(approval_id, None)  # the dashboard's approval command, or None: no answer in time
-    answer = (Approval(bool(c.get("granted")), by=c.get("by"), note=c.get("note"), amount_usd=c.get("amount_usd"), approval_id=approval_id)
+    amount = c.get("amount_usd") if c else None  # granted only when it's true, and an amount only when it's a real one
+    amount = amount if control.is_number(amount) and amount > 0 else None
+    answer = (Approval(c.get("granted") is True, by=c.get("by"), note=c.get("note"), amount_usd=amount, approval_id=approval_id)
               if c else Approval(False, note="No answer before the timeout", approval_id=approval_id))
     if answer.granted and answer.amount_usd and run.budget_usd is not None:  # an unlimited run stays unlimited
         run.budget_usd += answer.amount_usd

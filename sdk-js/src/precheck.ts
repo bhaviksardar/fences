@@ -21,7 +21,7 @@ type Params = Record<string, unknown>;
 
 /** The output-token cap a request sets, if any. */
 export function maxOut(params: Params): number | null {
-  for (const k of MAX_OUT_PARAMS) if (Number.isInteger(params[k])) return params[k] as number;
+  for (const k of MAX_OUT_PARAMS) if (Number.isInteger(params[k]) && (params[k] as number) > 0) return params[k] as number;
   return null;
 }
 
@@ -49,6 +49,7 @@ export function worstCaseUsd(model: unknown, request: unknown, outCap: number | 
 
 /** Hold worst if it fits in what's left of the budget; null if it doesn't. */
 function take(run: Run, worst: number): Hold | null {
+  if (run.control.cancelled) return null;
   if (Math.round((run.costUsd + run.reservedUsd + worst) * 1e9) / 1e9 > run.budgetUsd!) return null;
   const h: Hold = { amount: worst, finished: false };
   run.holds.push(h);
@@ -78,7 +79,10 @@ export interface Prepared { run: Run; worst: number; outCap: number | null }
 /** The call to check, or null when there's nothing to check (no run, no budget, a model with no known price). */
 export function prepare(model: unknown, request: unknown, params: Params = {}): Prepared | null {
   const run = getActiveRun();
-  if (!run || run.budgetUsd === null) return null;
+  if (!run) return null;
+  // Halted (stopGraceS): the governed call is over, but JS can't stop the agent's code. Its model calls are refused
+  if (run.control.cancelled) return { run, worst: Infinity, outCap: null };
+  if (run.budgetUsd === null) return null;
   const outCap = maxOut(params);
   const worst = worstCaseUsd(model, request, outCap, Number.isInteger(params.n) ? (params.n as number) : 1);
   return worst === null ? null : { run, worst, outCap };
@@ -109,8 +113,9 @@ export async function holdAsync(p: Prepared): Promise<Hold> {
 
 /**
  * After the call. A failed call isn't billed, so its hold is released now. Otherwise the hold
- * shrinks to the response's actual cost (a stream without usage keeps its worst case), and the
- * next checkpoint, which records that cost, releases it.
+ * shrinks to the response's actual cost, and checkpoint(response), which records that cost,
+ * releases it; until then it still counts against the budget. A call with no cost to read (a
+ * stream without usage) keeps its worst case until the next checkpoint.
  */
 export function finish(run: Run, h: Hold, response?: unknown, failed = false): void {
   const i = run.holds.indexOf(h);  // by identity: parallel calls can hold equal amounts
@@ -124,14 +129,19 @@ export function finish(run: Run, h: Hold, response?: unknown, failed = false): v
     const actual = costOf(response)[0];
     run.reservedUsd += actual - h.amount;
     h.amount = actual;
+    h.response = response;
   }
   h.finished = true;
 }
 
-/** At a checkpoint, which records the actual cost: release the holds of calls that have finished. */
-export function releaseFinished(run: Run): void {
-  const done = run.holds.filter((h) => h.finished);
+/**
+ * At checkpoint(response), which records its actual cost: release that call's hold. Another finished
+ * call's hold stays until its own checkpoint, since its cost isn't recorded yet.
+ * ponytail: an unpriced hold (a stream without usage) goes at any checkpoint; nothing names its cost.
+ */
+export function releaseFinished(run: Run, response?: unknown): void {
+  const done = run.holds.filter((h) => h.finished && (h.response === undefined || h.response === response));
   if (!done.length) return;
-  run.holds = run.holds.filter((h) => !h.finished);
+  run.holds = run.holds.filter((h) => !done.includes(h));
   run.reservedUsd -= done.reduce((sum, h) => sum + h.amount, 0);
 }

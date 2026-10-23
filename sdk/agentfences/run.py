@@ -35,7 +35,7 @@ class RunState:
     iterations: int = 0
     tokens_used: int = 0
     started_at: float = field(default_factory=time.time)
-    decisions: list = field(default_factory=list)
+    decisions: deque = field(default_factory=lambda: deque(maxlen=MAX_EVENTS_PER_RUN))
     last_breach: Optional[str] = None   # breach from the latest checkpoint; cleared once limits are raised
     warned: bool = False
     context: dict = field(default_factory=dict)  # environment, release and agentfences.context() values
@@ -56,7 +56,7 @@ class RunState:
     loop: Optional[asyncio.AbstractEventLoop] = None
     cancelled: bool = False             # Fences cancelled the task (or halted the thread) after a stop
     reserved_usd: float = 0.0           # held by guarded tools and model calls in flight
-    holds: list = field(default_factory=list)  # model calls' worst-case costs: [amount, finished]
+    holds: list = field(default_factory=list)  # model calls' worst-case costs: [amount, finished, response]
     quarantined: bool = False           # the agent was quarantined from the dashboard while this ran
     on_breach: Optional[str] = None     # "hold": wait at a limit for someone to raise it
     held: Optional[str] = None          # while waiting at a limit: "breach" or "budget"

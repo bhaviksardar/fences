@@ -32,8 +32,10 @@ export class MCPToolError extends Error {
  * one throws ToolBlocked and never reaches the MCP server. Outside a governed run calls pass straight through.
  */
 export function wrap<C extends CallToolClient>(client: C, options: WrapOptions = {}): C {
-  const original = client.callTool.bind(client), costs = options.costUsd ?? {}, approve = new Set(options.approve);
-  const named = new Set(Array.isArray(options.guard) ? options.guard : []);
+  // A bare string (from untyped JS) is one name, not a list of characters
+  const names = (v: unknown): string[] => typeof v === "string" ? [v] : Array.isArray(v) ? v : [];
+  const original = client.callTool.bind(client), costs = options.costUsd ?? {}, approve = new Set(names(options.approve));
+  const named = new Set(names(options.guard));
   client.callTool = async (params, ...rest) => {
     const run = getActiveRun();
     if (!run) return original(params, ...rest);

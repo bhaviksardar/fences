@@ -113,17 +113,27 @@ export const TOTALS = { spent_usd: "costUsd", iterations: "iterations", tokens_u
 export function adopt(run: Run, reply: Reply, fields: Record<string, string>, nullBudget = false): void {
   for (const [wire, field] of Object.entries(fields)) {
     const v = reply[wire];
-    if ((typeof v === "number" && !Number.isNaN(v)) || (nullBudget && wire === "budget_usd" && v === null)) {
+    // Only a finite number: a NaN would switch a limit off, and an infinite one would lift it
+    if ((typeof v === "number" && Number.isFinite(v)) || (nullBudget && wire === "budget_usd" && v === null)) {
       (run as any)[field] = v;  // eslint-disable-line @typescript-eslint/no-explicit-any
     }
   }
 }
 
+/** The commands in a reply that can be applied: objects whose ids are strings. A malformed one is skipped,
+ * so it can't stop the heartbeat or a checkpoint. */
+export function wellFormed(commands: unknown): Reply[] {
+  const ok = (v: unknown) => v === undefined || v === null || typeof v === "string";
+  return Array.isArray(commands)
+    ? commands.filter((c) => c !== null && typeof c === "object" && !Array.isArray(c) && ok(c.run_id) && ok(c.id) && ok(c.approval_id))
+    : [];
+}
+
 /** Apply the commands addressed to this run (from a heartbeat or a checkpoint reply), and acknowledge them. Each is safe to apply twice. */
-export function apply(run: Run, commands: Reply[] | undefined): void {
+export function apply(run: Run, commands: unknown): void {
   // Limits first: a resume in the same reply may release a call held for budget, which re-checks against them at once
-  for (const c of [...(commands ?? [])].sort((a, b) => Number(a.type !== "limits") - Number(b.type !== "limits"))) {
-    if (c.run_id !== undefined && c.run_id !== run.runId) continue;
+  for (const c of wellFormed(commands).sort((a, b) => Number(a.type !== "limits") - Number(b.type !== "limits"))) {
+    if (c.run_id !== undefined && c.run_id !== null && c.run_id !== run.runId) continue;
     const ctl = run.control;
     if (c.type === "stop") {
       if (!ctl.stopped) {
@@ -283,7 +293,7 @@ async function beat(): Promise<void> {
       return;
     } else {
       Object.assign(backoff, { failed: 0, nextTry: 0 });
-      for (const run of runs) apply(run, (resp.commands as Reply[] | undefined)?.filter((c) => c.run_id === run.runId));
+      for (const run of runs) apply(run, wellFormed(resp.commands).filter((c) => c.run_id === run.runId));
     }
   } catch {
     acks = [...batch, ...acks];  // a failed heartbeat is retried next time

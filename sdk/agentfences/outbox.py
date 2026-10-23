@@ -12,22 +12,29 @@ from typing import Optional
 log = logging.getLogger("agentfences")
 
 SPAN_BATCH = 50
+MAX_QUEUED = 10_000  # a slow server can't make a runaway agent eat memory; extra items are dropped
 
 # Items: ("decision", client, payload) or ("span", client, run_id, span)
-_queue: "queue.Queue" = queue.Queue()
+_queue: "queue.Queue" = queue.Queue(MAX_QUEUED)
 _worker: Optional[threading.Thread] = None
 _worker_lock = threading.Lock()
 spans_supported = True  # off once a server says it has no spans endpoint
 
 
 def put_decision(client, payload: dict):
-    _start()
-    _queue.put(("decision", client, payload))
+    _put(("decision", client, payload))
 
 
 def put_span(client, run_id: str, span: dict):
+    _put(("span", client, run_id, span))
+
+
+def _put(item):
     _start()
-    _queue.put(("span", client, run_id, span))
+    try:
+        _queue.put_nowait(item)
+    except queue.Full:
+        log.debug("agentfences: outbox full, dropped a %s", item[0])
 
 
 def wait(deadline: float):

@@ -180,10 +180,37 @@ def check_on_breach_is_passed_on():
         raise AssertionError("on_breach is checked")
 
 
+def check_refused_start_stops_the_graph():
+    """A quarantined agent or a rejected key raises from invoke(): the graph never runs unlimited."""
+    for refuse in ("quarantine", "bad key"):
+        server = cloud_with(test_local.RecordingClient())
+        if refuse == "quarantine":
+            server.quarantine = True
+        else:
+            server.start_run = lambda *a, **k: (_ for _ in ()).throw(agentfences.FencesAuthError("401"))
+        graph = build_graph(max_steps=3)
+        try:
+            graph.invoke(START, {**CONFIG, "callbacks": [FencesCallbackHandler(budget_usd=1)]})
+        except (agentfences.AgentQuarantined, agentfences.FencesAuthError):
+            pass
+        else:
+            raise AssertionError(f"{refuse}: the graph ran with no limits")
+        finally:
+            agentfences.init(local_only=True)
+
+    server = cloud_with(test_local.RecordingClient())  # a malformed start reply doesn't break the run
+    server.start_limits, server.start_notices = [1], ["x"]
+    try:
+        build_graph(max_steps=1).invoke(START, {**CONFIG, "callbacks": [FencesCallbackHandler(budget_usd=1)]})
+        assert server.of("start") and server.of("end")[-1]["status"] == "success", server.of("end")
+    finally:
+        agentfences.init(local_only=True)
+
+
 if __name__ == "__main__":
     agentfences.init(local_only=True)
     for check in [check_graph_stops_on_budget, check_success_and_tool_errors, check_joins_a_governed_run,
-                  check_async_graph, check_model_on_its_own, check_on_breach_is_passed_on]:
+                  check_async_graph, check_model_on_its_own, check_on_breach_is_passed_on, check_refused_start_stops_the_graph]:
         check()
         print("ok", check.__name__)
     print("langchain checks passed")

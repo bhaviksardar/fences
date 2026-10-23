@@ -1,5 +1,6 @@
-# Publishes sdk-js to npm when a tag like sdk-js-v0.4.0 is pushed.
-# Uses npm trusted publishing (OIDC): no npm token or 2FA code is stored anywhere.
+# Publishes sdk-js to npm when a tag like sdk-js-v0.4.0 is pushed, after the tests pass.
+# Uses npm trusted publishing (OIDC): no npm token or 2FA code is stored anywhere. Only the
+# publish job can mint the OIDC token; installs and tests run without it.
 # One-time setup on npmjs.com: package agentfences -> Settings -> Trusted publisher ->
 # GitHub Actions, repository bhaviksardar/fences, workflow publish-npm.yml.
 name: publish-npm
@@ -10,10 +11,9 @@ on:
 
 permissions:
   contents: read
-  id-token: write  # lets npm verify this workflow's identity
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -23,8 +23,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
-      - run: npm install -g npm@^11.5.1  # trusted publishing needs npm 11.5.1+
       - name: Tag matches package.json and VERSION
         run: |
           tag="${GITHUB_REF_NAME#sdk-js-v}"
@@ -32,4 +30,24 @@ jobs:
           grep -q "VERSION = \"$tag\"" src/version.ts
       - run: npm ci
       - run: npm test
-      - run: npm publish --provenance --access public
+      - run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: sdk-js/agentfences-*.tgz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # lets npm verify this workflow's identity
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@11.5.1  # trusted publishing needs npm 11.5.1+; pinned
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+      - run: npm publish ./agentfences-*.tgz --provenance --access public

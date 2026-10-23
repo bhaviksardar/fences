@@ -11,8 +11,11 @@ Fences for the OpenAI Agents SDK (Python 3.10+), with no decorators:
 run() is Runner.run governed by Fences: each model call is prechecked against the budget
 before it's sent, then recorded with its tokens and cost and checkpointed, so limits
 apply, and each tool call is recorded. Already inside
-@governed? Pass FencesRunHooks() as Runner.run(..., hooks=...) instead.
+@governed? Pass FencesRunHooks() as Runner.run(..., hooks=...) instead. A sub-agent's run
+(Agent.as_tool, or Runner.run in a tool) is governed too, with the same budget and limits,
+unless it's given hooks of its own: those should subclass FencesRunHooks.
 """
+import contextvars
 import json
 import time
 from typing import Any, Optional
@@ -95,3 +98,39 @@ async def run(agent, input: Any, *, agent_name: Optional[str] = None, budget_usd
         return await Runner.run(agent, input, hooks=FencesRunHooks(), **runner_kwargs)
     governed_run.__name__ = agent_name or getattr(agent, "name", None) or "openai_agent"  # the run's agent name
     return await core.governed(budget_usd, max_iterations, max_duration_ms, max_tokens, on_breach)(governed_run)()
+
+
+# A run governed by FencesRunHooks is in progress in this context: Runner.run with no hooks of its
+# own inside it (Agent.as_tool's sub-agent, or a tool calling Runner.run) gets them, so the
+# sub-agent's model calls are prechecked and charged to the same Fences run.
+_governing = contextvars.ContextVar("agentfences_openai_agents_governing", default=False)
+
+
+def _hooks_for(kwargs: dict) -> dict:
+    if kwargs.get("hooks") is None and _governing.get() and core.get_active_run() is not None:
+        kwargs["hooks"] = FencesRunHooks()  # its own: hold keys are per agent, and the parent's run concurrently
+    return kwargs
+
+
+def _patch_runner():
+    if getattr(Runner.run, "_fences", False):
+        return
+    run_, run_streamed = Runner.run, Runner.run_streamed
+
+    async def governed_run(cls, *args, **kwargs):
+        kwargs = _hooks_for(kwargs)
+        token = _governing.set(True) if isinstance(kwargs.get("hooks"), FencesRunHooks) else None
+        try:
+            return await run_(*args, **kwargs)
+        finally:
+            if token is not None:
+                _governing.reset(token)
+
+    def governed_streamed(cls, *args, **kwargs):
+        return run_streamed(*args, **_hooks_for(kwargs))
+
+    governed_run._fences = governed_streamed._fences = True
+    Runner.run, Runner.run_streamed = classmethod(governed_run), classmethod(governed_streamed)
+
+
+_patch_runner()

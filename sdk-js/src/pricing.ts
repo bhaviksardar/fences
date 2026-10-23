@@ -73,7 +73,8 @@ export function readUsage(response: unknown): Usage | null {
   const u = r.usage;
 
   if (u && typeof u === "object") {
-    const reported = typeof u.cost === "number" ? u.cost : null;  // gateways like OpenRouter report the billed cost
+    // Gateways like OpenRouter report the billed cost; only a finite one of zero or more: a NaN or negative one would switch the budget off
+    const reported = typeof u.cost === "number" && Number.isFinite(u.cost) && u.cost >= 0 ? u.cost : null;
     if (u.inputTokens !== undefined || u.outputTokens !== undefined) {   // Vercel AI SDK: input includes cached
       const read = num(u.cachedInputTokens, u.inputTokenDetails?.cacheReadTokens);
       const write = num(r.providerMetadata?.anthropic?.cacheCreationInputTokens, u.inputTokenDetails?.cacheWriteTokens);
@@ -113,6 +114,7 @@ export function costOf(response: unknown): [number, number] {
       "message or a chunk that includes usage.");
     return [0, 0];
   }
+  for (const k of ["input", "cacheRead", "cacheWrite", "output"] as const) u[k] = Math.max(u[k], 0);  // odd counts never lower the cost
   const tokens = u.input + u.cacheRead + u.cacheWrite + u.output;
   if (u.reportedCost !== null) return [u.reportedCost, tokens];
   const p = u.model ? priceOf(u.model) : undefined;

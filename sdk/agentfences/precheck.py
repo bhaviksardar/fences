@@ -2,7 +2,7 @@
 Budget prechecks: before a model call goes out, work out the most it could cost and
 refuse it (FencesStop) if that could take the run past its budget. The amount is held
 while the call is in flight, so parallel calls can't overspend together, and released at
-the next checkpoint, which records the actual cost. Used by instrument=True and the
+the checkpoint that records the call's actual cost. Used by instrument=True and the
 framework integrations, which see each request before it's sent.
 """
 import json
@@ -28,7 +28,7 @@ MAX_OUT_PARAMS = ("max_completion_tokens", "max_output_tokens", "max_tokens")
 
 def max_out(params: dict) -> Optional[int]:
     """The output-token cap a request sets, if any."""
-    return next((params[k] for k in MAX_OUT_PARAMS if isinstance(params.get(k), int)), None)
+    return next((params[k] for k in MAX_OUT_PARAMS if type(params.get(k)) is int and params[k] > 0), None)
 
 
 def worst_case_usd(model: Optional[str], request, out_cap: Optional[int] = None, n: int = 1) -> Optional[float]:
@@ -64,6 +64,9 @@ def _refuse(run, worst: float, out_cap: Optional[int]):
 def _prepare(model: Optional[str], request, params: Optional[dict]):
     """(run, worst case, output cap) for a call to check, or None when there's nothing to check."""
     run = get_active_run()
+    if run is not None and run.cancelled:  # halted after a stop: work it left running can't call the model
+        from .core import _result
+        raise FencesStop(_result(run))
     if run is None or run.budget_usd is None:
         return None
     params = params or {}
@@ -77,7 +80,7 @@ def _take(run, worst: float) -> Optional[list]:
     with reserve_lock:
         if round(run.cost_usd + run.reserved_usd + worst, 9) > run.budget_usd:
             return None
-        h = [worst, False]
+        h = [worst, False, None]  # amount, finished, the response that priced it
         run.holds.append(h)
         run.reserved_usd += worst
         return h
@@ -131,8 +134,9 @@ async def hold_async(model: Optional[str], request, params: Optional[dict] = Non
 def finish(h: Optional[list], response=None, failed: bool = False):
     """
     After the call. A failed call isn't billed, so its hold is released now. Otherwise the
-    hold shrinks to the response's actual cost (a stream without usage keeps its worst case),
-    and the next checkpoint, which records that cost, releases it.
+    hold shrinks to the response's actual cost, and checkpoint(response), which records that
+    cost, releases it; until then it still counts against the budget. A call with no cost to
+    read (a stream without usage) keeps its worst case until the next checkpoint.
     """
     if h is None:
         return
@@ -147,5 +151,5 @@ def finish(h: Optional[list], response=None, failed: bool = False):
             return
         if actual is not None:
             run.reserved_usd += actual - h[0]
-            h[0] = actual
+            h[0], h[2] = actual, response
         h[1] = True

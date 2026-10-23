@@ -9,6 +9,7 @@ import asyncio
 import atexit
 import ctypes
 import logging
+import math
 import random
 import threading
 import time
@@ -72,7 +73,8 @@ TOTAL_FIELDS = (("spent_usd", "cost_usd"), ("iterations", "iterations"), ("token
 
 
 def is_number(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v  # v == v: not NaN
+    """A finite int or float: a NaN would switch a limit off, and an infinite one would lift it."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def adopt(run, reply: dict, fields, null_budget: bool = False):
@@ -85,10 +87,18 @@ def adopt(run, reply: dict, fields, null_budget: bool = False):
             setattr(run, dst, v)
 
 
+def well_formed(commands) -> list:
+    """The commands in a reply that can be applied: objects whose ids are strings. A malformed one is
+    skipped, so it can't stop the heartbeat or a checkpoint."""
+    ok = lambda v: v is None or isinstance(v, str)
+    return [c for c in (commands if isinstance(commands, list) else ())
+            if isinstance(c, dict) and ok(c.get("run_id")) and ok(c.get("id")) and ok(c.get("approval_id"))]
+
+
 def apply(run, commands):
     """Apply the commands addressed to this run (from a heartbeat or a checkpoint response), and acknowledge them."""
     # Limits first: a resume in the same reply may release a call held for budget, which re-checks against them at once
-    for c in sorted(commands or (), key=lambda c: c.get("type") != "limits"):
+    for c in sorted(well_formed(commands), key=lambda c: c.get("type") != "limits"):
         if c.get("run_id") not in (None, run.run_id):
             continue
         kind = c.get("type")
@@ -205,7 +215,7 @@ atexit.register(drain)
 def dispatch(commands):
     with _lock:
         runs = dict(_live)
-    for run_id in {c.get("run_id") for c in commands or ()}:
+    for run_id in {c.get("run_id") for c in well_formed(commands)}:
         if run_id in runs:
             apply(runs[run_id], commands)
 
@@ -248,11 +258,22 @@ def _halt(run):
 
 
 def disarm(run):
-    """The run's own code is done: no halt from here on, and one sent but not yet raised is withdrawn."""
+    """The run's own code is done: no halt from here on, and one sent but not yet raised is withdrawn,
+    unless a run it's nested in was halted too: then the halt is that run's."""
     with _lock:
         thread, run.thread = run.thread, None
-        if run.cancelled and thread is not None:
+        if run.cancelled and thread is not None and not _halted_outer(run, thread):
             _raise_in(thread, ctypes.py_object())  # NULL: clears a pending exception
+
+
+def halted_outer(run) -> bool:
+    """A run this one is nested in, on this thread, was halted too: a Halt here is for it as well."""
+    with _lock:
+        return _halted_outer(run, threading.get_ident())
+
+
+def _halted_outer(run, thread) -> bool:  # under _lock
+    return any(r is not run and r.thread == thread and r.cancelled and not r.stop_seen for r in _live.values())
 
 
 def cancel_overdue(runs):
@@ -308,7 +329,10 @@ def _heartbeat():
         if resp.get("unsupported"):
             unsupported("heartbeat", "the heartbeat", "a stop from the dashboard applies at the next checkpoint and pause isn't available")
             return  # stops then arrive only in checkpoint replies, which the agent sees
-        dispatch(resp.get("commands"))
+        try:
+            dispatch(resp.get("commands"))
+        except Exception:  # the heartbeat carries stop and halt for every run: nothing in a reply may end it
+            log.exception("agentfences: couldn't apply a heartbeat reply's commands")
 
 
 # ── Waiting at a limit ────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ import inspect
 import reprlib
 import threading
 import time
+import unicodedata
 import uuid
 from typing import Callable, Optional, Union
 
@@ -44,10 +45,31 @@ def arg_names(func: Callable, args: tuple, kwargs: dict) -> str:
 def approval_text(items) -> str:
     """
     `{"order_id": "1182", "amount": 5000}`, for the person approving a call: JSON, so a value the
-    model chose can't pass for another argument, and cut only at the end, never in the middle.
+    model chose can't pass for another argument. Every argument is shown: a long value is cut,
+    never the arguments after it. Quote lookalikes and invisible characters are escaped (\\u201d),
+    so they can't pass for JSON's own quotes or hide text.
     """
-    text = json.dumps(dict(items), default=repr, ensure_ascii=False)
-    return text if len(text) <= MAX_ARGS else text[:MAX_ARGS - 1] + "…"
+    args = dict(items)
+    text = _escape(json.dumps(args, default=repr, ensure_ascii=False))
+    if len(text) > MAX_ARGS:
+        each = max(MAX_ARGS // max(len(args), 1), 24)
+        args = {_cut(str(k), each): _cut(v if isinstance(v, str) else json.dumps(v, default=repr, ensure_ascii=False), each)
+                for k, v in args.items()}
+        # ponytail: hundreds of arguments get cut here; the marker still shows some are hidden
+        text = _cut(_escape(json.dumps(args, ensure_ascii=False)), MAX_APPROVAL)
+    return text
+
+
+def _escape(text: str) -> str:
+    return "".join(json.dumps(c)[1:-1] if unicodedata.category(c) in ("Cc", "Cf", "Pi", "Pf") or c in "\uff02\u02ba\u02dd\u3003"
+                   else c for c in text)
+
+
+MAX_APPROVAL = 2000  # characters of approval text, however many arguments
+
+
+def _cut(s: str, n: int) -> str:
+    return s if len(s) <= n else s[:n - 1] + "…"
 
 
 def items_summary(items) -> str:
@@ -192,7 +214,8 @@ def _ask_server(run, client, label: str, summary: str, amount: float, approval_i
 def _settle(run, guard_id: str, amount: float, error: Optional[BaseException]):
     """Release the reservation and charge the run: in full unless the tool raised (a timeout or cancel may have done it)."""
     from . import core
-    outcome = "ok" if error is None else "unknown" if isinstance(error, (TimeoutError, asyncio.CancelledError)) else "error"
+    # A timeout, cancel or halt may have stopped it after its side effect: charged, as "unknown"
+    outcome = "ok" if error is None else "unknown" if isinstance(error, (TimeoutError, asyncio.CancelledError, control.Halt)) else "error"
     charged = 0.0 if outcome == "error" else amount
     with _reserve_lock:
         run.reserved_usd -= amount

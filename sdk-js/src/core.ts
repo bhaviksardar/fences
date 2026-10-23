@@ -95,6 +95,7 @@ export function init(options: InitOptions = {}): void {
   localOnly = !!options.localOnly;
   failClosed = !!options.failClosed;
   defaultOnBreach = checkOnBreach(options.onBreach);
+  outbox.resetSpans();  // a new server gets asked again
   if (localOnly) {
     client = null;
   } else if (!options.apiKey) {
@@ -219,8 +220,9 @@ async function startRun(agentName: string, limits: Limits): Promise<Run> {
   if (resp.quarantined) throw new AgentQuarantined(agentName, resp.detail);
   // The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
   // A null budget (unlimited) is taken only for a run whose code set none: a reply can't lift a budget from the code
-  control.adopt(run, resp.limits ?? {}, control.LIMITS, limits.budgetUsd == null);
-  for (const n of resp.notices ?? []) {
+  const isObject = (v: unknown): v is Record<string, any> => v !== null && typeof v === "object" && !Array.isArray(v);
+  control.adopt(run, isObject(resp.limits) ? resp.limits : {}, control.LIMITS, limits.budgetUsd == null);
+  for (const n of (Array.isArray(resp.notices) ? resp.notices : []).filter(isObject)) {  // a malformed one is skipped
     events.warnOnce(`${agentName}:${n.code}`, `${n.message ?? ""}${n.url ? ` ${n.url}` : ""}`);
   }
   if (!("limits" in resp) && run.budgetUsd === null && !resp.network_error) {
@@ -274,8 +276,8 @@ export async function checkpoint(response?: unknown, extra: Extra = {}): Promise
   const [cost, tokens] = response === undefined || response === null ? [0, 0] : costOf(response);
   const stepCost = cost + checkAmount(extra.costDeltaUsd ?? 0, "costDeltaUsd");
   const stepTokens = tokens + checkAmount(extra.tokensUsed ?? 0, "tokensUsed");
-  run.costUsd += stepCost;  // the actual cost replaces the holds of model calls that finished
-  precheck.releaseFinished(run);
+  run.costUsd += stepCost;  // the actual cost replaces the hold of the call it prices
+  precheck.releaseFinished(run, response ?? undefined);
   run.tokensUsed += stepTokens;
   run.iterations += 1;
   // A step_id per step: a retried checkpoint is counted once on servers that support it
@@ -334,7 +336,8 @@ function decide(run: Run, resp: Reply | null): CheckpointResult {
     control.adopt(run, resp, control.TOTALS);
     control.adopt(run, resp, control.LIMITS, !run.budgetInCode);
     // A fresh breach, or a 409 because the run is still fenced from an earlier one
-    run.lastBreach = resp.ok ? null : (resp.breach ?? run.lastBreach ?? "limit_reached");
+    const breach = typeof resp.breach === "string" && resp.breach ? resp.breach : null;  // an odd one is still a breach
+    run.lastBreach = resp.ok === true ? null : (breach ?? run.lastBreach ?? "limit_reached");
   }
   return finalResult(run);
 }
@@ -365,6 +368,7 @@ export function logDecision(reasoning: string, action: string | null = null): vo
   const run = getActiveRun();
   if (!run) return;
   run.decisions.push({ timestamp: Date.now() / 1000, iteration: run.iterations, reasoning, action });
+  if (run.decisions.length > MAX_EVENTS_PER_RUN) run.decisions.shift();
   if (!client) return;
   const sent = events.redact({ type: "decision", reasoning, action });
   if (sent && typeof sent.reasoning === "string" && sent.reasoning) {

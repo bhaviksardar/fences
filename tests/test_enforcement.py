@@ -12,9 +12,11 @@ import logging
 import math
 import threading
 import time
+from types import SimpleNamespace as NS
 
 import agentfences
 from agentfences import governed, checkpoint, checkpoint_sync, get_active_run, tool, ToolBlocked, FencesStop
+from agentfences.pricing import price_of
 from test_local import RecordingClient, wait_for, background  # also blocks the network
 
 
@@ -267,9 +269,10 @@ def check_mcp_session_calls_are_recorded_and_guarded():
 # ── Level 1: model calls are prechecked against the budget ───────────────────
 
 def check_model_call_worst_case():
-    from agentfences.precheck import worst_case_usd
+    from agentfences.precheck import worst_case_usd, max_out
     from agentfences.pricing import price_of
     p = price_of("gpt-4o")
+    assert max_out({"max_tokens": -5}) is None and max_out({"max_tokens": True}) is None, "a cap below 1 is no cap"
     assert math.isclose(worst_case_usd("gpt-4o", "x" * 400, 1000), 201 * p["in"] + 1000 * p["out"])  # 402 JSON bytes / 2
     assert math.isclose(worst_case_usd("gpt-4o", "x" * 400), 201 * p["in"] + p["max_out"] * p["out"]), "no cap: the model's"
     image = "data:image/png;base64," + "A" * 100_000  # a file counts as a flat 2,000 tokens, not its base64 size
@@ -314,6 +317,130 @@ def check_holds_are_released_exactly():
         checkpoint_sync()
         return run.reserved_usd
     assert agent() == 0
+
+
+def check_checkpoint_releases_only_its_own_call():
+    """Two calls finish, one is checkpointed: the other's cost still counts until its own checkpoint."""
+    from agentfences import precheck
+    per = 100 * price_of("gpt-4o")["out"]
+    priced = lambda: NS(model="gpt-4o", usage=NS(prompt_tokens=0, completion_tokens=100, total_tokens=100))
+
+    @governed(budget_usd=per * 2.5)
+    def agent():
+        run, params = get_active_run(), {"max_tokens": 100}
+        (a, ra), (b, rb) = ((precheck.hold("gpt-4o", [], params), priced()) for _ in range(2))
+        precheck.finish(a, ra)
+        precheck.finish(b, rb)
+        checkpoint_sync(rb)
+        assert math.isclose(run.cost_usd + run.reserved_usd, 2 * per), (run.cost_usd, run.reserved_usd)
+        try:
+            precheck.hold("gpt-4o", [], params)
+        except FencesStop:
+            pass
+        else:
+            raise AssertionError("a third call doesn't fit: the first one's cost isn't recorded yet, but it was spent")
+        checkpoint_sync(ra)
+        return run.cost_usd, run.reserved_usd
+    spent, held = agent()
+    assert math.isclose(spent, 2 * per) and abs(held) < 1e-12, (spent, held)
+
+
+def check_malformed_commands_keep_the_heartbeat():
+    """A reply with malformed commands is skipped: the heartbeat lives on and still delivers a stop."""
+    server = cloud(Server())
+    try:
+        @governed()
+        def agent():
+            wait_for(lambda: server.beats)
+            server.heartbeat_commands = [None, "stop", {"type": "stop", "id": ["x"]}, {"type": "approval", "approval_id": {}}]
+            wait_for(lambda: not server.heartbeat_commands)
+            time.sleep(0.2)
+            assert agentfences.control._thread.is_alive()
+            server.heartbeat_commands = [{"run_id": get_active_run().run_id, "type": "stop", "id": "s1"}]
+            wait_for(lambda: get_active_run().stopped)
+            assert agentfences.core._decide(get_active_run(), {"ok": True, "commands": [None, 7]}) is not None
+        agent()
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_nested_stopped_runs_are_both_halted():
+    """An outer and an inner run, both stopped and stuck: the outer is halted too, even though
+    it catches Exception around the inner run (one Halt reaches the thread for both)."""
+    server = cloud(Server(), stop_grace_s=0.2)
+    try:
+        @governed()
+        def inner():
+            while True:
+                sum(range(1000))
+
+        @governed()
+        def outer():
+            checkpoint_sync(cost_delta_usd=0.01)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    inner()
+                except Exception:
+                    pass
+            return "kept running"
+
+        def stop_every_run():
+            while not done:
+                live = [r for r in agentfences.control._live]
+                if len(live) >= 2 and not server.heartbeat_commands:
+                    server.heartbeat_commands = [{"run_id": r, "type": "stop"} for r in live]
+                time.sleep(0.02)
+        done = False
+        threading.Thread(target=stop_every_run, daemon=True).start()
+        try:
+            outcome = outer()
+        except FencesStop as e:
+            outcome = e.breach_type
+        finally:
+            done = True
+        assert outcome == "stopped_by_user", outcome
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_halted_tool_is_charged():
+    """A guarded tool halted after a stop may have done its work: settled "unknown", charged in full."""
+    server = cloud(Server(budget=100), stop_grace_s=0.2)
+    try:
+        @tool(cost_usd=5)
+        def pay():
+            time.sleep(0.6)  # the halt lands when this returns: after the payment went out
+
+        @governed()
+        def agent():
+            checkpoint_sync(cost_delta_usd=0.01)
+            while True:
+                pay()
+        background(lambda: _stop_the_live_run(server))
+        try:
+            agent()
+        except FencesStop:
+            pass
+        last = [g for g in server.guards if g["phase"] == "settle"][-1]
+        assert (last["outcome"], last["cost_usd"]) == ("unknown", 5), last
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_halted_run_cannot_call_the_model():
+    """Work a halted run left running (a thread, an executor) can't call the model, budget or not."""
+    from agentfences import precheck
+
+    @governed()
+    def agent():
+        run = get_active_run()
+        run.stopped, run.cancelled = True, True  # as the stop-grace halt leaves it
+        try:
+            precheck.hold("gpt-4o", "hi", {"max_tokens": 10})
+        except FencesStop as stop:
+            return stop.breach_type
+    assert agent() == "stopped_by_user"
 
 
 def check_refused_call_ends_run_breached():
@@ -799,7 +926,9 @@ if __name__ == "__main__":
         check_hold_a_call_until_the_budget_is_raised, check_resume_releases_against_the_raised_limit,
         check_stop_during_hanging_tool, check_stuck_sync_run_is_halted, check_stuck_stream_is_cancelled,
         check_stop_seen_at_checkpoint_is_not_cancelled, check_hanging_tool_times_out,
-        check_network_partition, check_heartbeats_back_off_while_failing,
+        check_network_partition, check_heartbeats_back_off_while_failing, check_checkpoint_releases_only_its_own_call,
+        check_malformed_commands_keep_the_heartbeat, check_nested_stopped_runs_are_both_halted, check_halted_tool_is_charged,
+        check_halted_run_cannot_call_the_model,
     ]
     for check in checks:
         try:

@@ -122,6 +122,7 @@ never halts.
         patch_clients()
     _local_only = local_only
     _fail_closed = fail_closed
+    outbox.spans_supported = True  # a new server gets asked again
 
     if local_only:
         _client = None
@@ -303,7 +304,9 @@ def _stopped(run: RunState, e: BaseException) -> BaseException:
         return e
     if isinstance(e, control.Halt):
         control.disarm(run)  # it may have landed before the code's own disarm
-        return FencesStop(_result(run))
+        # One Halt reaches a thread however many of its nested runs were halted: an outer one's
+        # must keep going, past this run, or the outer run would never be halted again
+        return e if control.halted_outer(run) else FencesStop(_result(run))
     if not isinstance(e, asyncio.CancelledError):
         return e
     task = asyncio.current_task()
@@ -362,9 +365,11 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
             raise AgentQuarantined(agent_name, resp.get("detail"))
         # The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
         # A null budget (unlimited) is taken only for a run whose code set none: a reply can't lift a budget from the code
-        control.adopt(run, resp.get("limits") or {}, control.LIMIT_FIELDS, null_budget=budget_usd is None)
-        for n in resp.get("notices") or ():
-            _notice(agent_name, n.get("code", ""), n.get("message", "") + (f" {n['url']}" if n.get("url") else ""))
+        limits = resp.get("limits")
+        control.adopt(run, limits if isinstance(limits, dict) else {}, control.LIMIT_FIELDS, null_budget=budget_usd is None)
+        for n in resp.get("notices") if isinstance(resp.get("notices"), list) else ():
+            if isinstance(n, dict):
+                _notice(agent_name, n.get("code", ""), n.get("message", "") + (f" {n['url']}" if n.get("url") else ""))
         if "limits" not in resp and run.budget_usd is None and "network_error" not in resp:
             _notice(agent_name, "no_budget", f"{agent_name} has no budget, so its spend isn't capped. "
                                              f"Set one on its page in the Fences dashboard.")
@@ -423,10 +428,11 @@ def _decide(run: RunState, resp: Optional[dict]) -> CheckpointResult:
         # Backend is authoritative: adopt its totals and (on a breach) its current limits
         control.adopt(run, resp, control.TOTAL_FIELDS)
         control.adopt(run, resp, control.LIMIT_FIELDS, null_budget=not run.budget_in_code)
-        if resp.get("ok"):
+        breach = resp.get("breach") if isinstance(resp.get("breach"), str) else None  # an odd one is still a breach
+        if resp.get("ok") is True:
             run.last_breach = None
         else:  # a fresh breach, or a 409 because the run is still fenced from an earlier one
-            run.last_breach = resp.get("breach") or run.last_breach or "limit_reached"
+            run.last_breach = breach or run.last_breach or "limit_reached"
     return _result(run)
 
 
@@ -466,13 +472,15 @@ def _after_hold(run: RunState, breach: CheckpointResult) -> CheckpointResult:
     return _result(run) if outcome == "stopped" else breach  # timed out: the limit it was held at
 
 
-def _record_step(cost_delta_usd: float, tokens_used: int) -> Optional[RunState]:
+def _record_step(cost_delta_usd: float, tokens_used: int, response=None) -> Optional[RunState]:
     run = get_active_run()
     if run is not None:
-        with reserve_lock:  # the actual cost replaces the holds of calls that finished, in one step
+        with reserve_lock:  # the actual cost replaces the hold of the call it prices, in one step
             run.cost_usd += cost_delta_usd
-            done = [h for h in run.holds if h[1]]
-            run.holds[:] = [h for h in run.holds if not h[1]]
+            # Another finished call's hold stays until its own checkpoint: its cost isn't recorded yet.
+            # ponytail: an unpriced hold (a stream without usage) goes at any checkpoint; nothing names its cost
+            done = [h for h in run.holds if h[1] and (h[2] is None or h[2] is response)]
+            run.holds[:] = [h for h in run.holds if not any(h is d for d in done)]
             run.reserved_usd -= sum(h[0] for h in done)
         run.tokens_used += tokens_used
         run.iterations += 1
@@ -538,7 +546,7 @@ async def checkpoint(response=None, cost_delta_usd: float = 0.0, tokens_used: in
     if get_active_run() is None:
         return CheckpointResult()
     cost, tokens = _measure(response, cost_delta_usd, tokens_used)
-    run = _record_step(cost, tokens)
+    run = _record_step(cost, tokens, response)
     resp = await asyncio.to_thread(_server_check, run, cost, tokens) if _client else None
     result = _decide(run, resp)
     if _holds_at(run, resp, result):  # on_breach="hold": wait here for someone to raise the limit
@@ -556,7 +564,7 @@ def checkpoint_sync(response=None, cost_delta_usd: float = 0.0, tokens_used: int
     if get_active_run() is None:
         return CheckpointResult()
     cost, tokens = _measure(response, cost_delta_usd, tokens_used)
-    run = _record_step(cost, tokens)
+    run = _record_step(cost, tokens, response)
     resp = _server_check(run, cost, tokens) if _client else None
     result = _decide(run, resp)
     if _holds_at(run, resp, result):

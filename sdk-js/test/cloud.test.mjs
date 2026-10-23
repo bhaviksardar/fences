@@ -181,6 +181,12 @@ test("spans are sent in batches, redacted; an older server without /spans gets o
   const ping = tool(function ping() { return "pong"; });
   await governed(async () => { for (let i = 0; i < 5; i++) { ping(); await flush(); } }, { budgetUsd: 1 })();
   assert.equal(warnings.filter((w) => w.includes("doesn't accept tool and model call spans")).length, 1);
+
+  server.spansRoute = true;
+  cloud();  // init() asks the new server again
+  const before = sent("/spans").length;
+  await governed(async () => { ping(); await flush(); }, { budgetUsd: 1 })();
+  assert.equal(sent("/spans").length, before + 1);
 });
 
 test("context and redaction on run start and end", async () => {
@@ -284,4 +290,18 @@ test("a redirect isn't followed: it would carry the API key to another host", as
     server.redirectTo = null;
     attacker.close();
   }
+});
+
+test("malformed replies can't break a checkpoint or a run start, lift a limit, or clear a breach", async () => {
+  cloud();
+  server.notices = [null, 1];
+  server.checkpointReplies = [[200, { ok: false, breach: ["x"], commands: [null, 5, { type: "stop", id: ["x"] }] }],
+                              [200, { ok: "false", breach: "budget_exceeded" }]];
+  const breaches = await governed(async () => [(await checkpoint(null, { costDeltaUsd: 0.01 })).breachType,
+                                               (await checkpoint(null, { costDeltaUsd: 0.01 })).breachType], { budgetUsd: 1 })();
+  assert.deepEqual(breaches, ["limit_reached", "budget_exceeded"]);
+  const { adopt, LIMITS } = await import("../dist/control.js");
+  const run = { budgetUsd: 1 };
+  adopt(run, { budget_usd: Infinity }, LIMITS);  // a reply body of 1e400 parses to Infinity
+  assert.equal(run.budgetUsd, 1);
 });

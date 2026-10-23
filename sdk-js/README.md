@@ -129,7 +129,7 @@ const openai = instrument(new OpenAI());  // one call covers every client of tha
 ```
 
 - If a call's worst case could take the run past its budget, it rejects with `FencesStop` (`budget_exceeded`) and never reaches the provider. The worst case is the request's input, estimated high, plus its output cap: `max_tokens` (or `max_completion_tokens`, `max_output_tokens`) if set, otherwise the model's whole output limit, so **set `max_tokens` on calls in runs with small budgets**.
-- Each call's worst case is held while it's in flight, so parallel calls can't overspend together. A failed call is released; a finished one is replaced by its actual cost, and the next `checkpoint()` releases it. With `onBreach: "hold"`, a call that doesn't fit waits for someone to raise the budget.
+- Each call's worst case is held while it's in flight, so parallel calls can't overspend together. A failed call is released; a finished one is replaced by its actual cost, which still counts until `checkpoint(response)` records it and releases the hold. With `onBreach: "hold"`, a call that doesn't fit waits for someone to raise the budget.
 - Calls are recorded, not counted as steps: keep calling `checkpoint(response)`, which adds the cost and checks the other limits.
 - The SDK's own promise comes back, with `.withResponse()` and `.asResponse()`. After `.asResponse()` the call is recorded without usage, and its worst case stays held until the next checkpoint.
 - OpenAI: `chat.completions.create` and `responses.create`, including OpenAI-compatible clients. Anthropic: `messages.create`. Streams are recorded when they start; pass the final usage to `checkpoint()`.

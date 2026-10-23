@@ -22,7 +22,7 @@ from uuid import UUID
 from langchain_core.callbacks import BaseCallbackHandler
 
 from . import core, precheck
-from .exceptions import FencesStop
+from .exceptions import FencesError, FencesStop
 from .pricing import read_usage
 from .spans import names_of, record_llm_call, record_tool_call
 
@@ -47,7 +47,7 @@ class FencesCallbackHandler(BaseCallbackHandler):
     all optional; in cloud mode, limits left out come from the agent's page in the dashboard.
     agent_name defaults to the outermost run's name (e.g. "LangGraph").
     """
-    raise_error = True  # so a FencesStop can halt the graph; anything else this handler hits is logged, never raised
+    raise_error = True  # so a FencesStop or a refused run start halts the graph; anything else this handler hits is logged
 
     def __init__(self, agent_name: Optional[str] = None, budget_usd: Optional[float] = None,
                  max_iterations: Optional[int] = None, max_duration_ms: Optional[int] = None,
@@ -104,10 +104,11 @@ class FencesCallbackHandler(BaseCallbackHandler):
             core._reset_active_run(token)
 
     def _safely(self, fn):
-        """Only FencesStop may escape: a bug here must never break the user's graph."""
+        """Only Fences' own refusals escape (FencesStop, a quarantined agent, a rejected key): a bug here
+        must never break the user's graph, but a refusal swallowed here would run it with no limits."""
         try:
             return fn()
-        except FencesStop:
+        except FencesError:
             raise
         except Exception:
             log.exception("agentfences: LangChain callback failed; the run continues unrecorded")

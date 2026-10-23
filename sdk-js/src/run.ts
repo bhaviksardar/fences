@@ -27,8 +27,8 @@ export interface Span {
   attributes: Record<string, unknown>;
 }
 
-/** A model call's budget hold: its worst case, then its actual cost once it finishes. */
-export interface Hold { amount: number; finished: boolean }
+/** A model call's budget hold: its worst case, then its actual cost once it finishes, priced from `response`. */
+export interface Hold { amount: number; finished: boolean; response?: unknown }
 
 export class Run {
   readonly runId = randomUUID();

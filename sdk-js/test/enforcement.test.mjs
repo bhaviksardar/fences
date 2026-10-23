@@ -222,6 +222,42 @@ test("a stop during a hanging tool halts the call with FencesStop and aborts run
   assert.ok(server.beats.some((b) => b.some((r) => r.stopped)), "the heartbeat says the stop was received");
 });
 
+test("after a halt, the agent's code left running can't call the model, and a tool it aborted is charged", async () => {
+  cloud({ stopGraceS: 0.2 }, 100);
+  const precheck = await import("../dist/precheck.js");
+  const pay = tool(() => new Promise((_, fail) => {  // aborted by the halt, after the payment may have gone out
+    getActiveRun().signal.addEventListener("abort", () => fail(new DOMException("aborted", "AbortError")));
+  }), { name: "pay", costUsd: 5 });
+  let detached;
+  const agent = governed(async () => {
+    await checkpoint(null, { costDeltaUsd: 0.01 });
+    const run = getActiveRun();
+    detached = (async () => {  // goes on after the governed call is over: JS can't stop it
+      await waitFor(() => run.control.cancelled);
+      try { precheck.holdNow(precheck.prepare("gpt-4o", "hi", { max_tokens: 10 })); return "sent"; } catch (e) { return e.constructor.name; }
+    })();
+    return pay();
+  }, { budgetUsd: 100 });
+  const operator = (async () => {
+    await waitFor(() => server.beats.at(-1)?.length);
+    server.heartbeatCommands = [{ run_id: server.beats.at(-1)[0].run_id, type: "stop", id: "s2" }];
+  })();
+  assert.ok((await agent().catch((e) => e)) instanceof FencesStop);
+  await operator;
+  assert.equal(await detached, "FencesStop");
+  await waitFor(() => server.guards.some((g) => g.phase === "settle"));
+  const settle = server.guards.find((g) => g.phase === "settle");
+  assert.deepEqual([settle.outcome, settle.cost_usd], ["unknown", 5]);
+});
+
+test("an MCP policy given as a bare string (untyped JS) names one tool", async () => {
+  cloud();
+  const called = [];
+  const client = fences.mcp.wrap({ callTool: async (p) => { called.push(p.name); return { content: [] }; } }, { guard: "refund" });
+  await governed(async () => client.callTool({ name: "refund", arguments: {} }))();
+  assert.ok(server.guards.some((g) => g.tool === "refund" && g.phase === "check"), "refund is guarded");
+});
+
 test("an agent that saw its stop at a checkpoint gets to wrap up", async () => {
   cloud({ stopGraceS: 0.1 });
   const agent = governed(async () => {

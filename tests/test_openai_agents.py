@@ -161,10 +161,38 @@ def check_failed_model_call_releases_its_hold():
     assert math.isclose(held_at_end, 0, abs_tol=1e-12) and math.isclose(spent, PER_CALL), (held_at_end, spent)
 
 
+def check_sub_agents_are_charged():
+    """A sub-agent run through Agent.as_tool spends from the same budget: its model calls are
+    prechecked and charged to the run."""
+    class Outer(FakeModel):  # calls the sub-agent tool, whose input is {"input": ...}
+        async def get_response(self, *args, **kwargs):
+            r = await super().get_response(*args, **kwargs)
+            for item in r.output:
+                if getattr(item, "type", "") == "function_call":
+                    item.arguments = '{"input": "find cats"}'
+            return r
+    sub = Agent(name="sub", instructions="Find.", model=FakeModel(tool_turns=0), model_settings=ModelSettings(max_tokens=200))
+    outer = Agent(name="outer", instructions="Delegate.", tools=[sub.as_tool(tool_name="lookup", tool_description="Find.")],
+                  model=Outer(tool_turns=3), model_settings=ModelSettings(max_tokens=200))
+    sent = cloud_with(BudgetServer(PER_CALL * 5.5))
+    try:
+        try:
+            asyncio.run(openai_agents.run(outer, "cats", budget_usd=PER_CALL * 5.5))
+        except FencesStop as stop:
+            assert stop.breach_type == "budget_exceeded"
+        else:
+            raise AssertionError("the sub-agent's calls should count against the budget")
+        agentfences.flush()
+        calls = outer.model.turns + sub.model.turns
+        assert math.isclose(sent.spent, calls * PER_CALL) and sent.spent <= sent.budget, (calls, sent.spent / PER_CALL)
+    finally:
+        agentfences.init(local_only=True)
+
+
 if __name__ == "__main__":
     agentfences.init(local_only=True)
     for check in [check_stops_on_budget, check_success, check_hooks_inside_governed, check_custom_hooks_rejected, check_on_breach_is_checked,
-                  check_failed_model_call_releases_its_hold]:
+                  check_failed_model_call_releases_its_hold, check_sub_agents_are_charged]:
         check()
         print("ok", check.__name__)
     print("openai-agents checks passed")

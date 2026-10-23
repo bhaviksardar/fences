@@ -13,15 +13,35 @@ export function argNames(args: unknown[]): string {
   return args.map((_, i) => String(i)).join(", ");
 }
 
-/** `{"query":"cats","limit":5}`: the arguments as compact JSON (one object argument on its own), capped. */
+/**
+ * `{"query":"cats","limit":5}`: the arguments as compact JSON (one object argument on its own), as the
+ * person approving a call reads them. Every argument is shown: a long value is cut, never the arguments
+ * after it. Quote lookalikes and invisible characters are escaped (\\u201d), so they can't pass for
+ * JSON's own quotes or hide text.
+ */
 export function argsSummary(args: unknown[]): string {
-  let text: string;
+  const value = args.length === 1 ? args[0] : args;
+  const text = escape(json(value) ?? args.map(String).join(", "));  // circular or odd values
+  if (text.length <= MAX_ARGS) return text;
+  if (value === null || typeof value !== "object" || json(value) === undefined) return cut(text, MAX_ARGS);
+  const each = Math.max(Math.floor(MAX_ARGS / Math.max(Object.keys(value).length, 1)), 24);
+  const short = Object.entries(value).map(([k, v]) => [cut(k, each), cut(typeof v === "string" ? v : json(v) ?? String(v), each)]);
+  // ponytail: hundreds of arguments get cut here; the marker still shows some are hidden
+  return cut(escape(json(Array.isArray(value) ? short.map(([, v]) => v) : Object.fromEntries(short))!), MAX_APPROVAL);
+}
+
+const escape = (text: string) => text.replace(/[\p{Cc}\p{Cf}\p{Pi}\p{Pf}\uff02\u02ba\u02dd\u3003]/gu,
+  (c) => Array.from({ length: c.length }, (_, i) => "\\u" + c.charCodeAt(i).toString(16).padStart(4, "0")).join(""));
+
+const MAX_APPROVAL = 2000;  // characters of approval text, however many arguments
+const cut = (s: string, n: number) => s.length <= n ? s : s.slice(0, n - 1) + "…";
+
+function json(v: unknown): string | undefined {
   try {
-    text = JSON.stringify(args.length === 1 ? args[0] : args, (_k, v) => typeof v === "bigint" ? String(v) : v) ?? "";
+    return JSON.stringify(v, (_k, x) => typeof x === "bigint" ? String(x) : x);
   } catch {
-    text = args.map(String).join(", ");  // circular or odd values
+    return undefined;
   }
-  return text.length <= MAX_ARGS ? text : text.slice(0, MAX_ARGS - 1) + "…";
 }
 
 // ── Guards ────────────────────────────────────────────────────────────────────
@@ -102,9 +122,10 @@ async function check(run: Run, client: NonNullable<ReturnType<typeof _client>>, 
   }
 }
 
-/** Release the reservation and charge the run: in full unless the tool threw (a timeout may have done it). */
+/** Release the reservation and charge the run: in full unless the tool threw (a timeout, abort or halt may have done it). */
 async function settle(run: Run, guardId: string, amount: number, error: unknown, failed: boolean): Promise<void> {
-  const outcome = !failed ? "ok" : (error as Error)?.name === "TimeoutError" ? "unknown" : "error";
+  const interrupted = ["TimeoutError", "AbortError"].includes((error as Error)?.name) || run.control.cancelled;
+  const outcome = !failed ? "ok" : interrupted ? "unknown" : "error";
   const charged = outcome === "error" ? 0 : amount;
   run.reservedUsd -= amount;
   run.costUsd += charged;

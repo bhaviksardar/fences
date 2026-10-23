@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fences from "../dist/index.js";
 import { argsSummary } from "../dist/tools.js";
+import { maxOut } from "../dist/precheck.js";
 
 const { governed, checkpoint, init, getActiveRun, tool, context, priceOf } = fences;
 const close = (a, b) => Math.abs(a - b) <= 1e-12 + 1e-9 * Math.abs(b);
@@ -173,8 +174,15 @@ test("tool() records calls as execute_tool spans", async () => {
   assert.equal(a[2]["error.type"], "PermissionError");
   assert.equal(a[2]["fences.error.message"], "PermissionError: 403 from search API");
   assert.equal(argsSummary([1, "two"]), '[1,"two"]');
+  const hidden = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`k${i}`, "\u200b".repeat(50)]));
+  assert.ok(argsSummary([hidden]).length <= 2000 && argsSummary(["\u200b".repeat(3000)]).length <= 300);  // escaping can't lift the cap
   const loop = {}; loop.self = loop;
   assert.equal(argsSummary([loop]), "[object Object]");
+  const shown = argsSummary([{ memo: "x".repeat(290), to: "acct-EVIL" }]);  // padding can't push an argument out of view
+  assert.ok(shown.includes('"to":"acct-EVIL"') && shown.length <= 320, shown);
+  assert.equal(argsSummary([{ note: "pay \u201d, \u201cto\u201d: \u201cme\u202e" }]),
+    '{"note":"pay \\u201d, \\u201cto\\u201d: \\u201cme\\u202e"}');  // lookalike quotes and bidi controls are escaped
+  assert.equal(argsSummary([{ city: "Zürich" }]), '{"city":"Zürich"}');
 });
 
 test("context() tags runs; inner values win", async () => {
@@ -221,4 +229,9 @@ test("custom prices are checked at init, and a model named like an Object key ha
     return getActiveRun().costUsd;
   }, { budgetUsd: 1 })();
   assert.equal(spent, 0);  // unpriced (with a warning), not NaN
+});
+
+test("an output cap below 1 is no cap: it would shrink the worst case", () => {
+  assert.equal(maxOut({ max_tokens: -5 }), null);
+  assert.equal(maxOut({ max_tokens: 0, max_output_tokens: 50 }), 50);
 });
