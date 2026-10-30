@@ -1,4 +1,4 @@
-# (|=|) Fences
+<h1><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/bhaviksardar/fences/main/docs/logo-dark.svg"><img src="https://raw.githubusercontent.com/bhaviksardar/fences/main/docs/logo.svg" alt="Fences" width="300"></picture></h1>
 
 [![test](https://github.com/bhaviksardar/fences/actions/workflows/test.yml/badge.svg)](https://github.com/bhaviksardar/fences/actions/workflows/test.yml)
 
