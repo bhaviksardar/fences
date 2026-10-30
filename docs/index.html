@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fences — On-call for AI agents</title>
+<title>Fences — The control plane for AI agents</title>
+<meta name="description" content="Fences gives organizations visibility and control over every AI agent interacting with their systems, regardless of where it runs or who built it.">
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Inter:opsz,wght@14..32,600&display=swap" rel="stylesheet">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='5 5 90 90'%3E%3Cstyle%3Epath%7Bstroke:%230B0D10%7D@media (prefers-color-scheme:dark)%7Bpath%7Bstroke:%23F5F5F2%7D%7D%3C/style%3E%3Cpath d='M22 33v57M78 10v57M22 38h56M22 62h56' fill='none' stroke-width='10' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -123,9 +124,9 @@
 
 <header class="hero">
   <div class="wrap">
-    <p class="eyebrow">On-call for AI agents</p>
-    <h1 style="margin-top:20px">When an agent goes off the rails,<br>see why and <em>stop it</em>.</h1>
-    <p class="lead">Fences sits inside every agent loop. Watch runs live, read what the agent decided and why, stop any run in one click, and set hard limits it can't raise itself.</p>
+    <p class="eyebrow">Visibility and control for every agent</p>
+    <h1 style="margin-top:20px">The control plane<br>for <em>AI agents</em>.</h1>
+    <p class="lead">Fences gives organizations visibility and control over every AI agent interacting with their systems, regardless of where it runs or who built it. Watch runs live, read what each agent decided and why, stop any run in one click, and set hard limits it can't raise itself.</p>
     <div class="ctas"><a class="btn solid big" href="docs/#quickstart">Get started</a><a class="btn ghost big" href="#how">See the code</a></div>
   </div>
   <div class="pickets"></div>
@@ -139,9 +140,9 @@
 
 <section id="workflow">
   <div class="wrap">
-    <p class="eyebrow">The 3am workflow</p>
+    <p class="eyebrow">The workflow</p>
     <h2>See it. Understand it. <em>Stop</em> it.</h2>
-    <p class="lead">Everything you need when an agent misbehaves, in one place, from the first odd step to the fix.</p>
+    <p class="lead">One place to see and steer every agent, from the first odd step to the fix.</p>
     <div class="limits">
       <div><b>See</b><code>live runs</code><p>Every run streams in as it works: spend, steps, tokens and status, per agent.</p></div>
       <div><b>Understand</b><code>decision trail</code><p>What the agent did and why, step by step, on a timeline where retry loops stand out.</p></div>
@@ -216,7 +217,7 @@ agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="
 <section id="features">
   <div class="wrap">
     <p class="eyebrow">The platform</p>
-    <h2>Built for the <em>incident</em>, not the demo.</h2>
+    <h2>Control that holds in <em>production</em>.</h2>
     <div class="features">
       <div class="feature"><span class="num">01</span><h3>One-click stop</h3><p>Stop a misbehaving run from the dashboard. Its next checkpoint is refused with a clear reason, so the agent winds down instead of crashing.</p><div class="chips"><span>stop</span><span>stopped_by_user</span></div></div>
       <div class="feature"><span class="num">02</span><h3>Decision trail and timeline</h3><p>Every step's action and reasoning, filterable by category and time, on a timeline where loops and slow steps stand out.</p><div class="chips"><span>log_decision</span><span>timeline</span></div></div>
@@ -238,7 +239,7 @@ agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="
     <div class="faq">
       <details><summary>Does Fences call my LLM or see my prompts?</summary><p>No. Your agent reports cost, tokens, the model's name, an optional reasoning note, and which tools it called, with their argument names. Prompts, completions and argument values never leave your infrastructure by default; a guarded tool's check sends its arguments so rules can apply, and a <code>redact</code> hook sees everything before it's sent, so you can change or drop any of it.</p></details>
       <details><summary>What happens when a limit is crossed?</summary><p>The checkpoint returns <code>breached</code> with the reason: a run limit (<code>budget_exceeded</code>, <code>iteration_limit</code>, <code>time_limit</code>, <code>token_limit</code>), the agent's daily or monthly cap, or <code>stopped_by_user</code> when someone stopped it. The agent gets a ready-made message to wrap up with, and further checkpoints are refused until you raise the limit. With <code>on_breach="hold"</code> the run waits instead, and carries on once someone raises the limit.</p></details>
-      <details><summary>Which frameworks does it work with?</summary><p>Anything with a loop, in Python or TypeScript. Raw OpenAI and Anthropic calls are recorded and checked against the budget before they're sent (<code>instrument=True</code>, or <code>instrument(client)</code> in TypeScript); LangChain, LangGraph and the OpenAI Agents SDK need no decorators; MCP tool calls are recorded and can be guarded. Otherwise you call <code>checkpoint()</code> where a step ends.</p></details>
+      <details><summary>Which frameworks does it work with?</summary><p>Anything with a loop, in Python or TypeScript. Raw OpenAI and Anthropic calls are recorded and checked against the budget before they're sent (<code>instrument=True</code>, or <code>instrument(client)</code> in TypeScript); LangChain, LangGraph and the OpenAI Agents SDK need no decorators; MCP tool calls are recorded and can be guarded. Otherwise you call <code>checkpoint()</code> where a step ends, and agents in any other language can use the REST API.</p></details>
       <details><summary>Can I try it without an account?</summary><p>Yes. <code>agentfences.init(local_only=True)</code> enforces limits in-process with no key. Add an API key when you want the dashboard and the stored audit trail.</p></details>
       <details><summary>How do I sign in?</summary><p>Google, GitHub, Microsoft, Apple, email and password, or your company's SAML/OIDC SSO.</p></details>
     </div>
@@ -247,8 +248,8 @@ agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="
 
 <section class="final">
   <div class="wrap">
-    <h2>Be ready for the <em>3am</em> agent.</h2>
-    <p class="lead">One decorator: see every run, understand every decision, stop anything.</p>
+    <h2>Every agent, <em>under control</em>.</h2>
+    <p class="lead">See every run, understand every decision, and stop anything, whoever built the agent and wherever it runs.</p>
     <a class="btn solid big" href="docs/#quickstart">Get started</a>
   </div>
 </section>

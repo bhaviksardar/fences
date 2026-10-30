@@ -141,7 +141,7 @@
     <div id="overview">
       <p class="eyebrow">Documentation</p>
       <h1>Put <em>fences</em> around your agents.</h1>
-      <p class="lead">Fences is on-call for AI agents. It shows every run live, records what the agent decided and why, lets you stop any run in one click, and enforces limits on spend, steps, time and tokens that the agent can't raise itself.</p>
+      <p class="lead">Fences is the control plane for AI agents. It gives organizations visibility and control over every AI agent interacting with their systems, regardless of where it runs or who built it. It shows every run live, records what the agent decided and why, lets you stop any run in one click, and enforces limits on spend, steps, time and tokens that the agent can't raise itself.</p>
       <div class="grid2">
         <div class="card"><b>The SDK</b><code>agentfences</code> on PyPI and npm, for Python and TypeScript. One decorator on your agent function, one <code>checkpoint()</code> call after each model call, and guards on the tools that matter.</div>
         <div class="card"><b>The dashboard</b>Live runs, the decision trail behind each one, and limits you can raise mid-run to let a stopped agent continue.</div>
@@ -495,9 +495,9 @@ init({ localOnly: <span class="k">true</span> });
 
     <!-- Reliability -->
     <section id="live">
-      <p class="eyebrow">On-call</p>
+      <p class="eyebrow">Control</p>
       <h2>Live control &amp; evidence</h2>
-      <p>What on-call needs while an agent is running: what it's calling, a way to hold it, and a way for it to ask before doing something risky. Older SDKs keep working; they just don't get these.</p>
+      <p>What you need while an agent is running: what it's calling, a way to hold it, and a way for it to ask before doing something risky. Older SDKs keep working; they just don't get these.</p>
       <h3>Tag runs with context</h3>
 <div class="code"><pre><code>agentfences.init(api_key=<span class="s">"fc_..."</span>, endpoint=<span class="s">"..."</span>, environment=<span class="s">"prod"</span>, release=<span class="s">"v1.4.2"</span>)
 
