@@ -29,7 +29,7 @@ async def run_agent(query: str, messages: list):
 
 ## Python and TypeScript
 
-This README covers the Python SDK (`pip install agentfences`). There's also a TypeScript SDK for Node 18+ (`npm install agentfences`, see [sdk-js](sdk-js/README.md)). Both talk to Fences the same way ([PROTOCOL.md](PROTOCOL.md)).
+This README covers the Python SDK (`pip install agentfences`). There's also a TypeScript SDK for Node 18+ (`npm install agentfences`, see [sdk-js](sdk-js/README.md)). Both talk to Fences the same way ([PROTOCOL.md](https://github.com/bhaviksardar/fences-gateway/blob/main/spec/PROTOCOL.md)).
 
 | | Python | TypeScript |
 |---|---|---|
