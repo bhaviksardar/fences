@@ -4,84 +4,136 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Fences Docs</title>
-<meta name="description" content="Set up Fences, the control plane for AI agents: install the agentfences SDK, fence an agent with spend, iteration, time and token limits, connect to the dashboard, and call the REST API from any language.">
+<meta name="description" content="Set up Fences: install the agentfences SDK, fence an agent with spend, iteration, time and token limits, connect to the dashboard, and call the REST API from any language.">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Inter:opsz,wght@14..32,600&display=swap" rel="stylesheet">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='5 5 90 90'%3E%3Cstyle%3Epath%7Bstroke:%230B0D10%7D@media (prefers-color-scheme:dark)%7Bpath%7Bstroke:%23F5F5F2%7D%7D%3C/style%3E%3Cpath d='M22 33v57M78 10v57M22 38h56M22 62h56' fill='none' stroke-width='10' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="../site.css">
 <style>
-  html { scroll-behavior: smooth; scroll-padding-top: 76px; }
-  .wrap { max-width: 1180px; }
+  :root {
+    --paper: #f0efe9; --white: #fff; --ink: #111; --gray: #666; --border: #dfded8;
+    --cobalt: #3454d1; --vermilion: #d15434; --ok: #3f6b2a; --amber: #b7791f;
+    --code-bg: #111;
+    --serif: 'Instrument Serif', Georgia, serif; --sans: 'Geist', system-ui, sans-serif; --mono: 'Geist Mono', ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html { scroll-padding-top: 88px; }
+  body { background: var(--paper); color: var(--ink); font: 16px/1.65 var(--sans); }
+  a { color: inherit; }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; }
+
+  /* Nav — same as the landing page */
+  nav.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--paper) 85%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); }
+  nav.top .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; gap: 16px; }
+  .logo { font: 600 26px/1 'Inter', var(--sans); font-variation-settings: 'opsz' 32; letter-spacing: -.035em; color: var(--ink); text-decoration: none; white-space: nowrap; }
+  @media (max-width: 480px) { .logo { font-size: 21px; } }
+  .mark { display: inline-block; width: .777em; height: 1.06em; vertical-align: -.2em; margin-right: .38em; }
+  .logo small { font: 500 12px var(--mono); letter-spacing: 0; color: var(--gray); margin-left: 8px; }
+  .ctas { display: flex; gap: 10px; align-items: center; }
+  .btn { display: inline-block; padding: 10px 18px; border-radius: 999px; font: 500 14px var(--sans); text-decoration: none; border: 1px solid var(--ink); white-space: nowrap; }
+  .btn.solid { background: var(--ink); color: var(--white); }
 
   /* Layout */
-  .layout { display: grid; grid-template-columns: 228px minmax(0, 1fr); gap: 64px; padding-top: 48px; padding-bottom: 120px; }
-  .layout > * { min-width: 0; }
-  .toc { position: sticky; top: 76px; align-self: start; max-height: calc(100vh - 100px); overflow-y: auto; font-size: 14px; letter-spacing: -.01em; }
-  .toc b { display: block; font-size: 12px; font-weight: 600; color: var(--text-2); margin: 24px 0 6px 10px; }
+  .layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 56px; padding-top: 48px; padding-bottom: 120px; }
+  .toc { position: sticky; top: 96px; align-self: start; max-height: calc(100vh - 120px); overflow-y: auto; font-size: 14px; }
+  .toc b { display: block; font: 500 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--gray); margin: 20px 0 6px; }
   .toc b:first-child { margin-top: 0; }
-  .toc a { display: block; padding: 5px 10px; border-radius: 8px; color: var(--text); transition: background-color 100ms ease-out; }
-  .toc a:hover { text-decoration: none; background: var(--fill); }
-  .toc a.on { background: var(--fill); color: var(--accent); font-weight: 500; }
+  .toc a { display: block; padding: 3px 0 3px 12px; border-left: 2px solid transparent; text-decoration: none; color: var(--gray); transition: color 150ms ease-out, border-color 200ms ease-out; }
+  .toc a:hover { color: var(--ink); }
+  .toc a.on { color: var(--ink); border-left-color: var(--cobalt); }
+  .layout > * { min-width: 0; }
   article { max-width: 760px; }
 
   /* Type */
-  h1 { font-size: clamp(40px, 5vw, 56px); font-weight: 600; line-height: 1.07; letter-spacing: -.03em; margin-bottom: 16px; }
-  h2 { font-size: 32px; font-weight: 600; line-height: 1.12; letter-spacing: -.025em; margin-bottom: 12px; }
-  h3 { font-size: 19px; font-weight: 600; line-height: 1.25; letter-spacing: -.02em; margin: 36px 0 8px; }
-  .lead { font-size: 21px; line-height: 1.43; letter-spacing: -.02em; color: var(--text-2); }
-  section { padding-top: 64px; margin-top: 64px; border-top: 1px solid var(--line); }
+  h1 { font: 400 clamp(44px, 6vw, 72px)/1.02 var(--serif); letter-spacing: -.01em; margin: 12px 0 16px; }
+  h1 em, h2 em { color: var(--cobalt); }
+  .lead { font-size: 19px; color: var(--gray); }
+  section { padding-top: 56px; margin-top: 56px; border-top: 1px solid var(--border); }
+  h2 { font: 400 40px/1.1 var(--serif); letter-spacing: -.01em; margin-bottom: 12px; }
+  h3 { font-size: 18px; font-weight: 600; letter-spacing: -.01em; margin: 32px 0 8px; }
   p, ul, ol { margin: 12px 0; }
   ul, ol { padding-left: 22px; }
-  li { margin: 6px 0; }
-  code { font: .86em var(--mono); letter-spacing: 0; background: var(--fill); border-radius: 6px; padding: 2px 6px; }
-  .muted { color: var(--text-2); }
-  .tag { display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: 0; padding: 2px 9px; border-radius: 980px; background: var(--fill); color: var(--text-2); vertical-align: 5px; margin-left: 8px; }
+  li { margin: 4px 0; }
+  code { font: .88em var(--mono); background: var(--white); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+  .muted { color: var(--gray); }
 
   /* Code blocks */
-  .code { position: relative; margin: 18px 0; }
-  pre { font-size: 13px; padding: 20px 22px; }
+  .code { position: relative; margin: 16px 0; }
+  pre { background: var(--code-bg); color: #e9e8e2; border-radius: 12px; padding: 20px; font: 13px/1.7 var(--mono); overflow-x: auto; }
   pre code { all: unset; }
-  .code .copy { position: absolute; top: 12px; right: 12px; background: rgba(255, 255, 255, .12); color: var(--code-text); border: 0; border-radius: 980px; padding: 4px 12px; font: 12px var(--sans); cursor: pointer; opacity: 0; transition: opacity 150ms ease-out, transform 100ms ease-out; }
-  .code:hover .copy, .code .copy:focus-visible { opacity: 1; }
+  .code .copy { position: absolute; top: 10px; right: 10px; background: #2a2a2a; color: #e9e8e2; border: 0; border-radius: 6px; padding: 4px 10px; font: 12px var(--mono); cursor: pointer; transition: transform 100ms ease-out, background-color 150ms ease-out; }
+  .code .copy:hover { background: #3a3a3a; }
   .code .copy:active { transform: scale(.94); }
-  @media (hover: none) { .code .copy { opacity: 1; } }
+  .c { color: #8a8a82; }
+  .s { color: #a8c58a; }
+  .k { color: #9fb4ff; }
 
   /* Tables */
-  .table { overflow-x: auto; margin: 18px 0; border-radius: 14px; background: var(--fill); }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; letter-spacing: -.01em; }
-  th, td { text-align: left; padding: 11px 16px; vertical-align: top; }
-  td { border-top: 1px solid var(--line); }
-  th { font-size: 12px; font-weight: 600; color: var(--text-2); white-space: nowrap; }
-  td code { white-space: nowrap; background: var(--bg); }
+  .table { overflow-x: auto; margin: 16px 0; border: 1px solid var(--border); border-radius: 12px; background: var(--white); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font: 500 12px var(--mono); color: var(--gray); background: color-mix(in srgb, var(--paper) 50%, var(--white)); white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td code { white-space: nowrap; }
 
-  /* Callouts, steps, cards */
-  .note { margin: 18px 0; padding: 16px 20px; background: var(--fill); border-radius: 14px; font-size: 15px; letter-spacing: -.01em; }
-  .note.warn { background: color-mix(in srgb, var(--amber) 12%, var(--bg)); }
-  .note code { background: var(--bg); }
+  /* Callouts and steps */
+  .note { margin: 16px 0; padding: 14px 18px; background: var(--white); border: 1px solid var(--border); border-left: 3px solid var(--cobalt); border-radius: 10px; font-size: 15px; }
+  .note.warn { border-left-color: var(--amber); }
   .steps { counter-reset: step; list-style: none; padding: 0; }
-  .steps > li { counter-increment: step; position: relative; padding-left: 46px; margin: 32px 0; }
-  .steps > li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--text); color: var(--bg); font-size: 14px; font-weight: 600; }
+  .steps > li { counter-increment: step; position: relative; padding-left: 44px; margin: 28px 0; }
+  .steps > li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--white); border: 1px solid var(--border); font: 500 13px var(--mono); }
   .steps h3 { margin-top: 0; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 20px 0; }
-  .card { background: var(--fill); border-radius: 18px; padding: 22px; font-size: 15px; letter-spacing: -.01em; color: var(--text-2); }
-  .card b { display: block; margin-bottom: 4px; color: var(--text); font-size: 17px; letter-spacing: -.02em; }
-  .card code { background: var(--bg); }
-  .method { font: 600 11px var(--mono); padding: 2px 7px; border-radius: 6px; background: var(--fill); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
+  .card { background: var(--white); border: 1px solid var(--border); border-radius: 12px; padding: 18px; font-size: 15px; }
+  .card b { display: block; margin-bottom: 4px; }
+  .method { font: 500 11px var(--mono); padding: 2px 6px; border-radius: 4px; background: var(--paper); }
+
+  footer { border-top: 1px solid var(--border); padding: 32px 0; font-size: 14px; color: var(--gray); }
+  footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  footer a { color: var(--gray); }
+
+
+  /* Dark mode: same palette, inverted */
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #121211; --white: #1b1b1a; --ink: #f0efe9; --gray: #a3a29c; --border: #2e2e2b; --cobalt: #8ea2ff; --vermilion: #ff8a6b; --ok: #8fcf6f; --amber: #f0b45a; --code-bg: #1b1b1a; }
+    pre { box-shadow: inset 0 0 0 1px var(--border); }
+  }
+  h1, h2, h3 { text-wrap: balance; }
+  p, li { text-wrap: pretty; }
+  h1 em, h2 em { font-style: normal; }
+  em { font-style: normal; }
+  @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+
+  /* Feedback on press, not release */
+  a, button, summary { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+  .btn { transition: transform 100ms ease-out, background-color 150ms ease-out, color 150ms ease-out; }
+  .btn:active { transform: scale(.97); }
+  .btn.solid:hover { background: color-mix(in srgb, var(--ink) 85%, var(--paper)); }
+  .btn:not(.solid):hover { background: var(--white); }
+  :focus-visible { outline: 2px solid var(--cobalt); outline-offset: 2px; border-radius: 6px; }
+
+  /* Translucent nav: content scrolls under the material */
+  nav.top, body > nav { backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); }
+
+  @media (prefers-reduced-transparency: reduce) { nav.top, body > nav { background: var(--paper); backdrop-filter: none; -webkit-backdrop-filter: none; } }
+  @media (prefers-contrast: more) { :root { --border: var(--ink); --gray: var(--ink); } }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0s !important; animation: none !important; } }
 
   @media (max-width: 900px) {
-    .layout { grid-template-columns: 1fr; gap: 0; padding-top: 20px; }
-    .toc { position: static; max-height: none; display: flex; gap: 8px; overflow-x: auto; padding-bottom: 16px; margin-bottom: 8px; scrollbar-width: none; }
+    .layout { grid-template-columns: 1fr; gap: 0; padding-top: 24px; }
+    .toc { position: static; max-height: none; display: flex; gap: 6px; overflow-x: auto; padding-bottom: 12px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
     .toc b { display: none; }
-    .toc a { flex: none; background: var(--fill); border-radius: 980px; padding: 6px 14px; }
+    .toc a { flex: none; border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; background: var(--white); }
+    .toc a.on { border-color: var(--cobalt); }
     .grid2 { grid-template-columns: 1fr; }
-    .navlinks a:not(.btn) { display: none; }
+    .ctas .btn:not(.solid) { display: none; }
   }
 </style>
 </head>
 <body>
-<div class="ribbon">Fences Cloud is coming soon. The SDK is free and works today in local mode. <a class="more" href="#quickstart">Quickstart</a></div>
+<div style="background:#111;color:#f0efe9;text-align:center;font:13px/1.5 var(--sans);padding:8px 16px">Fences Cloud (dashboard, alerts, stored audit trail, team sign-in) is coming soon. The SDK is free and works today in local mode: <a href="#quickstart" style="color:inherit">quickstart</a>.</div>
 <nav class="top">
   <div class="wrap">
-    <a class="logo" href="../"><svg class="mark" viewBox="17 5 66 90" aria-hidden="true"><path d="M22 33v57M78 10v57M22 38h56M22 62h56" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round"/></svg>fences<small>Docs</small></a>
-    <div class="navlinks"><a href="https://github.com/bhaviksardar/fences">GitHub</a><a class="btn small" href="#quickstart">Get started</a></div>
+    <a class="logo" href="../"><svg class="mark" viewBox="17 5 66 90" aria-hidden="true"><path d="M22 33v57M78 10v57M22 38h56M22 62h56" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round"/></svg>fences<small>docs</small></a>
+    <div class="ctas"><a class="btn" href="https://github.com/bhaviksardar/fences">GitHub</a><a class="btn solid" href="#quickstart">Get started</a></div>
   </div>
 </nav>
 
@@ -115,7 +167,7 @@
   <article>
     <!-- Overview -->
     <div id="overview">
-      <h1>Overview</h1>
+      <h1>Put <em>fences</em> around your agents.</h1>
       <p class="lead">Fences is the control plane for AI agents. It gives organizations visibility and control over every AI agent interacting with their systems, regardless of where it runs or who built it. It shows every run live, records what the agent decided and why, lets you stop any run in one click, and enforces limits on spend, steps, time and tokens that the agent can't raise itself.</p>
       <div class="grid2">
         <div class="card"><b>The SDK</b><code>agentfences</code> on PyPI and npm, for Python and TypeScript. One decorator on your agent function, one <code>checkpoint()</code> call after each model call, and guards on the tools that matter.</div>
@@ -240,7 +292,7 @@ print(result.spent_usd)   <span class="c"># the run's total so far</span></code>
         <li><strong>Streaming:</strong> pass the final message, or the last chunk once it carries usage (OpenAI: <code>stream_options={"include_usage": True}</code>).</li>
         <li>Prices are standard list prices: batch, priority and flex discounts aren't applied.</li>
         <li><strong>Checked before the call:</strong> with <code>instrument=True</code> or a <a href="#frameworks">framework integration</a>, each model call is also checked against the budget before it's sent, and refused with <code>FencesStop</code> if its worst case could overspend. See <a href="#frameworks">Frameworks</a>.</li>
-        <li>A cost that isn't a finite number of zero or more (<code>NaN</code>, negative, a string) raises instead of being counted, since it would switch the budget off. <code>Decimal</code> amounts are fine. <span class="tag">0.8</span></li>
+        <li>A cost that isn't a finite number of zero or more (<code>NaN</code>, negative, a string) raises instead of being counted, since it would switch the budget off. <code>Decimal</code> amounts are fine.</li>
       </ul>
     </section>
 
@@ -408,7 +460,7 @@ result = <span class="k">await</span> checkpoint(resp)</code></pre></div>
 
     <!-- Guarded tools -->
     <section id="guarded">
-      <h2>Guarded tools <span class="tag">0.4</span></h2>
+      <h2>Guarded tools</h2>
       <p>A checkpoint runs after a step, so on its own it notices a limit once it's crossed. For actions with consequences (refunds, payments, writes to production), guard the tool, and it asks Fences <strong>before</strong> it runs:</p>
 <div class="code"><pre><code>@agentfences.tool(cost_usd=<span class="k">lambda</span> order_id, amount: amount, approve=<span class="k">True</span>)
 <span class="k">def</span> issue_refund(order_id: str, amount: float): ...
@@ -427,7 +479,7 @@ result = <span class="k">await</span> checkpoint(resp)</code></pre></div>
 
     <!-- MCP -->
     <section id="mcp">
-      <h2>MCP tools <span class="tag">0.7</span></h2>
+      <h2>MCP tools</h2>
       <p>Wrap an MCP client session and every tool call it makes is recorded, with no decorator per tool. The tools you name are guarded as above:</p>
 <div class="code"><pre><code>session = agentfences.mcp.wrap(session, guard=[<span class="s">"send_email"</span>], cost_usd={<span class="s">"refund"</span>: <span class="k">lambda</span> args: args[<span class="s">"amount"</span>]})</code></pre></div>
       <p><code>guard=True</code> guards every tool, and <code>approve=[...]</code> names tools a person approves first. A result with <code>isError</code> is recorded as a failed call and still comes back to the agent. In TypeScript: <code>mcp.wrap(client, { guard: [...], costUsd: {...} })</code>.</p>
@@ -447,7 +499,7 @@ init({ localOnly: <span class="k">true</span> });
   <span class="k">if</span> (result.breached) <span class="k">return</span> result.message;
 }, { budgetUsd: <span class="k">0.5</span>, maxIterations: <span class="k">20</span> });</code></pre></div>
       <p><code>checkpoint()</code> also prices Vercel AI SDK results (<code>generateText</code>), Gemini and LangChain.js. <code>tool()</code> (with guards, costs, approvals and timeouts), <code>context()</code>, <code>logDecision()</code>, live control, containment hooks, <code>onBreach: "hold"</code>, <code>mcp.wrap</code>, redaction and error capture work as in Python.</p>
-      <p><strong>Model calls</strong> <span class="tag">0.8</span>: <code>instrument(client)</code> records every OpenAI and Anthropic call and checks it against the budget before it's sent, as <code>instrument=True</code> does in Python:</p>
+      <p><strong>Model calls</strong>: <code>instrument(client)</code> records every OpenAI and Anthropic call and checks it against the budget before it's sent, as <code>instrument=True</code> does in Python:</p>
 <div class="code"><pre><code><span class="k">import</span> OpenAI <span class="k">from</span> <span class="s">"openai"</span>;
 <span class="k">import</span> { instrument } <span class="k">from</span> <span class="s">"agentfences"</span>;
 
@@ -468,17 +520,17 @@ init({ localOnly: <span class="k">true</span> });
       <h3>Record tool and model calls</h3>
 <div class="code"><pre><code>@agentfences.tool
 <span class="k">def</span> web_search(query: str) -> list: ...</code></pre></div>
-      <p>Each call is recorded with its argument names, how long it took, and the error if it failed. Argument values stay in your process unless you pass <code>init(tool_arguments="full")</code> <span class="tag">0.9</span>; a guarded tool's check and an approval request still send them, since rules and approvers need them. Model calls priced by <code>checkpoint(response)</code> are recorded with their tokens and cost. They appear under <b>Tool and model calls</b> on the run.</p>
+      <p>Each call is recorded with its argument names, how long it took, and the error if it failed. Argument values stay in your process unless you pass <code>init(tool_arguments="full")</code>; a guarded tool's check and an approval request still send them, since rules and approvers need them. Model calls priced by <code>checkpoint(response)</code> are recorded with their tokens and cost. They appear under <b>Tool and model calls</b> on the run.</p>
       <h3>Pause, resume and stop</h3>
       <p>On a running run, <b>Pause</b> holds the agent at its next checkpoint until you press <b>Resume</b> (after <code>pause_timeout_s</code>, an hour by default, it stops with breach <code>paused</code>). <b>Stop run</b> reaches the agent within seconds, between checkpoints. The run shows when it was last heard from; one that goes quiet may be stuck.</p>
-      <p><strong>A stuck run is halted.</strong> <span class="tag">0.4</span> If a run doesn't reach a checkpoint within <code>stop_grace_s</code> (30 seconds by default) of a stop, because it's stuck in a tool say, the governed call raises <code>FencesStop</code>. An async run is cancelled. A sync run <span class="tag">0.8</span> has <code>FencesStop</code> raised in its thread: at once in Python code, or when a blocking call it's in returns (CPython). A streaming run is cancelled only while its own code runs. <code>init(stop_grace_s=None)</code> turns this off.</p>
-      <h3>Containment hooks <span class="tag">0.5</span></h3>
+      <p><strong>A stuck run is halted.</strong> If a run doesn't reach a checkpoint within <code>stop_grace_s</code> (30 seconds by default) of a stop, because it's stuck in a tool say, the governed call raises <code>FencesStop</code>. An async run is cancelled. A sync run has <code>FencesStop</code> raised in its thread: at once in Python code, or when a blocking call it's in returns (CPython). A streaming run is cancelled only while its own code runs. <code>init(stop_grace_s=None)</code> turns this off.</p>
+      <h3>Containment hooks</h3>
 <div class="code"><pre><code><span class="k">def</span> revoke(event):   <span class="c"># {"type", "run_id", "agent_name", "id", "by", "reason"}</span>
     vault.revoke(token_for(event[<span class="s">"run_id"</span>]))
 
 agentfences.init(api_key=..., endpoint=..., on_stop=revoke, on_quarantine=revoke)</code></pre></div>
       <p>They run in your process when a stop or quarantine arrives, to contain what Fences can't reach, such as a credential the agent holds. <code>on_stop</code> runs once per run, <code>on_quarantine</code> once per quarantine. Whether each worked, failed or timed out (30 seconds) is reported to Fences. The SDK also acknowledges every dashboard command, so the dashboard can tell "the agent has it" from "the agent hasn't acknowledged".</p>
-      <h3>Wait at a limit <span class="tag">0.6</span></h3>
+      <h3>Wait at a limit</h3>
 <div class="code"><pre><code>@governed(budget_usd=<span class="k">5</span>, on_breach=<span class="s">"hold"</span>)   <span class="c"># or init(on_breach="hold") for every agent</span>
 <span class="k">async def</span> nightly_report(): ...</code></pre></div>
       <p>Instead of ending, a run that crosses a limit waits at its checkpoint, shown as held on the dashboard, until someone raises the limit and resumes it, and then carries on. A model call or guarded tool refused for budget waits the same way. A stop ends the wait; after <code>pause_timeout_s</code> the breach is returned as usual. Cloud mode only. Use it for background agents: a held agent holds its thread.</p>
@@ -503,7 +555,7 @@ agentfences.init(api_key=..., endpoint=..., on_stop=revoke, on_quarantine=revoke
       <h3>The backend is the source of truth</h3>
       <p>In cloud mode the backend decides whether a checkpoint passes, and the SDK adopts its totals. That catches spend the local process can't see, such as another worker reporting against the same run, and picks up limits raised in the dashboard.</p>
       <h3>Rejected keys fail loudly</h3>
-      <p>A wrong API key is not treated as an outage. When a run starts, the SDK raises <code>FencesAuthError</code> (a <code>PermissionError</code>) before any agent code runs, so you notice immediately. A key revoked during a run ends it at its next checkpoint with <code>fences_unreachable</code> and blocks its guarded tools; nothing is raised over the agent's own result. <span class="tag">0.8</span></p>
+      <p>A wrong API key is not treated as an outage. When a run starts, the SDK raises <code>FencesAuthError</code> (a <code>PermissionError</code>) before any agent code runs, so you notice immediately. A key revoked during a run ends it at its next checkpoint with <code>fences_unreachable</code> and blocks its guarded tools; nothing is raised over the agent's own result.</p>
       <h3>No blocking</h3>
       <p>In async agents, backend calls run in a worker thread so they never block the event loop. Decisions and tool and model call records are sent in the background and flushed at exit; call <code>agentfences.flush()</code> before a serverless handler returns.</p>
       <h3>Guarantees</h3>
@@ -669,9 +721,8 @@ curl -X POST $BASE/api/runs/run-123/end -H <span class="s">"X-API-Key: $KEY"</sp
 
 <footer>
   <div class="wrap">
-    <span class="logo"><svg class="mark" viewBox="17 5 66 90" aria-hidden="true"><path d="M22 33v57M78 10v57M22 38h56M22 62h56" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round"/></svg>fences</span>
-    <nav aria-label="Footer"><a href="../">Home</a><a href="https://github.com/bhaviksardar/fences">GitHub</a><a href="https://pypi.org/project/agentfences/">PyPI</a><a href="https://www.npmjs.com/package/agentfences">npm</a></nav>
-    <span>© 2026 Fences</span>
+    <span><svg class="mark" viewBox="17 5 66 90" aria-hidden="true"><path d="M22 33v57M78 10v57M22 38h56M22 62h56" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round"/></svg>fences</span>
+    <span><a href="../">Home</a> · <a href="https://github.com/bhaviksardar/fences">GitHub</a> · <a href="https://pypi.org/project/agentfences/">PyPI</a> · <a href="https://www.npmjs.com/package/agentfences">npm</a></span>
   </div>
 </footer>
 
