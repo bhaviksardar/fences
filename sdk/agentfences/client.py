@@ -124,6 +124,24 @@ class GovClient:
             payload["exception"] = exception
         return self._post(f"/api/runs/{run_id}/end", payload)
 
+    def my_context(self, tools: Optional[list] = None) -> Optional[dict]:
+        """GET /api/self: what Fences knows about this key's agent. None when it can't say (unreachable, an older server,
+        a rejected key): asking is never in the agent's way."""
+        if not self.breaker.allow():
+            return None
+        try:
+            resp = self._session().get(f"{self.endpoint}/api/self", params={"tools": ",".join(tools)} if tools else None,
+                                       headers=self.headers, timeout=self.timeout, allow_redirects=False)
+            body = resp.json() if resp.status_code == 200 else None
+        except requests.RequestException:
+            self.breaker.record(False)
+            return None
+        except ValueError:  # not JSON
+            body = None
+        if resp.ok:  # only success counts here: this endpoint failing mustn't pause checkpoints (a network error does, above)
+            self.breaker.record(True)
+        return body if isinstance(body, dict) else None
+
     def _post(self, path: str, payload: dict, optional: bool = False, start: bool = False, retry: bool = False) -> dict:
         """
         optional: an endpoint older servers may not have. A missing route returns

@@ -1,6 +1,6 @@
 __version__ = "0.9.2"  # the one place the version lives; pyproject.toml reads it from here
 
-from .core import init, governed, checkpoint, checkpoint_sync, log_decision, flush, get_active_run, CheckpointResult
+from .core import init, governed, checkpoint, checkpoint_sync, log_decision, flush, get_active_run, CheckpointResult, my_context, tool_health
 from .events import context
 from .tools import tool
 from . import mcp
@@ -10,6 +10,7 @@ from .exceptions import FencesError, FencesAuthError, AgentQuarantined, FencesSt
 
 __all__ = [
     "init", "governed", "mcp", "checkpoint", "checkpoint_sync", "log_decision", "flush", "get_active_run", "context", "tool", "instrument",
+    "my_context", "tool_health",
     "request_approval", "request_approval_sync", "Approval",
     "CheckpointResult",
     "FencesError", "FencesAuthError", "AgentQuarantined", "FencesStop", "ToolBlocked",

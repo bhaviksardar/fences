@@ -643,3 +643,32 @@ def log_decision(reasoning: str, action: Optional[str] = None):
     if sent and sent.get("reasoning"):
         outbox.put_decision(client, {"run_id": run.run_id, "iteration": run.iterations,
                                      "reasoning": sent["reasoning"], "action": sent.get("action")})
+
+
+# ── Asking Fences about yourself ──────────────────────────────────────────────
+
+def my_context() -> Optional[dict]:
+    """
+    What Fences knows about this agent, from its API key: its limits, tools that need approval, the rules that apply
+    to it, its open incidents, what's normal for it over the last 7 days, the tools and models it uses, and how its
+    tools did in the last 15 minutes ("tools_now"). None when Fences can't say (local mode, unreachable, an older
+    server): carry on as usual. It waits for Fences (up to the client's timeout): in async code,
+    `await asyncio.to_thread(agentfences.my_context)`.
+    """
+    return _client.my_context() if _client else None
+
+
+def tool_health(*tools: str) -> dict:
+    """
+    How calls to these tools went in the last 15 minutes, across the team's agents: {tool: {"state", "calls",
+    "failed", "last_error", "last_at"}}. state is "ok", "some failures", "failing" or "no recent calls"; "unknown"
+    when Fences can't say. Check before calling a tool that may be down:
+
+        if fences.tool_health("fetch_pdf")["fetch_pdf"]["state"] == "failing":
+            ...  # wait, or take another way
+
+    Like my_context, it waits for Fences: in async code, `await asyncio.to_thread(agentfences.tool_health, "fetch_pdf")`.
+    """
+    got = _client.my_context(list(tools)) if _client and tools else None
+    now = {t["tool"]: t for t in (got or {}).get("tools_now", [])}
+    return {t: now.get(t, {"tool": t, "state": "unknown"}) for t in tools}
