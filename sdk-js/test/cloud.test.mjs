@@ -305,3 +305,35 @@ test("malformed replies can't break a checkpoint or a run start, lift a limit, o
   adopt(run, { budget_usd: Infinity }, LIMITS);  // a reply body of 1e400 parses to Infinity
   assert.equal(run.budgetUsd, 1);
 });
+
+test("failed calls carry an error category; a failed run sends one in a fences.run.error span", async () => {
+  cloud();
+  const brokenTool = tool(function brokenTool() { throw new Error("bad row"); });
+  const slowTool = tool(async function slowTool() { throw Object.assign(new Error("slow"), { code: "ETIMEDOUT" }); });
+  const { recordSpan } = await import("../dist/core.js");
+  class RateLimitError extends Error { status = 429; }
+  class APIError extends Error { status = 529; }
+  await assert.rejects(governed(async () => {
+    assert.throws(() => brokenTool());
+    await assert.rejects(slowTool());
+    recordSpan("chat m", 0, { "gen_ai.operation.name": "chat" }, new Error("odd"));
+    recordSpan("chat m", 0, { "gen_ai.operation.name": "chat" }, new RateLimitError("slow down"));
+    throw new APIError("overloaded");
+  }, { budgetUsd: 1 })());
+  await flush();
+  const spans = sent("/spans").flatMap((b) => b.body.spans);
+  assert.deepEqual(spans.map((s) => [s.name, s.attributes["fences.error.category"]]), [
+    ["execute_tool brokenTool", "tool_error"], ["execute_tool slowTool", "timeout"], ["chat m", "model_error"],
+    ["chat m", "rate_limit"], ["fences.run.error", "overloaded"]]);
+  const runError = spans.at(-1);
+  assert.equal(runError.status, "error");
+  assert.equal(runError.attributes["error.type"], "APIError");
+  assert.equal(runError.attributes["http.response.status_code"], 529);
+  assert.ok(!("fences.error.message" in runError.attributes), "the message is on the run end only");
+  assert.ok(!("gen_ai.operation.name" in runError.attributes), "not a tool or model call");
+  assert.equal(spans[3].attributes["http.response.status_code"], 429);
+
+  await governed(async () => 1, { budgetUsd: 1 })();
+  await flush();
+  assert.equal(sent("/spans").flatMap((b) => b.body.spans).length, 5, "a run that succeeds has no run error span");
+});

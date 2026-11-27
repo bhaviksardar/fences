@@ -325,6 +325,9 @@ def _outcome(run: RunState, exc: Optional[BaseException]):
         run.last_breach = run.last_breach or "stopped_by_user"
         return "breached", None
     run.exception = events.exception_info(exc)  # includes cancellation
+    # The run end has no field for its category, and older servers may refuse new ones: a span carries it.
+    # Not the message: that's on the run end, where existing redact hooks look for it
+    _span(run, "fences.run.error", 0.0, {}, exc, message=False)
     e = run.exception
     return "error", f"{e['type']}: {e['message']}" if e["message"] else e["type"]
 
@@ -594,16 +597,27 @@ def record_span(name: str, elapsed_s: float, attributes: dict, error: Optional[B
     redact hook in cloud mode. Does nothing outside a run.
     """
     run = get_active_run()
-    if run is None:
-        return
+    if run is not None:
+        _span(run, name, elapsed_s, attributes, error)
+
+
+_UNKNOWN_AS = {"execute_tool": "tool_error", "chat": "model_error"}  # what an unknown failure of a call is
+
+
+def _span(run: RunState, name: str, elapsed_s: float, attributes: dict, error: Optional[BaseException] = None,
+          message: bool = True):
     end = time.time()
     attrs = {k: v for k, v in attributes.items() if v is not None}
     attrs["fences.iteration"] = run.iterations
     if error is not None:
         attrs["error.type"] = type(error).__qualname__
-        attrs["fences.error.message"] = events.error_text(error)
-        if isinstance(getattr(error, "status_code", None), int):  # e.g. 429 rate limit, 529 overloaded
-            attrs["http.response.status_code"] = error.status_code
+        if message:
+            attrs["fences.error.message"] = events.error_text(error)
+        category = events.categorize(error)
+        attrs["fences.error.category"] = _UNKNOWN_AS.get(attrs.get("gen_ai.operation.name"), category) if category == "unknown" else category
+        status = events.http_status(error)
+        if status is not None:  # e.g. 429 rate limit, 529 overloaded
+            attrs["http.response.status_code"] = status
     span = {"name": name, "start_ts": end - elapsed_s, "end_ts": end, "status": "error" if error else "ok", "attributes": attrs}
     run.events.append(span)
     client = _client

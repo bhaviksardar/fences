@@ -502,6 +502,103 @@ def check_tool_calls():
     assert a[2]["error.type"] == "PermissionError" and a[2]["fences.error.message"] == "PermissionError: 403 from search API"
 
 
+def fake(name, base=Exception, **attrs):
+    """An exception class named like a provider SDK's, without importing it."""
+    return type(name, (base,), attrs)
+
+
+def check_error_categories():
+    from agentfences import categorize, FencesStop, AgentQuarantined, FencesAuthError, ToolBlocked
+    from agentfences.results import breach_result
+    # OpenAI and Anthropic: status_code on APIStatusError subclasses; connection errors have none
+    api_error = fake("APIError")
+    status_error = fake("APIStatusError", api_error)
+    connection = fake("APIConnectionError", api_error)
+    status = lambda name, code: fake(name, status_error, status_code=code)()
+    # Gemini (google-genai, google-api-core): the status is `code`
+    gemini_api = fake("APIError")
+
+    class Broken(Exception):
+        @property
+        def status_code(self):
+            raise RuntimeError("no")
+
+    table = [
+        (status("RateLimitError", 429), "rate_limit"), (status("AuthenticationError", 401), "auth"),
+        (status("PermissionDeniedError", 403), "auth"), (status("BadRequestError", 400), "bad_request"),
+        (status("NotFoundError", 404), "bad_request"), (status("UnprocessableEntityError", 422), "bad_request"),
+        (status("InternalServerError", 500), "server"), (status("OverloadedError", 529), "overloaded"),
+        (status("APIStatusError", 503), "overloaded"), (status("APIStatusError", 502), "server"),
+        (status("APIStatusError", 504), "timeout"),
+        (connection(), "network"), (fake("APITimeoutError", connection)(), "timeout"),
+        (fake("ClientError", gemini_api, code=429)(), "rate_limit"), (fake("ServerError", gemini_api, code=503)(), "overloaded"),
+        (fake("ClientError", gemini_api, code=400)(), "bad_request"), (fake("ResourceExhausted", code=429)(), "rate_limit"),
+        (fake("DeadlineExceeded")(), "timeout"), (fake("ServiceUnavailable")(), "overloaded"),
+        (fake("Unauthenticated")(), "auth"), (fake("InvalidArgument")(), "bad_request"),
+        # requests and httpx: the status is on .response
+        (fake("HTTPError", response=NS(status_code=429))(), "rate_limit"), (fake("HTTPStatusError", response=NS(status_code=500))(), "server"),
+        (fake("ReadTimeout")(), "timeout"), (fake("ConnectError")(), "network"), (fake("ConnectTimeout", fake("ConnectionError"))(), "timeout"),
+        # the standard library
+        (TimeoutError(), "timeout"), (asyncio.TimeoutError(), "timeout"), (asyncio.CancelledError(), "cancelled"),
+        (ConnectionRefusedError(), "network"), (ConnectionAbortedError(), "network"), (ValueError("x"), "unknown"),
+        (KeyError("k"), "unknown"), (PermissionError("not a file permission"), "unknown"), (Broken(), "unknown"),
+        (fake("Odd", code="E42")(), "unknown"), (fake("Odd", status_code=True)(), "unknown"),
+        # Fences' own refusals
+        (ToolBlocked("t", "no"), "blocked"), (AgentQuarantined("a"), "blocked"),
+        (FencesStop(breach_result("budget_exceeded")), "blocked"), (FencesAuthError("bad key"), "auth"),
+        (agentfences.control.Halt(), "cancelled"),
+    ]
+    got = [(type(e).__name__, categorize(e)) for e, _ in table]
+    assert got == [(type(e).__name__, want) for e, want in table], [(g, w) for g, (_, w) in zip(got, table) if g[1] != w]
+
+    # On spans: an unknown failure is a tool_error or a model_error, by what failed; the run's error gets a span of its own
+    @agentfences.tool
+    def broken_tool():
+        raise ValueError("bad row")
+
+    @agentfences.tool
+    def slow_tool():
+        raise TimeoutError("took too long")
+
+    @governed(budget_usd=1)
+    def agent():
+        for t in (broken_tool, slow_tool):
+            try:
+                t()
+            except Exception:
+                pass
+        agentfences.core.record_span("chat m", 0, {"gen_ai.operation.name": "chat"}, ValueError("odd"))
+        agentfences.core.record_span("chat m", 0, {"gen_ai.operation.name": "chat"}, status("RateLimitError", 429))
+        raise status("APIStatusError", 529)
+
+    sent = cloud()
+    try:
+        try:
+            agent()
+        except Exception:
+            pass
+        agentfences.flush()
+        spans = sent.of("event")
+        assert [(s["name"], s["attributes"]["fences.error.category"]) for s in spans] == [
+            ("execute_tool broken_tool", "tool_error"), ("execute_tool slow_tool", "timeout"), ("chat m", "model_error"),
+            ("chat m", "rate_limit"), ("fences.run.error", "overloaded")], spans
+        run_error = spans[-1]
+        assert run_error["status"] == "error" and run_error["attributes"]["error.type"] == "APIStatusError", run_error
+        assert run_error["attributes"]["http.response.status_code"] == 529 and spans[3]["attributes"]["http.response.status_code"] == 429
+        assert "gen_ai.operation.name" not in run_error["attributes"], "not a tool or model call"
+        assert "fences.error.message" not in run_error["attributes"], "the message is on the run end only"
+        assert sent.of("end")[-1]["status"] == "error"
+
+        @governed(budget_usd=1)
+        def fine():
+            return 1
+        fine()
+        agentfences.flush()
+        assert len(sent.of("event")) == 5, "a run that succeeds has no run error span"
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_events_are_sent_batched_and_redacted():
     def scrub(e):
         if e["type"] != "span":
@@ -1295,7 +1392,7 @@ if __name__ == "__main__":
         check_concurrent_runs_are_independent, check_nested_runs, check_outside_a_run,
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
-        check_tool_calls, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
+        check_tool_calls, check_error_categories, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
         check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals,
         check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit,
         check_resent_quarantine_doesnt_flood_heartbeats, check_acks_survive_a_rate_limited_heartbeat, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,

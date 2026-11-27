@@ -197,6 +197,9 @@ function outcome(run: Run, failed: boolean, error: unknown): [string, string | n
   if (!failed) return [run.lastBreach ? "breached" : "success", null];
   if (error instanceof FencesStop) return ["breached", null];  // halted after a stop it missed (stopGraceS)
   run.exception = events.exceptionInfo(error);
+  // The run end has no field for its category, and older servers may refuse new ones: a span carries it.
+  // Not the message: that's on the run end, where existing redact hooks look for it
+  spanOf(run, "fences.run.error", 0, {}, error, false);
   const e = run.exception;
   return ["error", e.message ? `${e.type}: ${e.message}` : e.type];
 }
@@ -383,16 +386,24 @@ export function logDecision(reasoning: string, action: string | null = null): vo
  */
 export function recordSpan(name: string, elapsedMs: number, attributes: Record<string, unknown>, error?: unknown): void {
   const run = getActiveRun();
-  if (!run) return;
+  if (run) spanOf(run, name, elapsedMs, attributes, error);
+}
+
+const UNKNOWN_AS: Record<string, events.ErrorCategory> = { execute_tool: "tool_error", chat: "model_error" };  // what an unknown failure of a call is
+
+function spanOf(run: Run, name: string, elapsedMs: number, attributes: Record<string, unknown>, error?: unknown,
+                message = true): void {
   const end = Date.now() / 1000;
   const attrs: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(attributes)) if (v !== null && v !== undefined) attrs[k] = v;
   attrs["fences.iteration"] = run.iterations;
   if (error !== undefined) {
     attrs["error.type"] = events.errorType(error);
-    attrs["fences.error.message"] = events.errorText(error);
-    const status = (error as { status?: unknown })?.status;  // the OpenAI and Anthropic JS SDKs put the HTTP status here
-    if (typeof status === "number") attrs["http.response.status_code"] = status;
+    if (message) attrs["fences.error.message"] = events.errorText(error);
+    const category = events.categorize(error);
+    attrs["fences.error.category"] = category === "unknown" ? UNKNOWN_AS[attrs["gen_ai.operation.name"] as string] ?? category : category;
+    const status = events.httpStatus(error);  // e.g. 429 rate limit, 529 overloaded
+    if (status !== undefined) attrs["http.response.status_code"] = status;
   }
   const span: Span = { name, start_ts: end - elapsedMs / 1000, end_ts: end, status: error === undefined ? "ok" : "error", attributes: attrs };
   run.events.push(span);

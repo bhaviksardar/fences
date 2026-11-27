@@ -57,6 +57,52 @@ def error_text(e: BaseException) -> str:
     return (f"{type(e).__qualname__}: {e}" if str(e) else type(e).__qualname__)[:MAX_MESSAGE]
 
 
+CATEGORIES = ("rate_limit", "overloaded", "timeout", "auth", "bad_request", "server", "network", "cancelled",
+              "blocked", "tool_error", "model_error", "unknown")
+# For errors without an HTTP status: words in the class's name or its bases', checked in this order
+# (an OpenAI APITimeoutError is also an APIConnectionError: a timeout first)
+_NAMED = (("timeout", ("Timeout", "TimedOut", "DeadlineExceeded")),
+          ("rate_limit", ("RateLimit", "TooManyRequests", "ResourceExhausted")),
+          ("overloaded", ("Overloaded", "ServiceUnavailable")),
+          ("auth", ("Authentication", "Unauthorized", "Unauthenticated", "PermissionDenied", "Forbidden")),
+          ("network", ("Connect", "Network")),
+          ("cancelled", ("Cancel", "Abort", "Halt")),
+          ("bad_request", ("BadRequest", "InvalidRequest", "InvalidArgument", "NotFound", "UnprocessableEntity")),
+          ("server", ("InternalServer", "ServerError")))
+
+
+def http_status(e: BaseException) -> Optional[int]:
+    """The HTTP status an error carries: status_code (OpenAI, Anthropic), code (Gemini), response.status_code (requests, httpx)."""
+    for v in (getattr(e, "status_code", None), getattr(e, "status", None), getattr(e, "code", None),
+              getattr(getattr(e, "response", None), "status_code", None)):
+        if isinstance(v, int) and not isinstance(v, bool) and 100 <= v <= 599:
+            return int(v)
+    return None
+
+
+def categorize(exc: BaseException) -> str:
+    """
+    What kind of failure this is, from its HTTP status and class names (no provider SDK is imported):
+    rate_limit, overloaded, timeout, auth, bad_request, server, network, cancelled, blocked (Fences
+    refused it) or unknown. Spans of failed tool and model calls say tool_error and model_error for
+    what's unknown here.
+    """
+    from .exceptions import FencesAuthError, FencesError
+    try:
+        if isinstance(exc, FencesAuthError):
+            return "auth"
+        if isinstance(exc, FencesError):
+            return "blocked"
+        status = http_status(exc)
+        if status is not None and status >= 400:
+            return ("rate_limit" if status == 429 else "overloaded" if status in (503, 529) else "auth" if status in (401, 403)
+                    else "timeout" if status in (408, 504) else "bad_request" if status < 500 else "server")
+        names = " ".join(c.__name__ for c in type(exc).__mro__)
+        return next((cat for cat, words in _NAMED if any(w in names for w in words)), "unknown")
+    except Exception:  # an odd error object (a property that raises) must not break recording it
+        return "unknown"
+
+
 def exception_info(exc: BaseException) -> dict:
     """Type, message and the last frames of the stack, for the run's error report."""
     frames = traceback.extract_tb(exc.__traceback__)[-MAX_FRAMES:]

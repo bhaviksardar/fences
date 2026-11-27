@@ -3,6 +3,7 @@
  * the error that ended it, and the redact hook every outgoing event passes through.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { FencesAuthError, FencesError } from "./errors.js";
 
 export const MAX_CONTEXT_KEYS = 32;
 export const MAX_CONTEXT_VALUE = 256;
@@ -66,6 +67,64 @@ export function errorText(e: unknown): string {
 export function errorType(e: unknown): string {
   if (e instanceof Error) return e.name && e.name !== "Error" ? e.name : e.constructor.name;
   return typeof e;
+}
+
+export type ErrorCategory = "rate_limit" | "overloaded" | "timeout" | "auth" | "bad_request" | "server" | "network"
+  | "cancelled" | "blocked" | "tool_error" | "model_error" | "unknown";
+
+// For errors without an HTTP status: words in the class's name or its bases', checked in this order
+// (an APIConnectionTimeoutError is also an APIConnectionError: a timeout first)
+const NAMED: [ErrorCategory, string[]][] = [
+  ["timeout", ["Timeout", "TimedOut", "DeadlineExceeded"]],
+  ["rate_limit", ["RateLimit", "TooManyRequests", "ResourceExhausted"]],
+  ["overloaded", ["Overloaded", "ServiceUnavailable"]],
+  ["auth", ["Authentication", "Unauthorized", "Unauthenticated", "PermissionDenied", "Forbidden"]],
+  ["network", ["Connect", "Network"]],
+  ["cancelled", ["Cancel", "Abort", "Halt"]],
+  ["bad_request", ["BadRequest", "InvalidRequest", "InvalidArgument", "NotFound", "UnprocessableEntity"]],
+  ["server", ["InternalServer", "ServerError"]],
+];
+// Node's own error codes, on the error or its cause (fetch rejects with TypeError("fetch failed"))
+const TIMEOUT_CODES = new Set(["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
+const NETWORK_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "EPIPE", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_SOCKET"]);
+
+/** The HTTP status an error carries: status (OpenAI, Anthropic, Gemini), statusCode, a numeric code, response.status. */
+export function httpStatus(e: unknown): number | undefined {
+  const o = e as { status?: unknown; statusCode?: unknown; code?: unknown; response?: { status?: unknown } } | null;
+  for (const v of [o?.status, o?.statusCode, o?.code, o?.response?.status]) {
+    if (typeof v === "number" && Number.isInteger(v) && v >= 100 && v <= 599) return v;
+  }
+  return undefined;
+}
+
+/**
+ * What kind of failure this is, from its HTTP status, class names and Node error codes (no
+ * provider SDK is imported): rate_limit, overloaded, timeout, auth, bad_request, server, network,
+ * cancelled, blocked (Fences refused it) or unknown. Spans of failed tool and model calls say
+ * tool_error and model_error for what's unknown here.
+ */
+export function categorize(e: unknown): ErrorCategory {
+  try {
+    if (e instanceof FencesAuthError) return "auth";
+    if (e instanceof FencesError) return "blocked";
+    const status = httpStatus(e);
+    if (status !== undefined && status >= 400) {
+      return status === 429 ? "rate_limit" : status === 503 || status === 529 ? "overloaded" : status === 401 || status === 403 ? "auth"
+        : status === 408 || status === 504 ? "timeout" : status < 500 ? "bad_request" : "server";
+    }
+    const codes = [(e as { code?: unknown })?.code, ((e as { cause?: { code?: unknown } })?.cause)?.code];
+    if (codes.some((c) => TIMEOUT_CODES.has(c as string))) return "timeout";
+    if (codes.some((c) => NETWORK_CODES.has(c as string))) return "network";
+    const names: string[] = [];
+    if (e instanceof Error) names.push(e.name);
+    for (let p = e !== null && typeof e === "object" ? Object.getPrototypeOf(e) : null; p && p !== Object.prototype; p = Object.getPrototypeOf(p)) {
+      names.push(p.constructor?.name ?? "");
+    }
+    const joined = names.join(" ");
+    return NAMED.find(([, words]) => words.some((w) => joined.includes(w)))?.[0] ?? "unknown";
+  } catch {  // an odd error object (a getter that throws) must not break recording it
+    return "unknown";
+  }
 }
 
 export interface ExceptionInfo { type: string; message: string; stack: string[] }

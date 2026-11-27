@@ -98,6 +98,14 @@ def main():
     assert msg["gen_ai.usage.input_tokens"] == 1100  # Anthropic reports cached input separately; OTel totals it
     assert math.isclose(msg["fences.cost_usd"], cost("claude-sonnet-4-5", inp=100, cache_read=1000, out=50))
     assert failed["http.response.status_code"] == 429 and failed["error.type"] == "RateLimitError"
+    assert failed["fences.error.category"] == "rate_limit"
+    # The real providers' exception classes, categorized without importing them in the SDK
+    req = http(openai._base_client).Request("POST", "https://api.invalid")
+    assert agentfences.categorize(openai.APITimeoutError(request=req)) == "timeout"
+    assert agentfences.categorize(openai.APIConnectionError(request=req)) == "network"
+    resp = lambda code: http(anthropic._base_client).Response(code, request=req)
+    assert agentfences.categorize(anthropic.InternalServerError("x", response=resp(529), body=None)) == "overloaded"
+    assert agentfences.categorize(anthropic.AuthenticationError("x", response=resp(401), body=None)) == "auth"
     assert "gen_ai.usage.input_tokens" not in failed and spans[4]["name"] == "chat rate-limited"
     assert (spent, iterations) == (0, 0), "recording doesn't checkpoint or add spend"
     prechecks()

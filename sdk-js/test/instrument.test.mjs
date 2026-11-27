@@ -170,6 +170,7 @@ test("a failed call is released uncharged and recorded as an error", { skip }, a
   assert.equal(held, 0);
   assert.equal(span.status, "error");
   assert.equal(span.attributes["http.response.status_code"], 500);
+  assert.equal(span.attributes["fences.error.category"], "server");
 });
 
 test("asResponse(): the caller reads the body, so the call keeps its worst case until the next checkpoint", { skip }, async () => {
