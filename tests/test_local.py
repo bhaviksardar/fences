@@ -691,8 +691,10 @@ def check_metadata_mode():
         end = sent.of("end")[-1]
         assert (end["status"], end["error"], end["exception"]["type"], end["exception"]["message"]) == ("error", "ValueError", "ValueError", "")
         assert end["exception"]["stack"], "where it failed is code, not data: kept"
-        acks = sent.acks + agentfences.control._acks
-        assert [a.get("detail") for a in acks if a["id"] == "c1"] == ["RuntimeError"], acks
+        # The ack may be in a heartbeat still on its way when flush() returns: wait for it
+        hook_acks = lambda: [a.get("detail") for a in sent.acks + agentfences.control._acks if a["id"] == "c1"]
+        wait_for(lambda: hook_acks())
+        assert hook_acks() == ["RuntimeError"], hook_acks()
         agentfences.control._acks.clear()
         try:
             agentfences.init(local_only=True, capture="everything")

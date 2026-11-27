@@ -384,8 +384,10 @@ test("capture metadata: nothing the agent or its users wrote leaves the process,
   const end = sent("/end")[0].body;
   assert.deepEqual([end.status, end.error, end.exception.type, end.exception.message], ["error", "Error", "Error", ""]);
   assert.ok(end.exception.stack.length, "where it failed is code, not data: kept");
-  const acks = sent("/api/heartbeat").flatMap((r) => r.body.acks ?? []);
-  assert.deepEqual(acks.filter((a) => a.id === "c1" && a.hook).map((a) => a.detail), ["Error"]);
+  // The hook's ack may be in a heartbeat still on its way when flush() returns: wait for it
+  const hookAcks = () => sent("/api/heartbeat").flatMap((r) => r.body.acks ?? []).filter((a) => a.id === "c1" && a.hook);
+  for (let i = 0; i < 100 && !hookAcks().length; i++) await new Promise((ok) => setTimeout(ok, 10));
+  assert.deepEqual(hookAcks().map((a) => a.detail), ["Error"]);
   assert.throws(() => init({ localOnly: true, capture: "everything" }), /capture/);
 });
 
@@ -428,7 +430,7 @@ test("tags: checked at init and governed(), merged (governed's win), sent in the
   assert.equal(warnings.filter((w) => w.includes("more than the 32")).length, 1);
 });
 
-test("export: every outgoing event as a JSON line, in local and cloud mode, after capture and the redact hook", async () => {
+test("export: every outgoing event as a JSON line, in local and cloud mode, after capture and the redact hook", async (t) => {
   const fs = await import("node:fs");
   const os = await import("node:os");
   const path = await import("node:path");
@@ -454,7 +456,10 @@ test("export: every outgoing event as a JSON line, in local and cloud mode, afte
   };
 
   // Local mode: the same events a server would get, one line each, with the run's id
-  let base = fs.mkdtempSync(path.join(os.tmpdir(), "fences-export-"));
+  const made = [];
+  const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), "fences-export-")); made.push(d); return d; };
+  t.after(() => made.forEach((d) => fs.rmSync(d, { recursive: true, force: true })));
+  let base = tmp();
   init({ localOnly: true, export: pathToFileURL(base).href, tags: { team: "ops" } });
   await run();
   let lines = read(base);
@@ -469,7 +474,7 @@ test("export: every outgoing event as a JSON line, in local and cloud mode, afte
   assert.deepEqual([lines[4].status, lines[4].error], ["error", "Error: no cats"]);
 
   // Cloud mode: written as well as sent, after capture "metadata" and the redact hook
-  base = fs.mkdtempSync(path.join(os.tmpdir(), "fences-export-"));
+  base = tmp();
   cloud({ export: pathToFileURL(base).href, capture: "metadata",
           redact: (e) => (e.type === "span" ? { ...e, attributes: { ...e.attributes, hooked: true } } : e) });
   await run();
@@ -492,12 +497,13 @@ test("export: every outgoing event as a JSON line, in local and cloud mode, afte
   init({ localOnly: true });
 });
 
-test("export: an agent's name can't climb out of the export directory", async () => {
+test("export: an agent's name can't climb out of the export directory", async (t) => {
   const fs = await import("node:fs");
   const os = await import("node:os");
   const path = await import("node:path");
   const { pathToFileURL } = await import("node:url");
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "fences-export-"));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
   init({ localOnly: true, export: pathToFileURL(base).href });
   await governed(async () => 1, { budgetUsd: 1, name: "../../evil" })();
   await governed(async () => 1, { budgetUsd: 1, name: ".." })();
