@@ -41,6 +41,7 @@ This README covers the Python SDK (`pip install agentfences`). There's also a Ty
 | Budget prechecks before model calls (needs instrumentation or a framework integration) | ✅ 0.4.0 | ✅ 0.8.0 |
 | Containment hooks (`on_stop`, `on_quarantine`), acknowledging every dashboard command | ✅ 0.5.2 | ✅ 0.6.0 |
 | Waiting at a limit for someone to raise it (`on_breach="hold"`) | ✅ 0.6.0 | ✅ 0.6.0 |
+| Error categories, `fallback()` and retries, tags, metadata-only capture, local trace export | ✅ 0.10.0 | ✅ 0.10.0 |
 
 What each part guarantees, and what it can't, is in [ENFORCEMENT.md](ENFORCEMENT.md).
 
@@ -284,6 +285,18 @@ The worst case is the request's input, estimated high, plus its output cap at th
 
 Both kinds of call are recorded as spans named by the OpenTelemetry GenAI conventions (`chat gpt-4o`, `execute_tool web_search`, with `gen_ai.*` attributes plus Fences' `fences.cost_usd`). They're kept on the run (`get_active_run().events`, newest 1,000) and, in cloud mode, sent to Fences in the background in batches. They pass through the `redact` hook first as `tool_call` (`name`, `args`, `error`) and `llm_call` (`model`, `error`) events. A Fences server that doesn't accept them yet gets a single warning and nothing else changes.
 
+**Error categories, fallbacks and retries** (from 0.10.0). Every failed call's span carries `fences.error.category`: `rate_limit`, `overloaded`, `timeout`, `auth`, `bad_request`, `server`, `network`, `cancelled`, `blocked` (Fences refused it), `tool_error`, `model_error` or `unknown`. It's read from the HTTP status and the exception's class names, so it works for OpenAI, Anthropic, Gemini, `requests` and `httpx` errors alike (`agentfences.categorize(exc)` gives you the same answer). A run that ends in an error sends its category too, in a `fences.run.error` span. When you switch models, say so:
+
+```python
+try:
+    resp = client.chat.completions.create(model="gpt-4o", messages=msgs)
+except openai.RateLimitError as e:
+    agentfences.fallback("gpt-4o", "gpt-4o-mini", e)   # a `fallback gpt-4o→gpt-4o-mini` span, reason "rate_limit"
+    resp = client.chat.completions.create(model="gpt-4o-mini", messages=msgs)
+```
+
+With `instrument=True`, a model call made right after a failed one also carries `fences.retry.attempt` (1, 2, …) and `fences.retry.of` (the model that failed). LangChain's `with_fallbacks` isn't recorded as a fallback: its callbacks can't tell which `with_fallbacks` a failed call belonged to, so call `fallback()` where you choose the next model.
+
 ## Context, errors and redaction
 
 Tag runs so on-call can see which deploy and which customer a run belongs to:
@@ -296,6 +309,17 @@ with agentfences.context(user_id="u_123", session_id="s_9", trace_id=span_id):
 ```
 
 Blocks nest (inner values win), and `get_active_run().context` shows a run's values from inside the agent.
+
+**Tags** (from 0.10.0) label an agent's runs for filtering and grouping on the dashboard. Set them for every run in `init()`, and per agent in `@governed` (its values win):
+
+```python
+agentfences.init(api_key="fc_...", endpoint="https://...", tags={"pipeline": "pcr", "team": "ops"})
+
+@governed(budget_usd=0.50, tags={"team": "billing", "stage": "triage"})   # this agent's runs: pipeline=pcr, team=billing, stage=triage
+async def triage_agent(ticket): ...
+```
+
+Up to 20 keys of `a-z`, `0-9`, `_ . -` (40 characters at most), each value a string of 100 characters at most; anything else raises at `init()` or when the decorator is applied. Tags are metadata, so `capture="metadata"` keeps them. They go to Fences in the run's context as `tag.<key>` (the `redact` hook sees them there), and `get_active_run().tags` shows them.
 
 When a governed run raises, Fences records the exception type, message and the last 15 stack frames with the run, and its error reads `ValueError: page 7 returned 403` rather than just the message. The exception still reaches your code as usual.
 
@@ -328,6 +352,16 @@ agentfences.init(api_key="fc_...", endpoint="https://...", capture="metadata", e
 | Error type, category and HTTP status, and the stack's file, line and function | Error messages |
 
 It runs before the `redact` hook, which sees only what it kept, so the two work together and a hook can't send back what was dropped. Two things still go out as they do today, because Fences needs them to work: a guarded tool's check carries its arguments (dashboard rules match on them), and an approval request carries its reason (the person approving reads it). Use the `redact` hook to change or drop the guard's arguments, and keep approval reasons free of personal data. The default, `capture="full"`, sends everything as before.
+
+### Local trace export
+
+`export="file:///path/to/dir"` (from 0.10.0) also writes every event that leaves the process, as sent (after `capture` and the `redact` hook), as JSON lines to `{dir}/{agent}/{YYYY-MM-DD}.jsonl` (UTC date): one line per run start, span, decision and run end, each with its `run_id`. It works in `local_only=True` mode too, so you can keep a trace without a server:
+
+```python
+agentfences.init(local_only=True, capture="metadata", export="file:///var/log/fences")
+```
+
+Lines are written in the background; a failed write logs one warning and never reaches the agent. `agentfences.flush()` waits for them.
 
 ## Modes
 
