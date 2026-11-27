@@ -617,6 +617,92 @@ def check_fallback():
     assert "fences.fallback.reason" not in a[3] and all(s["status"] == "ok" and "gen_ai.operation.name" not in s["attributes"] for s in spans)
 
 
+def check_metadata_mode():
+    """capture="metadata": nothing the agent or its users wrote leaves the process, in any event."""
+    from agentfences.spans import record_llm_call
+    secrets = {"prompt": "patient Jane Roe has stage 2 diabetes", "decision": "Jane looks worse; escalating",
+               "action": "page_dr_who", "context": "mrn-0042", "tool_error": "record mrn-0042 locked by Dr Who",
+               "model_error": "prompt rejected: Jane Roe", "run_error": "chart for Jane Roe missing", "label": "Jane asked for it",
+               "approval": "refund Jane Roe", "hook": "could not revoke Jane's token"}
+    seen = []
+
+    def hook(event):  # runs after the filter: sees only what it kept, so it can't add the rest back
+        seen.append(repr(event))
+        return event
+
+    @agentfences.tool
+    def lookup(question):
+        return "ok"
+
+    @agentfences.tool
+    def locked(chart_id):
+        raise PermissionError(secrets["tool_error"])
+
+    @governed(budget_usd=1)
+    def agent():
+        lookup(secrets["prompt"])
+        try:
+            locked("mrn-0042")
+        except PermissionError:
+            pass
+        log_decision(secrets["decision"], action=secrets["action"])
+        record_llm_call("openai", "gpt-4o", 0.0, error=fake("RateLimitError", status_code=429)(secrets["model_error"]))
+        agentfences.fallback("gpt-4o", "gpt-4o-mini", secrets["label"])
+        agentfences.fallback("gpt-4o", "gpt-4o-mini", fake("RateLimitError", status_code=429)(secrets["model_error"]))
+        agentfences.core.record_span("fences.approval", 0, {"fences.approval.reason": secrets["approval"],
+                                                            "fences.approval.note": secrets["approval"], "fences.approval.granted": False})
+        raise ValueError(secrets["run_error"])
+
+    sent = cloud(capture="metadata", environment="prod", redact=hook)
+    try:
+        with agentfences.context(user_id=secrets["context"]):
+            try:
+                agent()
+            except ValueError:
+                pass
+        def failing(event):
+            raise RuntimeError(secrets["hook"])
+        import threading
+        t = threading.Thread(target=agentfences.control._run_hook, args=(failing, {"type": "stop", "run_id": "r1", "id": "c1"}))
+        agentfences.control._running_hooks.append(t)  # as control._hook does
+        t.start()
+        t.join()
+        agentfences.flush()
+        out = repr(sent.sent) + repr(sent.acks) + repr(agentfences.control._acks) + "".join(seen)
+        leaks = [k for k, v in secrets.items() if v in out]
+        assert not leaks, (leaks, out)
+        assert not any(name in out for name in ("Jane", "mrn-0042", "Dr Who", "page_dr")), out
+
+        # What's still sent: the keys, names, models, numbers, error types, categories and statuses
+        assert sent.of("start")[-1]["context"] == {"environment": "prod", "user_id": ""}
+        assert sent.of("decision") == []
+        spans = {s["name"]: s for s in sent.of("event")}
+        assert spans["fences.decision"]["attributes"]["fences.decision.length"] == len(secrets["decision"])
+        assert spans["execute_tool lookup"]["attributes"].get("gen_ai.tool.call.arguments") is None
+        tool = spans["execute_tool locked"]["attributes"]
+        assert (tool["error.type"], tool["fences.error.category"]) == ("PermissionError", "tool_error") and "fences.error.message" not in tool
+        chat = spans["chat gpt-4o"]["attributes"]
+        assert (chat["fences.error.category"], chat["http.response.status_code"], chat["gen_ai.request.model"]) == ("rate_limit", 429, "gpt-4o")
+        fallbacks = [s["attributes"] for s in sent.of("event") if s["name"].startswith("fallback")]
+        assert [f.get("fences.fallback.reason") for f in fallbacks] == [None, "rate_limit"], "a category stays, a label goes"
+        assert spans["fences.approval"]["attributes"]["fences.approval.granted"] is False
+        assert spans["fences.run.error"]["attributes"]["fences.error.category"] == "unknown"
+        end = sent.of("end")[-1]
+        assert (end["status"], end["error"], end["exception"]["type"], end["exception"]["message"]) == ("error", "ValueError", "ValueError", "")
+        assert end["exception"]["stack"], "where it failed is code, not data: kept"
+        acks = sent.acks + agentfences.control._acks
+        assert [a.get("detail") for a in acks if a["id"] == "c1"] == ["RuntimeError"], acks
+        agentfences.control._acks.clear()
+        try:
+            agentfences.init(local_only=True, capture="everything")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("capture is checked")
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_events_are_sent_batched_and_redacted():
     def scrub(e):
         if e["type"] != "span":
@@ -1410,7 +1496,7 @@ if __name__ == "__main__":
         check_concurrent_runs_are_independent, check_nested_runs, check_outside_a_run,
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
-        check_tool_calls, check_error_categories, check_fallback, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
+        check_tool_calls, check_error_categories, check_fallback, check_metadata_mode, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
         check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals,
         check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit,
         check_resent_quarantine_doesnt_flood_heartbeats, check_acks_survive_a_rate_limited_heartbeat, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,

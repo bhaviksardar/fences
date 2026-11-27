@@ -915,6 +915,26 @@ def check_network_partition():
         agentfences.init(local_only=True)
 
 
+def check_metadata_mode_still_sends_guard_arguments():
+    """capture="metadata" strips the tool span, not the guard check: rules need the arguments."""
+    server = cloud(Server(budget=1), capture="metadata")
+    try:
+        @tool(cost_usd=0.1)
+        def refund(order_id):
+            return "done"
+
+        @governed(budget_usd=1)
+        def agent():
+            return refund("order-1182")
+        assert agent() == "done"
+        agentfences.flush()
+        assert [g.get("arguments") for g in server.guards if g["phase"] == "check"] == ["order_id='order-1182'"]
+        span = next(e for e in server.of("event") if e["name"] == "execute_tool refund")
+        assert "gen_ai.tool.call.arguments" not in span["attributes"]
+    finally:
+        agentfences.init(local_only=True)
+
+
 if __name__ == "__main__":
     agentfences.init(local_only=True)
     checks = [
@@ -928,7 +948,7 @@ if __name__ == "__main__":
         check_stop_seen_at_checkpoint_is_not_cancelled, check_hanging_tool_times_out,
         check_network_partition, check_heartbeats_back_off_while_failing, check_checkpoint_releases_only_its_own_call,
         check_malformed_commands_keep_the_heartbeat, check_nested_stopped_runs_are_both_halted, check_halted_tool_is_charged,
-        check_halted_run_cannot_call_the_model,
+        check_halted_run_cannot_call_the_model, check_metadata_mode_still_sends_guard_arguments,
     ]
     for check in checks:
         try:

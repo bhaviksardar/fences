@@ -337,3 +337,54 @@ test("failed calls carry an error category; a failed run sends one in a fences.r
   await flush();
   assert.equal(sent("/spans").flatMap((b) => b.body.spans).length, 5, "a run that succeeds has no run error span");
 });
+
+test("capture metadata: nothing the agent or its users wrote leaves the process, in any event", async () => {
+  const secrets = { prompt: "patient Jane Roe has stage 2 diabetes", decision: "Jane looks worse; escalating", action: "page_dr_who",
+    context: "mrn-0042", toolError: "record mrn-0042 locked by Dr Who", modelError: "prompt rejected: Jane Roe",
+    runError: "chart for Jane Roe missing", label: "Jane asked for it", approval: "refund Jane Roe", hook: "could not revoke Jane's token" };
+  const seen = [];
+  cloud({ capture: "metadata", environment: "prod", redact: (e) => { seen.push(JSON.stringify(e)); return e; },
+          onStop: () => { throw new Error(secrets.hook); } });
+  const { recordSpan } = await import("../dist/core.js");
+  const { recordLlmCall } = await import("../dist/spans.js");
+  const control = await import("../dist/control.js");
+  class RateLimitError extends Error { status = 429; }
+  const lookup = tool(function lookup(question) { return "ok"; });
+  const locked = tool(function locked(chartId) { throw new Error(secrets.toolError); });
+  await context({ user_id: secrets.context }, () => assert.rejects(governed(async () => {
+    lookup(secrets.prompt);
+    assert.throws(() => locked("mrn-0042"));
+    logDecision(secrets.decision, secrets.action);
+    recordLlmCall("openai", "gpt-4o", performance.now(), undefined, new RateLimitError(secrets.modelError));
+    fences.fallback("gpt-4o", "gpt-4o-mini", secrets.label);
+    fences.fallback("gpt-4o", "gpt-4o-mini", new RateLimitError(secrets.modelError));
+    recordSpan("fences.approval", 0, { "fences.approval.reason": secrets.approval, "fences.approval.note": secrets.approval,
+                                       "fences.approval.granted": false });
+    throw new Error(secrets.runError);
+  }, { budgetUsd: 1 })()));
+  await governed(async () => { control.apply(getActiveRun(), [{ type: "stop", id: "c1", run_id: getActiveRun().runId }]); }, { budgetUsd: 1 })();
+  await flush();
+  const out = JSON.stringify(server.requests) + seen.join("");
+  assert.deepEqual(Object.keys(secrets).filter((k) => out.includes(secrets[k])), []);
+  for (const name of ["Jane", "mrn-0042", "Dr Who", "page_dr"]) assert.ok(!out.includes(name), name);
+
+  // What's still sent: the keys, names, models, numbers, error types, categories and statuses
+  assert.deepEqual(sent("/api/runs/start")[0].body.context, { environment: "prod", user_id: "" });
+  assert.equal(sent("/decisions").length, 0);
+  const spans = Object.fromEntries(sent("/spans").flatMap((b) => b.body.spans).map((s) => [s.name, s]));
+  assert.equal(spans["fences.decision"].attributes["fences.decision.length"], secrets.decision.length);
+  assert.ok(!("gen_ai.tool.call.arguments" in spans["execute_tool lookup"].attributes));
+  const t = spans["execute_tool locked"].attributes;
+  assert.deepEqual([t["error.type"], t["fences.error.category"], "fences.error.message" in t], ["Error", "tool_error", false]);
+  const chat = spans["chat gpt-4o"].attributes;
+  assert.deepEqual([chat["fences.error.category"], chat["http.response.status_code"]], ["rate_limit", 429]);
+  const fallbacks = sent("/spans").flatMap((b) => b.body.spans).filter((s) => s.name.startsWith("fallback"));
+  assert.deepEqual(fallbacks.map((s) => s.attributes["fences.fallback.reason"]), [undefined, "rate_limit"], "a category stays, a label goes");
+  assert.equal(spans["fences.approval"].attributes["fences.approval.granted"], false);
+  const end = sent("/end")[0].body;
+  assert.deepEqual([end.status, end.error, end.exception.type, end.exception.message], ["error", "Error", "Error", ""]);
+  assert.ok(end.exception.stack.length, "where it failed is code, not data: kept");
+  const acks = sent("/api/heartbeat").flatMap((r) => r.body.acks ?? []);
+  assert.deepEqual(acks.filter((a) => a.id === "c1" && a.hook).map((a) => a.detail), ["Error"]);
+  assert.throws(() => init({ localOnly: true, capture: "everything" }), /capture/);
+});

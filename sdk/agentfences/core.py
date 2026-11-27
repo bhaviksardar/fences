@@ -52,6 +52,7 @@ def init(
     on_breach: Optional[str] = None,
     tool_arguments: str = "names",
     allow_http: bool = False,
+    capture: str = "full",
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -103,6 +104,14 @@ never halts.
     tool's check and an approval request still send the values, which rules and approvers need;
     the redact hook can change or drop them.
 
+    capture="metadata" sends nothing the agent or its users wrote, for regulated data (health, finance):
+    run context keeps its keys but not their values (environment and release stay); a decision
+    is sent only as a fences.decision span with its length; errors keep their type, category and
+    HTTP status but not their message; tool call spans carry no arguments, whatever tool_arguments
+    says. Names, models, tokens, cost, timings and statuses are sent as usual. A guarded tool's check
+    and an approval request still send what rules and approvers need (the arguments; the reason).
+    It runs before the redact hook, which sees only what it kept. The default, "full", sends everything.
+
     on_breach="hold" makes runs wait at a limit instead of ending: when the server says a
     limit is crossed, checkpoint() waits (as if paused) until someone raises it and resumes
     the run, then returns ok and the agent carries on. A model call or guarded tool refused
@@ -116,7 +125,7 @@ never halts.
         raise ValueError(f"tool_arguments must be one of {spans.TOOL_ARGUMENTS}, not {tool_arguments!r}")
     spans.tool_arguments = tool_arguments
     set_custom_prices(prices)
-    events.configure(environment, release, redact)
+    events.configure(environment, release, redact, capture)
     if instrument:
         from .instrument import instrument as patch_clients
         patch_clients()
@@ -674,6 +683,9 @@ def log_decision(reasoning: str, action: Optional[str] = None):
     run.decisions.append(entry)
 
     client = _client
+    if events.capture == "metadata":  # only that a decision was made, and how long it was
+        _span(run, "fences.decision", 0.0, {"fences.decision.length": len(reasoning)})
+        return
     sent = events.redact({"type": "decision", "reasoning": reasoning, "action": action}) if client else None
     if sent and sent.get("reasoning"):
         outbox.put_decision(client, {"run_id": run.run_id, "iteration": run.iterations,

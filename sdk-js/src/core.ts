@@ -74,6 +74,16 @@ export interface InitOptions {
    * true permits it, for a trusted private network.
    */
   allowHttp?: boolean;
+  /**
+   * "metadata" sends nothing the agent or its users wrote, for regulated data (health, finance): run
+   * context keeps its keys but not their values (environment and release stay); a decision is sent
+   * only as a fences.decision span with its length; errors keep their type, category and HTTP status but
+   * not their message; tool call spans carry no arguments, whatever toolArguments says. Names, models,
+   * tokens, cost, timings and statuses are sent as usual. A guarded tool's check and an approval request
+   * still send what rules and approvers need (the arguments; the reason). It runs before the redact hook,
+   * which sees only what it kept. The default, "full", sends everything.
+   */
+  capture?: events.Capture;
 }
 
 let client: FencesClient | null = null;
@@ -91,7 +101,7 @@ function checkOnBreach(value: unknown): "hold" | null {
 export function init(options: InitOptions = {}): void {
   setToolArguments(options.toolArguments ?? "names");
   setCustomPrices(options.prices);
-  events.configure(options.environment, options.release, options.redact);
+  events.configure(options.environment, options.release, options.redact, options.capture ?? "full");
   localOnly = !!options.localOnly;
   failClosed = !!options.failClosed;
   defaultOnBreach = checkOnBreach(options.onBreach);
@@ -372,6 +382,10 @@ export function logDecision(reasoning: string, action: string | null = null): vo
   if (!run) return;
   run.decisions.push({ timestamp: Date.now() / 1000, iteration: run.iterations, reasoning, action });
   if (run.decisions.length > MAX_EVENTS_PER_RUN) run.decisions.shift();
+  if (events.capture === "metadata") {  // only that a decision was made, and how long it was
+    spanOf(run, "fences.decision", 0, { "fences.decision.length": reasoning.length });
+    return;
+  }
   if (!client) return;
   const sent = events.redact({ type: "decision", reasoning, action });
   if (sent && typeof sent.reasoning === "string" && sent.reasoning) {

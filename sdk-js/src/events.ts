@@ -17,6 +17,9 @@ const processContext: Record<string, string> = {};  // environment / release, fr
 const contextStore = new AsyncLocalStorage<Record<string, string>>();
 let redactHook: RedactHook | undefined;
 let redactFailed = false;
+export type Capture = "full" | "metadata";
+/** init({ capture }): "metadata" sends nothing the agent or its users wrote. */
+export let capture: Capture = "full";
 
 const warned = new Set<string>();
 /** Log a warning once per key per process. */
@@ -26,7 +29,9 @@ export function warnOnce(key: string, message: string): void {
   console.warn(`agentfences: ${message}`);
 }
 
-export function configure(environment?: string, release?: string, redact?: RedactHook): void {
+export function configure(environment?: string, release?: string, redact?: RedactHook, capture_: unknown = "full"): void {
+  if (capture_ !== "full" && capture_ !== "metadata") throw new TypeError(`capture must be "full" or "metadata", not ${JSON.stringify(capture_)}`);
+  capture = capture_;
   for (const k of Object.keys(processContext)) delete processContext[k];
   if (environment) processContext.environment = environment.slice(0, MAX_CONTEXT_VALUE);
   if (release) processContext.release = release.slice(0, MAX_CONTEXT_VALUE);
@@ -144,12 +149,49 @@ export function exceptionInfo(e: unknown): ExceptionInfo {
   };
 }
 
+// capture "metadata": span attributes that carry what the agent, its users or its tools wrote
+const FREE_TEXT = ["fences.error.message", "gen_ai.tool.call.arguments", "fences.approval.reason", "fences.approval.note"];
+const CATEGORIES = new Set<unknown>(["rate_limit", "overloaded", "timeout", "auth", "bad_request", "server", "network", "cancelled",
+  "blocked", "tool_error", "model_error", "unknown"]);
+
 /**
- * Pass an outgoing event through the user's redact hook. Returns the event to send, or
- * null to drop it. If the hook throws or returns something else, the event is dropped:
- * never send unredacted data, and never crash the agent.
+ * The event with nothing the agent or its users wrote: names, models, numbers, statuses and error
+ * types stay; messages, reasoning, arguments and context values go. A new object, never the one
+ * passed in (spans are also kept on the run). null: don't send it at all.
+ */
+export function metadataOnly(event: Event): Event | null {
+  if (event.type === "decision") return null;  // sent as a fences.decision span with its length instead (logDecision)
+  if (event.type === "run_start" && event.context) {  // the keys, not the values; init()'s environment and release stay
+    const context = Object.fromEntries(Object.entries(event.context as Record<string, string>)
+      .map(([k, v]) => [k, k === "environment" || k === "release" ? v : ""]));
+    return { ...event, context };
+  }
+  if (event.type === "run_end" && event.exception) {
+    const exception = event.exception as ExceptionInfo;
+    return { ...event, error: exception.type, exception: { ...exception, message: "" } };
+  }
+  if (event.type === "span") {
+    const attributes = { ...(event.attributes as Record<string, unknown>) };
+    for (const k of FREE_TEXT) delete attributes[k];
+    // A category stays, a label of the caller's goes
+    if ("fences.fallback.reason" in attributes && !CATEGORIES.has(attributes["fences.fallback.reason"])) delete attributes["fences.fallback.reason"];
+    return { ...event, attributes };
+  }
+  return event;  // a guarded tool's check keeps its arguments: rules need them
+}
+
+/**
+ * Pass an outgoing event through the metadata filter (capture "metadata"), then the user's redact
+ * hook. Returns the event to send, or null to drop it. If the hook throws or returns something else,
+ * the event is dropped: never send unredacted data, and never crash the agent. The hook only sees
+ * what the filter kept, so it can't add back what was dropped.
  */
 export function redact(event: Event): Event | null {
+  if (capture === "metadata") {
+    const kept = metadataOnly(event);
+    if (!kept) return null;
+    event = kept;
+  }
   if (!redactHook) return event;
   try {
     const out = redactHook(structuredClone(event));

@@ -17,13 +17,17 @@ _process_context: dict = {}  # environment / release, from init()
 _context = contextvars.ContextVar("agentfences_context", default={})
 _redact: Optional[Callable[[dict], Optional[dict]]] = None
 _redact_failed = False
+CAPTURE = ("full", "metadata")
+capture = "full"  # init(capture=...): "metadata" sends nothing the agent or its users wrote
 
 
-def configure(environment: Optional[str], release: Optional[str], redact: Optional[Callable]):
-    global _redact, _redact_failed
+def configure(environment: Optional[str], release: Optional[str], redact: Optional[Callable], capture_: str = "full"):
+    global _redact, _redact_failed, capture
+    if capture_ not in CAPTURE:
+        raise ValueError(f"capture must be one of {CAPTURE}, not {capture_!r}")
     _process_context.clear()
     _process_context.update({k: str(v)[:MAX_CONTEXT_VALUE] for k, v in (("environment", environment), ("release", release)) if v})
-    _redact, _redact_failed = redact, False
+    _redact, _redact_failed, capture = redact, False, capture_
 
 
 @contextlib.contextmanager
@@ -113,12 +117,45 @@ def exception_info(exc: BaseException) -> dict:
     }
 
 
+# capture="metadata": span attributes that carry what the agent, its users or its tools wrote
+_FREE_TEXT = ("fences.error.message", "gen_ai.tool.call.arguments", "fences.approval.reason", "fences.approval.note")
+
+
+def metadata_only(event: dict) -> Optional[dict]:
+    """
+    The event with nothing the agent or its users wrote: names, models, numbers, statuses and
+    error types stay; messages, reasoning, arguments and context values go. A new dict, never
+    the one passed in (spans are also kept on the run). None: don't send it at all.
+    """
+    kind = event.get("type")
+    if kind == "decision":  # sent as a fences.decision span with its length instead (core.log_decision)
+        return None
+    if kind == "run_start" and event.get("context"):  # the keys, not the values; init()'s environment and release stay
+        return {**event, "context": {k: v if k in ("environment", "release") else ""
+                                     for k, v in event["context"].items()}}
+    if kind == "run_end" and event.get("exception"):
+        exc = event["exception"]
+        return {**event, "error": exc.get("type"), "exception": {**exc, "message": ""}}
+    if kind == "span":
+        attrs = {k: v for k, v in event.get("attributes", {}).items() if k not in _FREE_TEXT}
+        if attrs.get("fences.fallback.reason") not in (None, *CATEGORIES):  # a category stays, a label of the caller's goes
+            del attrs["fences.fallback.reason"]
+        return {**event, "attributes": attrs}
+    return event  # a guarded tool's check keeps its arguments: rules need them
+
+
 def redact(event: dict) -> Optional[dict]:
     """
-    Pass an outgoing event through the user's redact hook. Returns the event to send, or
-    None to drop it. If the hook raises, the event is dropped: never send unredacted data.
+    Pass an outgoing event through the metadata filter (capture="metadata"), then the user's
+    redact hook. Returns the event to send, or None to drop it. If the hook raises, the event
+    is dropped: never send unredacted data. The hook only sees what the filter kept, so it
+    can't add back what was dropped.
     """
     global _redact_failed
+    if capture == "metadata":
+        event = metadata_only(event)
+        if event is None:
+            return None
     if _redact is None:
         return event
     try:

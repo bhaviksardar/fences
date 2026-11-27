@@ -509,3 +509,11 @@ test("heartbeats back off while they fail, and recover once the server answers",
   const gaps = attempts.slice(1).map((t, i) => t - attempts[i]);
   assert.ok(gaps.at(-1) > gaps[0], JSON.stringify(gaps));  // the waits grow
 });
+
+test("capture metadata still sends a guarded tool's arguments to its check: rules need them", async () => {
+  cloud({ capture: "metadata" });
+  const refund = tool(function refund(orderId) { return "done"; }, { costUsd: 0.1 });
+  assert.equal(await governed(async () => refund("order-1182"), { budgetUsd: 1 })(), "done");
+  assert.deepEqual(server.guards.filter((g) => g.phase === "check").map((g) => g.arguments), ['"order-1182"']);
+  init({ localOnly: true });
+});

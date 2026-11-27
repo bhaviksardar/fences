@@ -312,6 +312,23 @@ agentfences.init(api_key="fc_...", endpoint="https://...", redact=redact)
 
 Events have a `type` of `run_start` (`context`), `decision` (`reasoning`, `action`), `guard` (`tool`, `arguments` of a guarded call: dropping it still lets the check happen, without arguments), `span` (a tool or model call: change its `attributes`, e.g. `gen_ai.tool.call.arguments` or `fences.error.message`) or `run_end` (`status`, `error`, `exception`). If the hook raises, that event is dropped rather than sent unredacted, and a warning is logged once. Runs still start and end, so limits keep working.
 
+### Metadata only: for regulated data
+
+**Recommended for regulated data (healthcare, finance) and anything personal.** `capture="metadata"` (TypeScript: `capture: "metadata"`) keeps everything the agent or its users wrote in your process, and still sends what on-call and analytics need:
+
+```python
+agentfences.init(api_key="fc_...", endpoint="https://...", capture="metadata", environment="prod")
+```
+
+| Sent | Not sent |
+|---|---|
+| Tool names, models, tokens, cost, timings, statuses, steps | Tool call arguments (as if `tool_arguments="none"`) |
+| Context keys, and `environment` and `release` values | Other context values (sent as `""`) |
+| That a decision happened, and its length (a `fences.decision` span) | Decision reasoning and action |
+| Error type, category and HTTP status, and the stack's file, line and function | Error messages |
+
+It runs before the `redact` hook, which sees only what it kept, so the two work together and a hook can't send back what was dropped. Two things still go out as they do today, because Fences needs them to work: a guarded tool's check carries its arguments (dashboard rules match on them), and an approval request carries its reason (the person approving reads it). Use the `redact` hook to change or drop the guard's arguments, and keep approval reasons free of personal data. The default, `capture="full"`, sends everything as before.
+
 ## Modes
 
 **Local (free)** — governance runs entirely in-process. No account, no backend, no API key.
