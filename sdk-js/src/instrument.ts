@@ -91,7 +91,10 @@ function send(self: unknown, create: Fn, args: unknown[], provider: string, run:
     done = true;
     store.run(run, () => {
       if (hold) precheck.finish(run, hold, response, error !== undefined);
-      recordLlmCall(provider, body.model as string | undefined, started, response, error, { stream: !!body.stream });
+      // A call right after a failed one is a retry: its attempt number, and the model that failed before it
+      const extra = run.failedCalls ? { "fences.retry.attempt": run.failedCalls, "fences.retry.of": run.failedModel } : undefined;
+      [run.failedCalls, run.failedModel] = error !== undefined ? [run.failedCalls + 1, (body.model as string) || "unknown"] : [0, null];
+      recordLlmCall(provider, body.model as string | undefined, started, response, error, { stream: !!body.stream, extra });
     });
   };
   let out: Any;

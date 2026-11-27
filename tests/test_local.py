@@ -599,6 +599,24 @@ def check_error_categories():
         agentfences.init(local_only=True)
 
 
+def check_fallback():
+    agentfences.fallback("gpt-4o", "gpt-4o-mini")  # outside a run: nothing, no error
+
+    @governed(budget_usd=1)
+    def agent():
+        agentfences.fallback("gpt-4o", "gpt-4o-mini", fake("RateLimitError", status_code=429)())
+        agentfences.fallback("gpt-4o-mini", "claude-haiku-4-5", ValueError("odd reply"))
+        agentfences.fallback("a", "b", "too slow " * 30)
+        agentfences.fallback("b", "c")
+        return list(get_active_run().events)
+    spans = agent()
+    assert [s["name"] for s in spans] == ["fallback gpt-4o→gpt-4o-mini", "fallback gpt-4o-mini→claude-haiku-4-5", "fallback a→b", "fallback b→c"]
+    a = [s["attributes"] for s in spans]
+    assert (a[0]["fences.fallback.from"], a[0]["fences.fallback.to"], a[0]["fences.fallback.reason"]) == ("gpt-4o", "gpt-4o-mini", "rate_limit")
+    assert a[1]["fences.fallback.reason"] == "model_error" and len(a[2]["fences.fallback.reason"]) == 100
+    assert "fences.fallback.reason" not in a[3] and all(s["status"] == "ok" and "gen_ai.operation.name" not in s["attributes"] for s in spans)
+
+
 def check_events_are_sent_batched_and_redacted():
     def scrub(e):
         if e["type"] != "span":
@@ -1392,7 +1410,7 @@ if __name__ == "__main__":
         check_concurrent_runs_are_independent, check_nested_runs, check_outside_a_run,
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
-        check_tool_calls, check_error_categories, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
+        check_tool_calls, check_error_categories, check_fallback, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
         check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals,
         check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit,
         check_resent_quarantine_doesnt_flood_heartbeats, check_acks_survive_a_rate_limited_heartbeat, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,

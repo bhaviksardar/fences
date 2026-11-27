@@ -632,6 +632,27 @@ def _span(run: RunState, name: str, elapsed_s: float, attributes: dict, error: O
 atexit.register(flush)
 
 
+def fallback(from_model: str, to_model: str, reason=None):
+    """
+    Record that the agent moved from one model to another, e.g. after the first one failed:
+
+        try:
+            resp = client.chat.completions.create(model="gpt-4o", messages=messages)
+        except openai.RateLimitError as e:
+            agentfences.fallback("gpt-4o", "gpt-4o-mini", e)
+            resp = client.chat.completions.create(model="gpt-4o-mini", messages=messages)
+
+    reason: the exception that caused it (recorded as its error category, see categorize()) or a short
+    label (up to 100 characters). A `fallback {from}→{to}` span. Does nothing outside a run.
+    """
+    if isinstance(reason, BaseException):
+        category = events.categorize(reason)
+        reason = "model_error" if category == "unknown" else category
+    record_span(f"fallback {from_model}→{to_model}", 0.0, {
+        "fences.fallback.from": str(from_model), "fences.fallback.to": str(to_model),
+        "fences.fallback.reason": None if reason is None else str(reason)[:100]})
+
+
 def log_decision(reasoning: str, action: Optional[str] = None):
     """
     Record the agent's reasoning at this step.

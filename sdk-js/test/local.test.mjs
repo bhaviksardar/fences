@@ -270,3 +270,23 @@ test("categorize(): error categories from HTTP status, class names and Node erro
   ];
   assert.deepEqual(table.map(([e]) => categorize(e)), table.map(([, want]) => want));
 });
+
+test("fallback() records a fallback span; outside a run it does nothing", async () => {
+  init({ localOnly: true });
+  fences.fallback("gpt-4o", "gpt-4o-mini");
+  class RateLimitError extends Error { status = 429; }
+  const spans = await governed(async () => {
+    fences.fallback("gpt-4o", "gpt-4o-mini", new RateLimitError("slow"));
+    fences.fallback("gpt-4o-mini", "claude-haiku-4-5", new Error("odd reply"));
+    fences.fallback("a", "b", "too slow ".repeat(30));
+    fences.fallback("b", "c");
+    return getActiveRun().events;
+  }, { budgetUsd: 1 })();
+  assert.deepEqual(spans.map((s) => s.name), ["fallback gpt-4o→gpt-4o-mini", "fallback gpt-4o-mini→claude-haiku-4-5", "fallback a→b", "fallback b→c"]);
+  const a = spans.map((s) => s.attributes);
+  assert.deepEqual([a[0]["fences.fallback.from"], a[0]["fences.fallback.to"], a[0]["fences.fallback.reason"]], ["gpt-4o", "gpt-4o-mini", "rate_limit"]);
+  assert.equal(a[1]["fences.fallback.reason"], "model_error");
+  assert.equal(a[2]["fences.fallback.reason"].length, 100);
+  assert.ok(!("fences.fallback.reason" in a[3]));
+  assert.ok(spans.every((s) => s.status === "ok" && !("gen_ai.operation.name" in s.attributes)));
+});

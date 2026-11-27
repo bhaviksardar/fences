@@ -1,4 +1,4 @@
-export { init, governed, checkpoint, logDecision, flush, getActiveRun, Run } from "./core.js";
+export { init, governed, checkpoint, logDecision, flush, getActiveRun, fallback, Run } from "./core.js";
 export type { CheckpointResult, InitOptions, Limits, Extra, Span } from "./core.js";
 export { context, categorize } from "./events.js";
 export type { RedactHook, Event, ErrorCategory } from "./events.js";

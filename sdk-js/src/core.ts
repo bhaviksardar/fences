@@ -381,6 +381,30 @@ export function logDecision(reasoning: string, action: string | null = null): vo
 }
 
 /**
+ * Record that the agent moved from one model to another, e.g. after the first one failed:
+ *
+ *     try {
+ *       resp = await openai.chat.completions.create({ model: "gpt-4o", messages });
+ *     } catch (e) {
+ *       fallback("gpt-4o", "gpt-4o-mini", e);
+ *       resp = await openai.chat.completions.create({ model: "gpt-4o-mini", messages });
+ *     }
+ *
+ * reason: the error that caused it (recorded as its error category, see categorize()) or a short
+ * label (up to 100 characters). A `fallback {from}→{to}` span. Does nothing outside a run.
+ */
+export function fallback(fromModel: string, toModel: string, reason?: unknown): void {
+  let why: string | undefined;
+  if (typeof reason === "string") why = reason.slice(0, 100);
+  else if (reason !== undefined && reason !== null) {
+    const category = events.categorize(reason);
+    why = category === "unknown" ? "model_error" : category;
+  }
+  recordSpan(`fallback ${fromModel}→${toModel}`, 0, {
+    "fences.fallback.from": String(fromModel), "fences.fallback.to": String(toModel), "fences.fallback.reason": why });
+}
+
+/**
  * Add a tool or model call to the active run as an OpenTelemetry-shaped span (GenAI
  * semantic conventions): kept on the run, and sent through the redact hook in cloud mode.
  */

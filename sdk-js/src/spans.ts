@@ -19,9 +19,10 @@ export function setToolArguments(value: unknown): void {
 
 /** A `chat {model}` span. started is a performance.now() reading; response carries the usage. */
 export function recordLlmCall(provider: string, requestModel: string | undefined, started: number,
-                              response?: unknown, error?: unknown, opts: { stream?: boolean; integration?: string } = {}): void {
+                              response?: unknown, error?: unknown,
+                              opts: { stream?: boolean; integration?: string; extra?: Record<string, unknown> } = {}): void {
   const attrs: Record<string, unknown> = { "gen_ai.operation.name": "chat", "gen_ai.provider.name": provider,
-    "gen_ai.request.model": requestModel, "fences.integration": opts.integration };
+    "gen_ai.request.model": requestModel, "fences.integration": opts.integration, ...opts.extra };
   if (opts.stream) attrs["gen_ai.request.stream"] = true;  // usage arrives with the stream, so none is recorded here
   const usage = response !== undefined && error === undefined ? readUsage(response) : null;
   if (usage) {

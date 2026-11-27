@@ -62,6 +62,8 @@ class RunState:
     held: Optional[str] = None          # while waiting at a limit: "breach" or "budget"
     acked: set = field(default_factory=set)  # command ids already acknowledged
     budget_in_code: bool = False        # @governed set a budget: no server reply can make the run unlimited
+    failed_calls: int = 0               # model calls failed in a row (instrument): the next one is a retry
+    failed_model: Optional[str] = None  # the model of the latest of them
 
     @property
     def duration_ms(self) -> int:
