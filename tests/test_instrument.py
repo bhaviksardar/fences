@@ -98,10 +98,44 @@ def main():
     assert msg["gen_ai.usage.input_tokens"] == 1100  # Anthropic reports cached input separately; OTel totals it
     assert math.isclose(msg["fences.cost_usd"], cost("claude-sonnet-4-5", inp=100, cache_read=1000, out=50))
     assert failed["http.response.status_code"] == 429 and failed["error.type"] == "RateLimitError"
+    assert failed["fences.error.category"] == "rate_limit"
+    # The real providers' exception classes, categorized without importing them in the SDK
+    req = http(openai._base_client).Request("POST", "https://api.invalid")
+    assert agentfences.categorize(openai.APITimeoutError(request=req)) == "timeout"
+    assert agentfences.categorize(openai.APIConnectionError(request=req)) == "network"
+    resp = lambda code: http(anthropic._base_client).Response(code, request=req)
+    assert agentfences.categorize(anthropic.InternalServerError("x", response=resp(529), body=None)) == "overloaded"
+    assert agentfences.categorize(anthropic.AuthenticationError("x", response=resp(401), body=None)) == "auth"
     assert "gen_ai.usage.input_tokens" not in failed and spans[4]["name"] == "chat rate-limited"
     assert (spent, iterations) == (0, 0), "recording doesn't checkpoint or add spend"
     prechecks()
+    retries()
     print("instrument checks passed")
+
+
+def retries():
+    """A model call right after a failed one carries fences.retry.attempt and fences.retry.of."""
+    oa = clients()[0]
+    msgs = [{"role": "user", "content": "hi"}]
+
+    @governed(budget_usd=1)
+    def agent():
+        oa.chat.completions.create(model="gpt-4o", messages=msgs, max_tokens=10)
+        for _ in range(2):
+            try:
+                oa.chat.completions.create(model="rate-limited", messages=msgs, max_tokens=10)
+            except openai.RateLimitError:
+                pass
+        agentfences.fallback("rate-limited", "gpt-4o", openai.RateLimitError("slow", response=http(openai._base_client).Response(
+            429, request=http(openai._base_client).Request("POST", "https://api.invalid")), body=None))
+        oa.chat.completions.create(model="gpt-4o", messages=msgs, max_tokens=10)
+        oa.chat.completions.create(model="gpt-4o", messages=msgs, max_tokens=10)
+        return [(s["name"], s["attributes"].get("fences.retry.attempt"), s["attributes"].get("fences.retry.of"),
+                 s["attributes"].get("fences.fallback.reason")) for s in get_active_run().events]
+    assert agent() == [
+        ("chat gpt-4o-2024-08-06", None, None, None), ("chat rate-limited", None, None, None),
+        ("chat rate-limited", 1, "rate-limited", None), ("fallback rate-limited→gpt-4o", None, None, "rate_limit"),
+        ("chat gpt-4o-2024-08-06", 2, "rate-limited", None), ("chat gpt-4o-2024-08-06", None, None, None)], agent()
 
 
 def prechecks():

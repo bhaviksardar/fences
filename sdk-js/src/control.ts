@@ -189,7 +189,7 @@ function hook(kind: "stop" | "quarantine", run: Run, c: Reply): void {
 }
 
 async function runHook(fn: Hook, event: ControlEvent): Promise<void> {
-  const { errorText } = await import("./events.js");
+  const events = await import("./events.js");
   let result = "ok", detail: string | null = null;
   try {
     const timedOut = Symbol("timeout");
@@ -199,7 +199,8 @@ async function runHook(fn: Hook, event: ControlEvent): Promise<void> {
     ]);
     if (out === timedOut) result = "timeout";
   } catch (e) {
-    [result, detail] = ["failed", errorText(e).slice(0, 300)];
+    // With capture "metadata", the type alone: the message could say anything
+    [result, detail] = ["failed", (events.capture === "metadata" ? events.errorType(e) : events.errorText(e)).slice(0, 300)];
   }
   if (result !== "ok") console.warn(`agentfences: the on${event.type === "stop" ? "Stop" : "Quarantine"} hook ${result === "timeout" ? "timed out" : `failed: ${detail}`}`);
   if (event.id) {

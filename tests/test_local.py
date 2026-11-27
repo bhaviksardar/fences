@@ -8,6 +8,7 @@ import os
 import logging
 import math
 import socket
+import time
 from types import SimpleNamespace as NS
 
 import agentfences
@@ -500,6 +501,340 @@ def check_tool_calls():
         raise AssertionError("tool_arguments is checked")
     agentfences.init(local_only=True)
     assert a[2]["error.type"] == "PermissionError" and a[2]["fences.error.message"] == "PermissionError: 403 from search API"
+
+
+def fake(name, base=Exception, **attrs):
+    """An exception class named like a provider SDK's, without importing it."""
+    return type(name, (base,), attrs)
+
+
+def check_error_categories():
+    from agentfences import categorize, FencesStop, AgentQuarantined, FencesAuthError, ToolBlocked
+    from agentfences.results import breach_result
+    # OpenAI and Anthropic: status_code on APIStatusError subclasses; connection errors have none
+    api_error = fake("APIError")
+    status_error = fake("APIStatusError", api_error)
+    connection = fake("APIConnectionError", api_error)
+    status = lambda name, code: fake(name, status_error, status_code=code)()
+    # Gemini (google-genai, google-api-core): the status is `code`
+    gemini_api = fake("APIError")
+
+    class Broken(Exception):
+        @property
+        def status_code(self):
+            raise RuntimeError("no")
+
+    table = [
+        (status("RateLimitError", 429), "rate_limit"), (status("AuthenticationError", 401), "auth"),
+        (status("PermissionDeniedError", 403), "auth"), (status("BadRequestError", 400), "bad_request"),
+        (status("NotFoundError", 404), "bad_request"), (status("UnprocessableEntityError", 422), "bad_request"),
+        (status("InternalServerError", 500), "server"), (status("OverloadedError", 529), "overloaded"),
+        (status("APIStatusError", 503), "overloaded"), (status("APIStatusError", 502), "server"),
+        (status("APIStatusError", 504), "timeout"),
+        (connection(), "network"), (fake("APITimeoutError", connection)(), "timeout"),
+        (fake("ClientError", gemini_api, code=429)(), "rate_limit"), (fake("ServerError", gemini_api, code=503)(), "overloaded"),
+        (fake("ClientError", gemini_api, code=400)(), "bad_request"), (fake("ResourceExhausted", code=429)(), "rate_limit"),
+        (fake("DeadlineExceeded")(), "timeout"), (fake("ServiceUnavailable")(), "overloaded"),
+        (fake("Unauthenticated")(), "auth"), (fake("InvalidArgument")(), "bad_request"),
+        # requests and httpx: the status is on .response
+        (fake("HTTPError", response=NS(status_code=429))(), "rate_limit"), (fake("HTTPStatusError", response=NS(status_code=500))(), "server"),
+        (fake("ReadTimeout")(), "timeout"), (fake("ConnectError")(), "network"), (fake("ConnectTimeout", fake("ConnectionError"))(), "timeout"),
+        # the standard library
+        (TimeoutError(), "timeout"), (asyncio.TimeoutError(), "timeout"), (asyncio.CancelledError(), "cancelled"),
+        (ConnectionRefusedError(), "network"), (ConnectionAbortedError(), "network"), (ValueError("x"), "unknown"),
+        (KeyError("k"), "unknown"), (PermissionError("not a file permission"), "unknown"), (Broken(), "unknown"),
+        (FileNotFoundError("data.csv"), "unknown"), (ModuleNotFoundError("x"), "unknown"), (BrokenPipeError(), "network"),
+        (fake("Odd", code="E42")(), "unknown"), (fake("Odd", status_code=True)(), "unknown"),
+        # Fences' own refusals
+        (ToolBlocked("t", "no"), "blocked"), (AgentQuarantined("a"), "blocked"),
+        (FencesStop(breach_result("budget_exceeded")), "blocked"), (FencesAuthError("bad key"), "auth"),
+        (agentfences.control.Halt(), "cancelled"),
+    ]
+    got = [(type(e).__name__, categorize(e)) for e, _ in table]
+    assert got == [(type(e).__name__, want) for e, want in table], [(g, w) for g, (_, w) in zip(got, table) if g[1] != w]
+
+    # On spans: an unknown failure is a tool_error or a model_error, by what failed; the run's error gets a span of its own
+    @agentfences.tool
+    def broken_tool():
+        raise ValueError("bad row")
+
+    @agentfences.tool
+    def slow_tool():
+        raise TimeoutError("took too long")
+
+    @governed(budget_usd=1)
+    def agent():
+        for t in (broken_tool, slow_tool):
+            try:
+                t()
+            except Exception:
+                pass
+        agentfences.core.record_span("chat m", 0, {"gen_ai.operation.name": "chat"}, ValueError("odd"))
+        agentfences.core.record_span("chat m", 0, {"gen_ai.operation.name": "chat"}, status("RateLimitError", 429))
+        raise status("APIStatusError", 529)
+
+    sent = cloud()
+    try:
+        try:
+            agent()
+        except Exception:
+            pass
+        agentfences.flush()
+        spans = sent.of("event")
+        assert [(s["name"], s["attributes"]["fences.error.category"]) for s in spans] == [
+            ("execute_tool broken_tool", "tool_error"), ("execute_tool slow_tool", "timeout"), ("chat m", "model_error"),
+            ("chat m", "rate_limit"), ("fences.run.error", "overloaded")], spans
+        run_error = spans[-1]
+        assert run_error["status"] == "error" and run_error["attributes"]["error.type"] == "APIStatusError", run_error
+        assert run_error["attributes"]["http.response.status_code"] == 529 and spans[3]["attributes"]["http.response.status_code"] == 429
+        assert "gen_ai.operation.name" not in run_error["attributes"], "not a tool or model call"
+        assert "fences.error.message" not in run_error["attributes"], "the message is on the run end only"
+        assert sent.of("end")[-1]["status"] == "error"
+
+        @governed(budget_usd=1)
+        def fine():
+            return 1
+        fine()
+        agentfences.flush()
+        assert len(sent.of("event")) == 5, "a run that succeeds has no run error span"
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_fallback():
+    agentfences.fallback("gpt-4o", "gpt-4o-mini")  # outside a run: nothing, no error
+
+    @governed(budget_usd=1)
+    def agent():
+        agentfences.fallback("gpt-4o", "gpt-4o-mini", fake("RateLimitError", status_code=429)())
+        agentfences.fallback("gpt-4o-mini", "claude-haiku-4-5", ValueError("odd reply"))
+        agentfences.fallback("a", "b", "too slow " * 30)
+        agentfences.fallback("b", "c")
+        return list(get_active_run().events)
+    spans = agent()
+    assert [s["name"] for s in spans] == ["fallback gpt-4o→gpt-4o-mini", "fallback gpt-4o-mini→claude-haiku-4-5", "fallback a→b", "fallback b→c"]
+    a = [s["attributes"] for s in spans]
+    assert (a[0]["fences.fallback.from"], a[0]["fences.fallback.to"], a[0]["fences.fallback.reason"]) == ("gpt-4o", "gpt-4o-mini", "rate_limit")
+    assert a[1]["fences.fallback.reason"] == "model_error" and len(a[2]["fences.fallback.reason"]) == 100
+    assert "fences.fallback.reason" not in a[3] and all(s["status"] == "ok" and "gen_ai.operation.name" not in s["attributes"] for s in spans)
+
+
+def check_metadata_mode():
+    """capture="metadata": nothing the agent or its users wrote leaves the process, in any event."""
+    from agentfences.spans import record_llm_call
+    secrets = {"prompt": "patient Jane Roe has stage 2 diabetes", "decision": "Jane looks worse; escalating",
+               "action": "page_dr_who", "context": "mrn-0042", "tool_error": "record mrn-0042 locked by Dr Who",
+               "model_error": "prompt rejected: Jane Roe", "run_error": "chart for Jane Roe missing", "label": "Jane asked for it",
+               "approval": "refund Jane Roe", "hook": "could not revoke Jane's token"}
+    seen = []
+
+    def hook(event):  # runs after the filter: sees only what it kept, so it can't add the rest back
+        seen.append(repr(event))
+        return event
+
+    @agentfences.tool
+    def lookup(question):
+        return "ok"
+
+    @agentfences.tool
+    def locked(chart_id):
+        raise PermissionError(secrets["tool_error"])
+
+    @governed(budget_usd=1)
+    def agent():
+        lookup(secrets["prompt"])
+        try:
+            locked("mrn-0042")
+        except PermissionError:
+            pass
+        log_decision(secrets["decision"], action=secrets["action"])
+        log_decision(None)  # an odd argument must not break the agent
+        record_llm_call("openai", "gpt-4o", 0.0, error=fake("RateLimitError", status_code=429)(secrets["model_error"]))
+        agentfences.fallback("gpt-4o", "gpt-4o-mini", secrets["label"])
+        agentfences.fallback("gpt-4o", "gpt-4o-mini", fake("RateLimitError", status_code=429)(secrets["model_error"]))
+        agentfences.core.record_span("fences.approval", 0, {"fences.approval.reason": secrets["approval"],
+                                                            "fences.approval.note": secrets["approval"], "fences.approval.granted": False})
+        raise ValueError(secrets["run_error"])
+
+    sent = cloud(capture="metadata", environment="prod", redact=hook)
+    try:
+        with agentfences.context(user_id=secrets["context"]):
+            try:
+                agent()
+            except ValueError:
+                pass
+        def failing(event):
+            raise RuntimeError(secrets["hook"])
+        import threading
+        t = threading.Thread(target=agentfences.control._run_hook, args=(failing, {"type": "stop", "run_id": "r1", "id": "c1"}))
+        agentfences.control._running_hooks.append(t)  # as control._hook does
+        t.start()
+        t.join()
+        agentfences.flush()
+        out = repr(sent.sent) + repr(sent.acks) + repr(agentfences.control._acks) + "".join(seen)
+        leaks = [k for k, v in secrets.items() if v in out]
+        assert not leaks, (leaks, out)
+        assert not any(name in out for name in ("Jane", "mrn-0042", "Dr Who", "page_dr")), out
+
+        # What's still sent: the keys, names, models, numbers, error types, categories and statuses
+        assert sent.of("start")[-1]["context"] == {"environment": "prod", "user_id": ""}
+        assert sent.of("decision") == []
+        spans = {s["name"]: s for s in sent.of("event")}
+        assert [s["attributes"]["fences.decision.length"] for s in sent.of("event") if s["name"] == "fences.decision"] == [
+            len(secrets["decision"]), 4]
+        assert spans["execute_tool lookup"]["attributes"].get("gen_ai.tool.call.arguments") is None
+        tool = spans["execute_tool locked"]["attributes"]
+        assert (tool["error.type"], tool["fences.error.category"]) == ("PermissionError", "tool_error") and "fences.error.message" not in tool
+        chat = spans["chat gpt-4o"]["attributes"]
+        assert (chat["fences.error.category"], chat["http.response.status_code"], chat["gen_ai.request.model"]) == ("rate_limit", 429, "gpt-4o")
+        fallbacks = [s["attributes"] for s in sent.of("event") if s["name"].startswith("fallback")]
+        assert [f.get("fences.fallback.reason") for f in fallbacks] == [None, "rate_limit"], "a category stays, a label goes"
+        assert spans["fences.approval"]["attributes"]["fences.approval.granted"] is False
+        assert spans["fences.run.error"]["attributes"]["fences.error.category"] == "unknown"
+        end = sent.of("end")[-1]
+        assert (end["status"], end["error"], end["exception"]["type"], end["exception"]["message"]) == ("error", "ValueError", "ValueError", "")
+        assert end["exception"]["stack"], "where it failed is code, not data: kept"
+        # The ack may be in a heartbeat still on its way when flush() returns: wait for it
+        hook_acks = lambda: [a.get("detail") for a in sent.acks + agentfences.control._acks if a["id"] == "c1"]
+        wait_for(lambda: hook_acks())
+        assert hook_acks() == ["RuntimeError"], hook_acks()
+        agentfences.control._acks.clear()
+        try:
+            agentfences.init(local_only=True, capture="everything")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("capture is checked")
+    finally:
+        agentfences.init(local_only=True)
+
+
+def check_tags():
+    bad = [{f"k{i}": "v" for i in range(21)}, {"Team": "ops"}, {"team ops": "x"}, {"k" * 41: "v"}, {"": "v"},
+           {"team": "x" * 101}, {"team": 7}, {"team": None}, ["team"], "team=ops"]
+    for tags in bad:
+        for make in (lambda: agentfences.init(local_only=True, tags=tags), lambda: governed(tags=tags)):
+            try:
+                make()
+            except (ValueError, TypeError):
+                pass
+            else:
+                raise AssertionError(f"tags {tags!r} should be refused")
+    agentfences.init(local_only=True, tags={f"k{i}": "v" * 100 for i in range(20)})  # at the limits: fine
+
+    sent = cloud(tags={"pipeline": "pcr", "team": "ops"}, environment="prod")
+    try:
+        @governed(budget_usd=1, tags={"team": "billing", "stage.v2": "triage"})
+        def agent():
+            return dict(get_active_run().tags), dict(get_active_run().context)
+
+        @governed(budget_usd=1)
+        def plain():
+            return dict(get_active_run().tags)
+        tags, context = agent()
+        assert tags == {"pipeline": "pcr", "team": "billing", "stage.v2": "triage"}, "the decorator's win"
+        assert context == {"environment": "prod"}, "tags aren't context; they're sent with it"
+        assert plain() == {"pipeline": "pcr", "team": "ops"}
+        assert [p["context"] for p in sent.of("start")] == [
+            {"environment": "prod", "tag.pipeline": "pcr", "tag.team": "billing", "tag.stage.v2": "triage"},
+            {"environment": "prod", "tag.pipeline": "pcr", "tag.team": "ops"}]
+
+        # Tags are metadata: capture="metadata" keeps them, and blanks the context values around them
+        sent = cloud(tags={"pipeline": "pcr"}, capture="metadata")
+        with agentfences.context(user_id="u_1"):
+            plain()
+        assert sent.of("start")[-1]["context"] == {"user_id": "", "tag.pipeline": "pcr"}
+
+        # A server takes 32 context keys: past that, environment, release and tags go first, with one warning
+        sent = cloud(tags={f"t{i}": "v" for i in range(20)}, environment="prod", release="v1")
+        def crowded():
+            with agentfences.context(**{f"c{i:02}": "x" for i in range(30)}):
+                plain()
+                plain()
+        _, seen = warnings_during(crowded)
+        context = sent.of("start")[-1]["context"]
+        assert len(context) == 32 and context["environment"] == "prod" and context["release"] == "v1"
+        assert all(context[f"tag.t{i}"] == "v" for i in range(20)) and [k for k in context if k.startswith("c")] == [f"c{i:02}" for i in range(10)]
+        assert len([m for m in seen if "more than the 32" in m]) == 1, seen
+    finally:
+        agentfences.init(local_only=True)
+
+
+def read_export(base, agent):
+    import glob
+    import json
+    files = glob.glob(os.path.join(base, agent, "*.jsonl"))
+    assert len(files) == 1 and os.path.basename(files[0]) == time.strftime("%Y-%m-%d.jsonl", time.gmtime()), files
+    with open(files[0], encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
+
+
+def check_export():
+    import pathlib
+    import tempfile
+    for bad in ("http://example.com/x", "/var/log/fences", "file://otherhost/x", "file:", 7):
+        try:
+            agentfences.init(local_only=True, export=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"export={bad!r} should be refused")
+
+    @agentfences.tool
+    def lookup(q):
+        return q
+
+    @governed(budget_usd=1)
+    def export_agent():
+        lookup("cats")
+        log_decision("looked it up", action="lookup")
+        raise ValueError("no cats")
+
+    def run():
+        with agentfences.context(user_id="u_1"):
+            try:
+                export_agent()
+            except ValueError:
+                pass
+        agentfences.flush()
+
+    with tempfile.TemporaryDirectory() as base:
+        # Local mode: the same events a server would get, one line each, with the run's id
+        agentfences.init(local_only=True, export=pathlib.Path(base).as_uri(), tags={"team": "ops"})
+        run()
+        lines = read_export(base, "export_agent")
+        assert [l["type"] for l in lines] == ["run_start", "span", "decision", "span", "run_end"], lines
+        assert len({l["run_id"] for l in lines}) == 1 and all(isinstance(l["ts"], float) for l in lines)
+        assert lines[0]["context"] == {"user_id": "u_1", "tag.team": "ops"} and lines[0]["budget_usd"] == 1
+        assert lines[1]["name"] == "execute_tool lookup" and lines[2]["reasoning"] == "looked it up"
+        assert lines[3]["name"] == "fences.run.error" and lines[4]["status"] == "error" and lines[4]["error"] == "ValueError: no cats"
+
+    with tempfile.TemporaryDirectory() as base:
+        # Cloud mode: written as well as sent, after capture="metadata" and the redact hook
+        def hook(e):
+            if e["type"] == "span":
+                e = dict(e, attributes={**e["attributes"], "hooked": True})
+            return e
+        sent = cloud(export=pathlib.Path(base).as_uri(), capture="metadata", redact=hook)
+        run()
+        lines = read_export(base, "export_agent")
+        assert [l["type"] for l in lines] == ["run_start", "span", "span", "span", "run_end"], lines  # a decision is a span here
+        assert "cats" not in repr(lines) and "looked it up" not in repr(lines) and "u_1" not in repr(lines)
+        assert all(l["attributes"]["hooked"] for l in lines if l["type"] == "span")
+        spans = [{k: v for k, v in l.items() if k not in ("type", "run_id", "ts")} for l in lines if l["type"] == "span"]
+        assert spans == sent.of("event"), "exactly what was sent"
+        assert lines[-1]["error"] == sent.of("end")[-1]["error"] == "ValueError"
+
+        # A write that fails warns once, and the agent carries on
+        blocker = os.path.join(base, "not_a_dir")
+        open(blocker, "w").close()
+        agentfences.init(local_only=True, export=pathlib.Path(blocker).as_uri())
+        _, seen = warnings_during(lambda: [run(), run()])
+        assert len([m for m in seen if "couldn't write the trace export" in m]) == 1, seen
+
+    assert agentfences.export._file("/x", "../../etc", 0) == os.path.join("/x", ".._.._etc", "1970-01-01.jsonl")
+    assert agentfences.export._file("/x", "..", 0) == os.path.join("/x", "_", "1970-01-01.jsonl")
+    agentfences.init(local_only=True)
 
 
 def check_events_are_sent_batched_and_redacted():
@@ -1295,7 +1630,7 @@ if __name__ == "__main__":
         check_concurrent_runs_are_independent, check_nested_runs, check_outside_a_run,
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
-        check_tool_calls, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
+        check_tool_calls, check_error_categories, check_fallback, check_metadata_mode, check_tags, check_export, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
         check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals,
         check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit,
         check_resent_quarantine_doesnt_flood_heartbeats, check_acks_survive_a_rate_limited_heartbeat, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,

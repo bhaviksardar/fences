@@ -305,3 +305,211 @@ test("malformed replies can't break a checkpoint or a run start, lift a limit, o
   adopt(run, { budget_usd: Infinity }, LIMITS);  // a reply body of 1e400 parses to Infinity
   assert.equal(run.budgetUsd, 1);
 });
+
+test("failed calls carry an error category; a failed run sends one in a fences.run.error span", async () => {
+  cloud();
+  const brokenTool = tool(function brokenTool() { throw new Error("bad row"); });
+  const slowTool = tool(async function slowTool() { throw Object.assign(new Error("slow"), { code: "ETIMEDOUT" }); });
+  const { recordSpan } = await import("../dist/core.js");
+  class RateLimitError extends Error { status = 429; }
+  class APIError extends Error { status = 529; }
+  await assert.rejects(governed(async () => {
+    assert.throws(() => brokenTool());
+    await assert.rejects(slowTool());
+    recordSpan("chat m", 0, { "gen_ai.operation.name": "chat" }, new Error("odd"));
+    recordSpan("chat m", 0, { "gen_ai.operation.name": "chat" }, new RateLimitError("slow down"));
+    throw new APIError("overloaded");
+  }, { budgetUsd: 1 })());
+  await flush();
+  const spans = sent("/spans").flatMap((b) => b.body.spans);
+  assert.deepEqual(spans.map((s) => [s.name, s.attributes["fences.error.category"]]), [
+    ["execute_tool brokenTool", "tool_error"], ["execute_tool slowTool", "timeout"], ["chat m", "model_error"],
+    ["chat m", "rate_limit"], ["fences.run.error", "overloaded"]]);
+  const runError = spans.at(-1);
+  assert.equal(runError.status, "error");
+  assert.equal(runError.attributes["error.type"], "APIError");
+  assert.equal(runError.attributes["http.response.status_code"], 529);
+  assert.ok(!("fences.error.message" in runError.attributes), "the message is on the run end only");
+  assert.ok(!("gen_ai.operation.name" in runError.attributes), "not a tool or model call");
+  assert.equal(spans[3].attributes["http.response.status_code"], 429);
+
+  await governed(async () => 1, { budgetUsd: 1 })();
+  await flush();
+  assert.equal(sent("/spans").flatMap((b) => b.body.spans).length, 5, "a run that succeeds has no run error span");
+});
+
+test("capture metadata: nothing the agent or its users wrote leaves the process, in any event", async () => {
+  const secrets = { prompt: "patient Jane Roe has stage 2 diabetes", decision: "Jane looks worse; escalating", action: "page_dr_who",
+    context: "mrn-0042", toolError: "record mrn-0042 locked by Dr Who", modelError: "prompt rejected: Jane Roe",
+    runError: "chart for Jane Roe missing", label: "Jane asked for it", approval: "refund Jane Roe", hook: "could not revoke Jane's token" };
+  const seen = [];
+  cloud({ capture: "metadata", environment: "prod", redact: (e) => { seen.push(JSON.stringify(e)); return e; },
+          onStop: () => { throw new Error(secrets.hook); } });
+  const { recordSpan } = await import("../dist/core.js");
+  const { recordLlmCall } = await import("../dist/spans.js");
+  const control = await import("../dist/control.js");
+  class RateLimitError extends Error { status = 429; }
+  const lookup = tool(function lookup(question) { return "ok"; });
+  const locked = tool(function locked(chartId) { throw new Error(secrets.toolError); });
+  await context({ user_id: secrets.context }, () => assert.rejects(governed(async () => {
+    lookup(secrets.prompt);
+    assert.throws(() => locked("mrn-0042"));
+    logDecision(secrets.decision, secrets.action);
+    logDecision(null);  // an odd argument must not break the agent
+    recordLlmCall("openai", "gpt-4o", performance.now(), undefined, new RateLimitError(secrets.modelError));
+    fences.fallback("gpt-4o", "gpt-4o-mini", secrets.label);
+    fences.fallback("gpt-4o", "gpt-4o-mini", new RateLimitError(secrets.modelError));
+    recordSpan("fences.approval", 0, { "fences.approval.reason": secrets.approval, "fences.approval.note": secrets.approval,
+                                       "fences.approval.granted": false });
+    throw new Error(secrets.runError);
+  }, { budgetUsd: 1 })()));
+  await governed(async () => { control.apply(getActiveRun(), [{ type: "stop", id: "c1", run_id: getActiveRun().runId }]); }, { budgetUsd: 1 })();
+  await flush();
+  const out = JSON.stringify(server.requests) + seen.join("");
+  assert.deepEqual(Object.keys(secrets).filter((k) => out.includes(secrets[k])), []);
+  for (const name of ["Jane", "mrn-0042", "Dr Who", "page_dr"]) assert.ok(!out.includes(name), name);
+
+  // What's still sent: the keys, names, models, numbers, error types, categories and statuses
+  assert.deepEqual(sent("/api/runs/start")[0].body.context, { environment: "prod", user_id: "" });
+  assert.equal(sent("/decisions").length, 0);
+  const spans = Object.fromEntries(sent("/spans").flatMap((b) => b.body.spans).map((s) => [s.name, s]));
+  assert.deepEqual(sent("/spans").flatMap((b) => b.body.spans).filter((s) => s.name === "fences.decision")
+    .map((s) => s.attributes["fences.decision.length"]), [secrets.decision.length, 4]);
+  assert.ok(!("gen_ai.tool.call.arguments" in spans["execute_tool lookup"].attributes));
+  const t = spans["execute_tool locked"].attributes;
+  assert.deepEqual([t["error.type"], t["fences.error.category"], "fences.error.message" in t], ["Error", "tool_error", false]);
+  const chat = spans["chat gpt-4o"].attributes;
+  assert.deepEqual([chat["fences.error.category"], chat["http.response.status_code"]], ["rate_limit", 429]);
+  const fallbacks = sent("/spans").flatMap((b) => b.body.spans).filter((s) => s.name.startsWith("fallback"));
+  assert.deepEqual(fallbacks.map((s) => s.attributes["fences.fallback.reason"]), [undefined, "rate_limit"], "a category stays, a label goes");
+  assert.equal(spans["fences.approval"].attributes["fences.approval.granted"], false);
+  const end = sent("/end")[0].body;
+  assert.deepEqual([end.status, end.error, end.exception.type, end.exception.message], ["error", "Error", "Error", ""]);
+  assert.ok(end.exception.stack.length, "where it failed is code, not data: kept");
+  // The hook's ack may be in a heartbeat still on its way when flush() returns: wait for it
+  const hookAcks = () => sent("/api/heartbeat").flatMap((r) => r.body.acks ?? []).filter((a) => a.id === "c1" && a.hook);
+  for (let i = 0; i < 100 && !hookAcks().length; i++) await new Promise((ok) => setTimeout(ok, 10));
+  assert.deepEqual(hookAcks().map((a) => a.detail), ["Error"]);
+  assert.throws(() => init({ localOnly: true, capture: "everything" }), /capture/);
+});
+
+test("tags: checked at init and governed(), merged (governed's win), sent in the run start's context as tag.<key>", async () => {
+  const bad = [Object.fromEntries([...Array(21).keys()].map((i) => [`k${i}`, "v"])), { Team: "ops" }, { "team ops": "x" },
+    { ["k".repeat(41)]: "v" }, { "": "v" }, { team: "x".repeat(101) }, { team: 7 }, { team: null }, ["team"], "team=ops"];
+  for (const tags of bad) {
+    assert.throws(() => init({ localOnly: true, tags }), undefined, JSON.stringify(tags));
+    assert.throws(() => governed(async () => 1, { tags }), undefined, JSON.stringify(tags));
+  }
+  init({ localOnly: true, tags: Object.fromEntries([...Array(20).keys()].map((i) => [`k${i}`, "v".repeat(100)])) });  // at the limits: fine
+
+  cloud({ tags: { pipeline: "pcr", team: "ops" }, environment: "prod" });
+  const agent = governed(async () => [{ ...getActiveRun().tags }, { ...getActiveRun().context }],
+                         { budgetUsd: 1, tags: { team: "billing", "stage.v2": "triage" } });
+  const plain = governed(async () => ({ ...getActiveRun().tags }), { budgetUsd: 1 });
+  const [tags, ctx] = await agent();
+  assert.deepEqual(tags, { pipeline: "pcr", team: "billing", "stage.v2": "triage" }, "governed's win");
+  assert.deepEqual(ctx, { environment: "prod" }, "tags aren't context; they're sent with it");
+  assert.deepEqual(await plain(), { pipeline: "pcr", team: "ops" });
+  assert.deepEqual(sent("/api/runs/start").map((r) => r.body.context), [
+    { environment: "prod", "tag.pipeline": "pcr", "tag.team": "billing", "tag.stage.v2": "triage" },
+    { environment: "prod", "tag.pipeline": "pcr", "tag.team": "ops" }]);
+
+  // Tags are metadata: capture "metadata" keeps them, and blanks the context values around them
+  cloud({ tags: { pipeline: "pcr" }, capture: "metadata" });
+  await context({ user_id: "u_1" }, () => plain());
+  assert.deepEqual(sent("/api/runs/start")[0].body.context, { user_id: "", "tag.pipeline": "pcr" });
+
+  // A server takes 32 context keys: past that, environment, release and tags go first, with one warning
+  cloud({ tags: Object.fromEntries([...Array(20).keys()].map((i) => [`t${i}`, "v"])), environment: "prod", release: "v1" });
+  warnings.length = 0;
+  const crowd = Object.fromEntries([...Array(30).keys()].map((i) => [`c${String(i).padStart(2, "0")}`, "x"]));
+  await context(crowd, async () => { await plain(); await plain(); });
+  const sentCtx = sent("/api/runs/start").at(-1).body.context;
+  assert.equal(Object.keys(sentCtx).length, 32);
+  assert.deepEqual([sentCtx.environment, sentCtx.release], ["prod", "v1"]);
+  assert.ok([...Array(20).keys()].every((i) => sentCtx[`tag.t${i}`] === "v"));
+  assert.deepEqual(Object.keys(sentCtx).filter((k) => k.startsWith("c")), Object.keys(crowd).slice(0, 10));
+  assert.equal(warnings.filter((w) => w.includes("more than the 32")).length, 1);
+});
+
+test("export: every outgoing event as a JSON line, in local and cloud mode, after capture and the redact hook", async (t) => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
+  for (const bad of ["http://example.com/x", "/var/log/fences", "file://otherhost/x"]) {
+    assert.throws(() => init({ localOnly: true, export: bad }), /export/, bad);
+  }
+  const read = (base) => {
+    const dir = path.join(base, "exportAgent");
+    const files = fs.readdirSync(dir);
+    assert.deepEqual(files, [`${new Date().toISOString().slice(0, 10)}.jsonl`]);
+    return fs.readFileSync(path.join(dir, files[0]), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  };
+  const lookup = tool(function lookup(q) { return q; });
+  const exportAgent = governed(async function exportAgent() {
+    lookup("cats");
+    logDecision("looked it up", "lookup");
+    throw new Error("no cats");
+  }, { budgetUsd: 1 });
+  const run = async () => {
+    await context({ user_id: "u_1" }, () => assert.rejects(exportAgent()));
+    await flush();
+  };
+
+  // Local mode: the same events a server would get, one line each, with the run's id
+  const made = [];
+  const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), "fences-export-")); made.push(d); return d; };
+  t.after(() => made.forEach((d) => fs.rmSync(d, { recursive: true, force: true })));
+  let base = tmp();
+  init({ localOnly: true, export: pathToFileURL(base).href, tags: { team: "ops" } });
+  await run();
+  let lines = read(base);
+  assert.deepEqual(lines.map((l) => l.type), ["run_start", "span", "decision", "span", "run_end"]);
+  assert.equal(new Set(lines.map((l) => l.run_id)).size, 1);
+  assert.ok(lines.every((l) => typeof l.ts === "number"));
+  assert.deepEqual(lines[0].context, { user_id: "u_1", "tag.team": "ops" });
+  assert.equal(lines[0].budget_usd, 1);
+  assert.equal(lines[1].name, "execute_tool lookup");
+  assert.equal(lines[2].reasoning, "looked it up");
+  assert.equal(lines[3].name, "fences.run.error");
+  assert.deepEqual([lines[4].status, lines[4].error], ["error", "Error: no cats"]);
+
+  // Cloud mode: written as well as sent, after capture "metadata" and the redact hook
+  base = tmp();
+  cloud({ export: pathToFileURL(base).href, capture: "metadata",
+          redact: (e) => (e.type === "span" ? { ...e, attributes: { ...e.attributes, hooked: true } } : e) });
+  await run();
+  lines = read(base);
+  assert.deepEqual(lines.map((l) => l.type), ["run_start", "span", "span", "span", "run_end"], "a decision is a span here");
+  for (const secret of ["cats", "looked it up", "u_1"]) assert.ok(!JSON.stringify(lines).includes(secret), secret);
+  assert.ok(lines.filter((l) => l.type === "span").every((l) => l.attributes.hooked));
+  const strip = ({ type, run_id, ts, ...rest }) => rest;
+  assert.deepEqual(lines.filter((l) => l.type === "span").map(strip), sent("/spans").flatMap((b) => b.body.spans), "exactly what was sent");
+  assert.equal(lines.at(-1).error, sent("/end")[0].body.error);
+
+  // A write that fails warns once, and the agent carries on
+  const blocker = path.join(base, "not_a_dir");
+  fs.writeFileSync(blocker, "");
+  init({ localOnly: true, export: pathToFileURL(blocker).href });
+  warnings.length = 0;
+  await run();
+  await run();
+  assert.equal(warnings.filter((w) => w.includes("couldn't write the trace export")).length, 1);
+  init({ localOnly: true });
+});
+
+test("export: an agent's name can't climb out of the export directory", async (t) => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "fences-export-"));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  init({ localOnly: true, export: pathToFileURL(base).href });
+  await governed(async () => 1, { budgetUsd: 1, name: "../../evil" })();
+  await governed(async () => 1, { budgetUsd: 1, name: ".." })();
+  await flush();
+  assert.deepEqual(fs.readdirSync(base).sort(), [".._.._evil", "_"]);
+  init({ localOnly: true });
+});

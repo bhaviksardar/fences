@@ -235,3 +235,58 @@ test("an output cap below 1 is no cap: it would shrink the worst case", () => {
   assert.equal(maxOut({ max_tokens: -5 }), null);
   assert.equal(maxOut({ max_tokens: 0, max_output_tokens: 50 }), 50);
 });
+
+test("categorize(): error categories from HTTP status, class names and Node error codes", () => {
+  const { categorize, ToolBlocked, AgentQuarantined, FencesAuthError, FencesStop } = fences;
+  // Classes named like the provider SDKs', without importing them
+  const cls = (name, base = Error) => ({ [name]: class extends base {} })[name];
+  const make = (C, props = {}) => Object.assign(new C(), props);
+  const APIError = cls("APIError");
+  const status = (name, code) => make(cls(name, APIError), { status: code });  // OpenAI, Anthropic, Gemini (ApiError)
+  const connection = cls("APIConnectionError", APIError);
+  const abort = new Error("aborted");
+  abort.name = "AbortError";
+  const broken = new Error("x");
+  Object.defineProperty(broken, "status", { get() { throw new Error("no"); } });
+  const table = [
+    [status("RateLimitError", 429), "rate_limit"], [status("AuthenticationError", 401), "auth"],
+    [status("PermissionDeniedError", 403), "auth"], [status("BadRequestError", 400), "bad_request"],
+    [status("NotFoundError", 404), "bad_request"], [status("UnprocessableEntityError", 422), "bad_request"],
+    [status("InternalServerError", 500), "server"], [status("OverloadedError", 529), "overloaded"],
+    [status("APIError", 503), "overloaded"], [status("APIError", 502), "server"], [status("APIError", 504), "timeout"],
+    [status("ApiError", 429), "rate_limit"], [make(cls("ClientError"), { code: 400 }), "bad_request"],
+    [make(connection), "network"], [make(cls("APIConnectionTimeoutError", connection)), "timeout"],
+    [make(cls("APIUserAbortError", APIError)), "cancelled"], [abort, "cancelled"],
+    [make(cls("DeadlineExceeded")), "timeout"], [make(cls("ServiceUnavailable")), "overloaded"],
+    [make(cls("HTTPError"), { response: { status: 429 } }), "rate_limit"], [make(cls("Boom"), { statusCode: 500 }), "server"],
+    [Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }), "network"],
+    [Object.assign(new Error("socket"), { code: "ETIMEDOUT" }), "timeout"], [Object.assign(new Error("dns"), { code: "ENOTFOUND" }), "network"],
+    [new DOMException("timed out", "TimeoutError"), "timeout"],
+    [new TypeError("x is not a function"), "unknown"], [new Error("plain"), "unknown"], ["a string", "unknown"], [undefined, "unknown"],
+    [null, "unknown"], [broken, "unknown"], [make(cls("Odd"), { code: "E42" }), "unknown"],
+    [new ToolBlocked("t", "no"), "blocked"], [new AgentQuarantined("a"), "blocked"],
+    [new FencesStop({ breached: true, breachType: "budget_exceeded", message: "m", systemPrompt: "s", spentUsd: 0 }), "blocked"],
+    [new FencesAuthError("bad key"), "auth"],
+  ];
+  assert.deepEqual(table.map(([e]) => categorize(e)), table.map(([, want]) => want));
+});
+
+test("fallback() records a fallback span; outside a run it does nothing", async () => {
+  init({ localOnly: true });
+  fences.fallback("gpt-4o", "gpt-4o-mini");
+  class RateLimitError extends Error { status = 429; }
+  const spans = await governed(async () => {
+    fences.fallback("gpt-4o", "gpt-4o-mini", new RateLimitError("slow"));
+    fences.fallback("gpt-4o-mini", "claude-haiku-4-5", new Error("odd reply"));
+    fences.fallback("a", "b", "too slow ".repeat(30));
+    fences.fallback("b", "c");
+    return getActiveRun().events;
+  }, { budgetUsd: 1 })();
+  assert.deepEqual(spans.map((s) => s.name), ["fallback gpt-4o→gpt-4o-mini", "fallback gpt-4o-mini→claude-haiku-4-5", "fallback a→b", "fallback b→c"]);
+  const a = spans.map((s) => s.attributes);
+  assert.deepEqual([a[0]["fences.fallback.from"], a[0]["fences.fallback.to"], a[0]["fences.fallback.reason"]], ["gpt-4o", "gpt-4o-mini", "rate_limit"]);
+  assert.equal(a[1]["fences.fallback.reason"], "model_error");
+  assert.equal(a[2]["fences.fallback.reason"].length, 100);
+  assert.ok(!("fences.fallback.reason" in a[3]));
+  assert.ok(spans.every((s) => s.status === "ok" && !("gen_ai.operation.name" in s.attributes)));
+});

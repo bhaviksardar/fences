@@ -14,10 +14,11 @@ tool_arguments = "names"  # init(tool_arguments=...): what tool call spans carry
 
 
 def record_llm_call(provider: str, request_model: Optional[str], started: float, response=None,
-                    error: Optional[BaseException] = None, stream: bool = False, integration: Optional[str] = None):
+                    error: Optional[BaseException] = None, stream: bool = False, integration: Optional[str] = None,
+                    extra: Optional[dict] = None):
     """A `chat {model}` span. started is a time.perf_counter() reading; response carries the usage."""
     attrs = {"gen_ai.operation.name": "chat", "gen_ai.provider.name": provider,
-             "gen_ai.request.model": request_model, "fences.integration": integration}
+             "gen_ai.request.model": request_model, "fences.integration": integration, **(extra or {})}
     if stream:
         attrs["gen_ai.request.stream"] = True  # usage arrives with the stream, so none is recorded here
     usage = read_usage(response) if response is not None and error is None else None

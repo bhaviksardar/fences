@@ -13,6 +13,12 @@ The outermost chain or graph run becomes a Fences run (or joins one already star
 @governed). Each model call is prechecked against the budget before it's sent, then
 recorded with its tokens and cost and checkpointed, so limits apply; each tool call is
 recorded. Requires langchain-core.
+
+A model.with_fallbacks([...]) moving on to a fallback model isn't recorded as a fallback: its
+callbacks can't tell which with_fallbacks a failed model call belonged to (langchain-core passes
+the fallbacks their parent's config, not the RunnableWithFallbacks' own, so their calls arrive
+with no parent run). Each model call is still recorded, the failed one with its error category;
+call agentfences.fallback() yourself where you choose the next model.
 """
 import logging
 import time

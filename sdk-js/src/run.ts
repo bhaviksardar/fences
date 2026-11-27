@@ -48,10 +48,16 @@ export class Run {
   reservedUsd = 0;
   /** Model calls' worst-case costs (see precheck.ts), released at the next checkpoint once they finish. */
   holds: Hold[] = [];
+  /** init({ tags }) and governed(fn, { tags }), governed's winning. */
+  tags: Record<string, string> = {};
   /** governed() set a budget: no server reply can make the run unlimited. */
   budgetInCode = false;
   /** "hold": wait at a limit for someone to raise it (see InitOptions.onBreach). */
   onBreach: "hold" | null = null;
+  /** Model calls failed in a row (instrument): the next one is a retry. */
+  failedCalls = 0;
+  /** The model of the latest of them. */
+  failedModel: string | null = null;
   private readonly abort = new AbortController();
   /**
    * Aborts when Fences halts the run after a stop it didn't reach a checkpoint for (see

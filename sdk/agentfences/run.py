@@ -39,6 +39,7 @@ class RunState:
     last_breach: Optional[str] = None   # breach from the latest checkpoint; cleared once limits are raised
     warned: bool = False
     context: dict = field(default_factory=dict)  # environment, release and agentfences.context() values
+    tags: dict = field(default_factory=dict)     # init(tags=) and @governed(tags=), the decorator's winning
     # Tool and model calls, newest kept. ponytail: capped per run so a runaway agent can't eat memory
     events: deque = field(default_factory=lambda: deque(maxlen=MAX_EVENTS_PER_RUN))
     exception: Optional[dict] = None             # type, message and stack if the run raised
@@ -62,6 +63,8 @@ class RunState:
     held: Optional[str] = None          # while waiting at a limit: "breach" or "budget"
     acked: set = field(default_factory=set)  # command ids already acknowledged
     budget_in_code: bool = False        # @governed set a budget: no server reply can make the run unlimited
+    failed_calls: int = 0               # model calls failed in a row (instrument): the next one is a retry
+    failed_model: Optional[str] = None  # the model of the latest of them
 
     @property
     def duration_ms(self) -> int:

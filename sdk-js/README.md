@@ -51,6 +51,29 @@ await context({ user_id: "u_123", session_id: "s_9" }, () => research(question))
 - When a governed run throws, Fences records the error's type, message and stack with the run; the error still reaches your code.
 - `init({ redact: (event) => ... })` sees everything before it leaves the process and can change or drop it.
 
+From 0.10.0, the same as in Python ([README](../README.md#evidence-tool-calls-and-model-calls)):
+
+```ts
+import { init, governed, fallback, categorize } from "agentfences";
+
+// Metadata only, for regulated data: no prompts, reasoning, arguments, context values or error messages leave the
+// process. A guarded tool's check still sends its arguments, and an approval request its reason.
+// Tags label every run (governed's win); export also writes every outgoing event as JSONL to {dir}/{agent}/{date}.jsonl.
+init({ apiKey: "fc_...", endpoint: "https://...", capture: "metadata", tags: { pipeline: "pcr", team: "ops" },
+       export: "file:///var/log/fences" });
+
+const triage = governed(async (ticket: string) => {
+  try {
+    return await openai.chat.completions.create({ model: "gpt-4o", messages });
+  } catch (e) {
+    fallback("gpt-4o", "gpt-4o-mini", e);  // a `fallback gpt-4o→gpt-4o-mini` span; the reason is categorize(e), e.g. "rate_limit"
+    return await openai.chat.completions.create({ model: "gpt-4o-mini", messages });
+  }
+}, { budgetUsd: 0.5, tags: { team: "billing" } });
+```
+
+Every failed call's span carries `fences.error.category` (`rate_limit`, `overloaded`, `timeout`, `auth`, `bad_request`, `server`, `network`, `cancelled`, `blocked`, `tool_error`, `model_error`, `unknown`), and with `instrument(client)` a call made right after a failed one carries `fences.retry.attempt` and `fences.retry.of`.
+
 ## Fences Cloud
 
 ```ts

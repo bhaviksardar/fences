@@ -25,7 +25,11 @@ TARGETS = [
 
 
 def _record(provider: str, kwargs: dict, started: float, response=None, error: Optional[BaseException] = None):
-    record_llm_call(provider, kwargs.get("model"), started, response, error, stream=bool(kwargs.get("stream")))
+    run, model = get_active_run(), kwargs.get("model")
+    # A call right after a failed one is a retry: its attempt number, and the model that failed before it
+    retry = {"fences.retry.attempt": run.failed_calls, "fences.retry.of": run.failed_model} if run.failed_calls else None
+    run.failed_calls, run.failed_model = (run.failed_calls + 1, model or "unknown") if error is not None else (0, None)
+    record_llm_call(provider, model, started, response, error, stream=bool(kwargs.get("stream")), extra=retry)
 
 
 def _wrap(create, provider: str, is_async: bool):

@@ -8,6 +8,7 @@ import { FencesClient, type Reply } from "./client.js";
 import * as control from "./control.js";
 import { AgentQuarantined, FencesStop } from "./errors.js";
 import * as events from "./events.js";
+import * as exporter from "./export.js";
 import * as outbox from "./outbox.js";
 import * as precheck from "./precheck.js";
 import { costOf, setCustomPrices, type CustomPrice } from "./pricing.js";
@@ -35,6 +36,12 @@ export interface InitOptions {
   environment?: string;
   /** Tag every run, e.g. "v1.4.2". */
   release?: string;
+  /**
+   * Label every run for filtering and grouping, e.g. { pipeline: "pcr", team: "ops" }: up to 20 keys of
+   * a-z, 0-9, _ . - (40 characters at most), each a string of 100 characters at most. governed(fn, { tags })
+   * adds to them, its values winning. They're metadata: capture "metadata" keeps them.
+   */
+  tags?: Record<string, string>;
   /** Sees every outgoing event and returns it (changed or not), or null to drop it. */
   redact?: events.RedactHook;
   /** Seconds between heartbeats reporting live runs (cloud mode). Default 15. */
@@ -74,12 +81,29 @@ export interface InitOptions {
    * true permits it, for a trusted private network.
    */
   allowHttp?: boolean;
+  /**
+   * "metadata" sends nothing the agent or its users wrote, for regulated data (health, finance): run
+   * context keeps its keys but not their values (environment, release and tags stay); a decision is sent
+   * only as a fences.decision span with its length; errors keep their type, category and HTTP status but
+   * not their message; tool call spans carry no arguments, whatever toolArguments says. Names, models,
+   * tokens, cost, timings and statuses are sent as usual. A guarded tool's check and an approval request
+   * still send what rules and approvers need (the arguments; the reason). It runs before the redact hook,
+   * which sees only what it kept. The default, "full", sends everything.
+   */
+  capture?: events.Capture;
+  /**
+   * "file:///path/to/dir" also writes every event that leaves the process (run starts and ends, spans,
+   * decisions; after capture and the redact hook) as JSON lines to {dir}/{agent}/{YYYY-MM-DD}.jsonl (UTC
+   * date), in local and cloud mode. Written in the background with Node's fs; a failed write warns once.
+   */
+  export?: string;
 }
 
 let client: FencesClient | null = null;
 let localOnly = false;
 let failClosed = false;
 let defaultOnBreach: "hold" | null = null;
+let defaultTags: Record<string, string> = {};
 
 function checkOnBreach(value: unknown): "hold" | null {
   if (value === undefined || value === null) return null;
@@ -91,10 +115,12 @@ function checkOnBreach(value: unknown): "hold" | null {
 export function init(options: InitOptions = {}): void {
   setToolArguments(options.toolArguments ?? "names");
   setCustomPrices(options.prices);
-  events.configure(options.environment, options.release, options.redact);
+  events.configure(options.environment, options.release, options.redact, options.capture ?? "full");
   localOnly = !!options.localOnly;
   failClosed = !!options.failClosed;
   defaultOnBreach = checkOnBreach(options.onBreach);
+  defaultTags = events.checkTags(options.tags);
+  exporter.configure(options.export);
   outbox.resetSpans();  // a new server gets asked again
   if (localOnly) {
     client = null;
@@ -162,13 +188,14 @@ function warnUnreachable(run: Run, err: string, ending = false): void {
  */
 export function governed<A extends unknown[], R>(
   fn: (...args: A) => R | Promise<R>,
-  options: Limits & { name?: string; onBreach?: "hold" | null } = {},
+  options: Limits & { name?: string; onBreach?: "hold" | null; tags?: Record<string, string> } = {},
 ): (...args: A) => Promise<Awaited<R>> {
   const name = options.name ?? (fn.name || "agent");
   checkOnBreach(options.onBreach);
+  const tags = events.checkTags(options.tags);
   return async (...args: A): Promise<Awaited<R>> => {
     requireInit();
-    const run = await startRun(name, options);
+    const run = await startRun(name, options, tags);
     run.onBreach = checkOnBreach(options.onBreach) ?? defaultOnBreach;
     // A stop the agent doesn't reach a checkpoint for within stopGraceS halts the call here
     const halted = new Promise<never>((_, reject) => {
@@ -197,38 +224,44 @@ function outcome(run: Run, failed: boolean, error: unknown): [string, string | n
   if (!failed) return [run.lastBreach ? "breached" : "success", null];
   if (error instanceof FencesStop) return ["breached", null];  // halted after a stop it missed (stopGraceS)
   run.exception = events.exceptionInfo(error);
+  // The run end has no field for its category, and older servers may refuse new ones: a span carries it.
+  // Not the message: that's on the run end, where existing redact hooks look for it
+  spanOf(run, "fences.run.error", 0, {}, error, false);
   const e = run.exception;
   return ["error", e.message ? `${e.type}: ${e.message}` : e.type];
 }
 
-async function startRun(agentName: string, limits: Limits): Promise<Run> {
+async function startRun(agentName: string, limits: Limits, tags: Record<string, string>): Promise<Run> {
   const run = new Run(agentName, limits.budgetUsd ?? null, limits.maxIterations ?? DEFAULTS.maxIterations,
     limits.maxDurationMs ?? DEFAULTS.maxDurationMs, limits.maxTokens ?? DEFAULTS.maxTokens, events.currentContext());
   run.budgetInCode = limits.budgetUsd != null;
-  if (!client) {
-    if (run.budgetUsd === null) noBudget(agentName, "Set one with governed(fn, { budgetUsd: ... }).");
-    return run;
-  }
+  run.tags = { ...defaultTags, ...tags };
+  if (!client && run.budgetUsd === null) noBudget(agentName, "Set one with governed(fn, { budgetUsd: ... }).");
+  if (!client && !exporter.active()) return run;
   // The run must start even if redaction drops its context: limits depend on it
-  const sent = Object.keys(run.context).length
-    ? events.redact({ type: "run_start", agent_name: agentName, context: { ...run.context } }) : null;
+  const context = events.withTags(run.context, run.tags);
+  const sent = Object.keys(context).length ? events.redact({ type: "run_start", agent_name: agentName, context }) : null;
   // Limits left out in code go as null: the server fills them from the agent's dashboard settings
   const body: Record<string, unknown> = { run_id: run.runId, agent_name: agentName, budget_usd: limits.budgetUsd ?? null,
     max_iterations: limits.maxIterations ?? null, max_duration_ms: limits.maxDurationMs ?? null, max_tokens: limits.maxTokens ?? null };
   if (sent?.context) body.context = sent.context;
-  const resp = await client.startRun(body);
-  if (resp.quarantined) throw new AgentQuarantined(agentName, resp.detail);
-  // The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
-  // A null budget (unlimited) is taken only for a run whose code set none: a reply can't lift a budget from the code
-  const isObject = (v: unknown): v is Record<string, any> => v !== null && typeof v === "object" && !Array.isArray(v);
-  control.adopt(run, isObject(resp.limits) ? resp.limits : {}, control.LIMITS, limits.budgetUsd == null);
-  for (const n of (Array.isArray(resp.notices) ? resp.notices : []).filter(isObject)) {  // a malformed one is skipped
-    events.warnOnce(`${agentName}:${n.code}`, `${n.message ?? ""}${n.url ? ` ${n.url}` : ""}`);
+  if (client) {
+    const resp = await client.startRun(body);
+    if (resp.quarantined) throw new AgentQuarantined(agentName, resp.detail);
+    // The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
+    // A null budget (unlimited) is taken only for a run whose code set none: a reply can't lift a budget from the code
+    const isObject = (v: unknown): v is Record<string, any> => v !== null && typeof v === "object" && !Array.isArray(v);
+    control.adopt(run, isObject(resp.limits) ? resp.limits : {}, control.LIMITS, limits.budgetUsd == null);
+    for (const n of (Array.isArray(resp.notices) ? resp.notices : []).filter(isObject)) {  // a malformed one is skipped
+      events.warnOnce(`${agentName}:${n.code}`, `${n.message ?? ""}${n.url ? ` ${n.url}` : ""}`);
+    }
+    if (!("limits" in resp) && run.budgetUsd === null && !resp.network_error) {
+      noBudget(agentName, "Set one on its page in the Fences dashboard.");
+    }
+    if (resp.network_error) warnUnreachable(run, resp.network_error);
   }
-  if (!("limits" in resp) && run.budgetUsd === null && !resp.network_error) {
-    noBudget(agentName, "Set one on its page in the Fences dashboard.");
-  }
-  if (resp.network_error) warnUnreachable(run, resp.network_error);
+  const { run_id: _, ...event } = body;
+  exporter.write(agentName, run.runId, { type: "run_start", ...event });
   return run;
 }
 
@@ -238,13 +271,14 @@ function noBudget(agentName: string, how: string): void {
 
 async function endRun(run: Run, status: string, error: string | null): Promise<void> {
   control.unregister(run);
-  if (!client) return;
+  if (!client && !exporter.active()) return;
   // The run must end even if redaction drops its error details
   const sent = error ? events.redact({ type: "run_end", status, error, exception: run.exception }) : null;
   const body: Record<string, unknown> = { status, error: sent?.error ?? null };
   if (sent?.exception) body.exception = sent.exception;
   if (status === "breached" && run.lastBreach) body.breach = run.lastBreach;  // matters for breaches the SDK decided
-  await client.endRun(run.runId, body);
+  if (client) await client.endRun(run.runId, body);
+  exporter.write(run.agentName, run.runId, { type: "run_end", ...body });
 }
 
 // ── checkpoint ────────────────────────────────────────────────────────────────
@@ -360,6 +394,7 @@ function finalResult(run: Run): CheckpointResult {
 export async function flush(timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   await outbox.wait(timeoutMs);
+  await exporter.wait(Math.max(0, deadline - Date.now()));
   await control.drain(Math.max(0, deadline - Date.now()));
 }
 
@@ -369,12 +404,41 @@ export function logDecision(reasoning: string, action: string | null = null): vo
   if (!run) return;
   run.decisions.push({ timestamp: Date.now() / 1000, iteration: run.iterations, reasoning, action });
   if (run.decisions.length > MAX_EVENTS_PER_RUN) run.decisions.shift();
-  if (!client) return;
+  if (events.capture === "metadata") {  // only that a decision was made, and how long it was
+    spanOf(run, "fences.decision", 0, { "fences.decision.length": String(reasoning).length });
+    return;
+  }
+  if (!client && !exporter.active()) return;
   const sent = events.redact({ type: "decision", reasoning, action });
   if (sent && typeof sent.reasoning === "string" && sent.reasoning) {
-    outbox.enqueue({ kind: "decision", client, runId: run.runId,
-              body: { iteration: run.iterations, reasoning: sent.reasoning, action: sent.action ?? null } });
+    const body = { iteration: run.iterations, reasoning: sent.reasoning, action: sent.action ?? null };
+    exporter.write(run.agentName, run.runId, { type: "decision", ...body });
+    if (client) outbox.enqueue({ kind: "decision", client, runId: run.runId, body });
   }
+}
+
+/**
+ * Record that the agent moved from one model to another, e.g. after the first one failed:
+ *
+ *     try {
+ *       resp = await openai.chat.completions.create({ model: "gpt-4o", messages });
+ *     } catch (e) {
+ *       fallback("gpt-4o", "gpt-4o-mini", e);
+ *       resp = await openai.chat.completions.create({ model: "gpt-4o-mini", messages });
+ *     }
+ *
+ * reason: the error that caused it (recorded as its error category, see categorize()) or a short
+ * label (up to 100 characters). A `fallback {from}→{to}` span. Does nothing outside a run.
+ */
+export function fallback(fromModel: string, toModel: string, reason?: unknown): void {
+  let why: string | undefined;
+  if (typeof reason === "string") why = reason.slice(0, 100);
+  else if (reason !== undefined && reason !== null) {
+    const category = events.categorize(reason);
+    why = category === "unknown" ? "model_error" : category;
+  }
+  recordSpan(`fallback ${fromModel}→${toModel}`, 0, {
+    "fences.fallback.from": String(fromModel), "fences.fallback.to": String(toModel), "fences.fallback.reason": why });
 }
 
 /**
@@ -383,24 +447,34 @@ export function logDecision(reasoning: string, action: string | null = null): vo
  */
 export function recordSpan(name: string, elapsedMs: number, attributes: Record<string, unknown>, error?: unknown): void {
   const run = getActiveRun();
-  if (!run) return;
+  if (run) spanOf(run, name, elapsedMs, attributes, error);
+}
+
+const UNKNOWN_AS: Record<string, events.ErrorCategory> = { execute_tool: "tool_error", chat: "model_error" };  // what an unknown failure of a call is
+
+function spanOf(run: Run, name: string, elapsedMs: number, attributes: Record<string, unknown>, error?: unknown,
+                message = true): void {
   const end = Date.now() / 1000;
   const attrs: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(attributes)) if (v !== null && v !== undefined) attrs[k] = v;
   attrs["fences.iteration"] = run.iterations;
   if (error !== undefined) {
     attrs["error.type"] = events.errorType(error);
-    attrs["fences.error.message"] = events.errorText(error);
-    const status = (error as { status?: unknown })?.status;  // the OpenAI and Anthropic JS SDKs put the HTTP status here
-    if (typeof status === "number") attrs["http.response.status_code"] = status;
+    if (message) attrs["fences.error.message"] = events.errorText(error);
+    const category = events.categorize(error);
+    attrs["fences.error.category"] = category === "unknown" ? UNKNOWN_AS[attrs["gen_ai.operation.name"] as string] ?? category : category;
+    const status = events.httpStatus(error);  // e.g. 429 rate limit, 529 overloaded
+    if (status !== undefined) attrs["http.response.status_code"] = status;
   }
   const span: Span = { name, start_ts: end - elapsedMs / 1000, end_ts: end, status: error === undefined ? "ok" : "error", attributes: attrs };
   run.events.push(span);
   if (run.events.length > MAX_EVENTS_PER_RUN) run.events.shift();  // a runaway agent can't eat memory
-  if (!client || !outbox.spansSupported) return;
+  const sending = client !== null && outbox.spansSupported;
+  if (!sending && !exporter.active()) return;
   const sent = events.redact({ type: "span", ...span });
   if (sent) {
+    exporter.write(run.agentName, run.runId, sent);
     const { type: _, ...redacted } = sent;  // the type key is for the redact hook only
-    outbox.enqueue({ kind: "span", client, runId: run.runId, span: redacted as unknown as Span });
+    if (sending) outbox.enqueue({ kind: "span", client: client!, runId: run.runId, span: redacted as unknown as Span });
   }
 }

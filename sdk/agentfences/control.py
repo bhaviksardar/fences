@@ -163,7 +163,7 @@ def _hook(kind: str, run, c: dict):
 
 
 def _run_hook(fn: Callable, event: dict):
-    from .events import error_text
+    from . import events
     box: dict = {}
 
     def call():
@@ -177,7 +177,8 @@ def _run_hook(fn: Callable, event: dict):
     if t.is_alive():
         result, detail = "timeout", None
     elif "error" in box:
-        result, detail = "failed", error_text(box["error"])[:300]
+        e = box["error"]  # with capture="metadata", the type alone: the message could say anything
+        result, detail = "failed", (type(e).__qualname__ if events.capture == "metadata" else events.error_text(e))[:300]
     else:
         result, detail = "ok", None
     if result != "ok":

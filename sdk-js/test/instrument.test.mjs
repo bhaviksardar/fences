@@ -170,6 +170,7 @@ test("a failed call is released uncharged and recorded as an error", { skip }, a
   assert.equal(held, 0);
   assert.equal(span.status, "error");
   assert.equal(span.attributes["http.response.status_code"], 500);
+  assert.equal(span.attributes["fences.error.category"], "server");
 });
 
 test("asResponse(): the caller reads the body, so the call keeps its worst case until the next checkpoint", { skip }, async () => {
@@ -222,4 +223,23 @@ test("onBreach hold: a call that doesn't fit waits for the budget to be raised, 
   } finally {
     init({ localOnly: true });
   }
+});
+
+test("a model call right after a failed one carries fences.retry.attempt and fences.retry.of", { skip }, async () => {
+  reset();
+  const spans = await governed(async () => {
+    await chat();
+    model.fail = true;
+    for (let i = 0; i < 2; i++) await chat({ model: "gpt-4o-big" }).catch(() => null);
+    model.fail = false;
+    fences.fallback("gpt-4o-big", "gpt-4o", Object.assign(new Error("x"), { status: 500 }));
+    await chat();
+    await chat();
+    return getActiveRun().events.map((s) => [s.name, s.attributes["fences.retry.attempt"], s.attributes["fences.retry.of"],
+                                             s.attributes["fences.fallback.reason"]]);
+  }, { budgetUsd: 1 })();
+  assert.deepEqual(spans, [
+    ["chat gpt-4o-2024-08-06", undefined, undefined, undefined], ["chat gpt-4o-big", undefined, undefined, undefined],
+    ["chat gpt-4o-big", 1, "gpt-4o-big", undefined], ["fallback gpt-4o-big→gpt-4o", undefined, undefined, "server"],
+    ["chat gpt-4o-2024-08-06", 2, "gpt-4o-big", undefined], ["chat gpt-4o-2024-08-06", undefined, undefined, undefined]]);
 });
