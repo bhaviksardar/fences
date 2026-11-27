@@ -355,6 +355,7 @@ test("capture metadata: nothing the agent or its users wrote leaves the process,
     lookup(secrets.prompt);
     assert.throws(() => locked("mrn-0042"));
     logDecision(secrets.decision, secrets.action);
+    logDecision(null);  // an odd argument must not break the agent
     recordLlmCall("openai", "gpt-4o", performance.now(), undefined, new RateLimitError(secrets.modelError));
     fences.fallback("gpt-4o", "gpt-4o-mini", secrets.label);
     fences.fallback("gpt-4o", "gpt-4o-mini", new RateLimitError(secrets.modelError));
@@ -372,7 +373,8 @@ test("capture metadata: nothing the agent or its users wrote leaves the process,
   assert.deepEqual(sent("/api/runs/start")[0].body.context, { environment: "prod", user_id: "" });
   assert.equal(sent("/decisions").length, 0);
   const spans = Object.fromEntries(sent("/spans").flatMap((b) => b.body.spans).map((s) => [s.name, s]));
-  assert.equal(spans["fences.decision"].attributes["fences.decision.length"], secrets.decision.length);
+  assert.deepEqual(sent("/spans").flatMap((b) => b.body.spans).filter((s) => s.name === "fences.decision")
+    .map((s) => s.attributes["fences.decision.length"]), [secrets.decision.length, 4]);
   assert.ok(!("gen_ai.tool.call.arguments" in spans["execute_tool lookup"].attributes));
   const t = spans["execute_tool locked"].attributes;
   assert.deepEqual([t["error.type"], t["fences.error.category"], "fences.error.message" in t], ["Error", "tool_error", false]);

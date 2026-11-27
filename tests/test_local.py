@@ -543,6 +543,7 @@ def check_error_categories():
         (TimeoutError(), "timeout"), (asyncio.TimeoutError(), "timeout"), (asyncio.CancelledError(), "cancelled"),
         (ConnectionRefusedError(), "network"), (ConnectionAbortedError(), "network"), (ValueError("x"), "unknown"),
         (KeyError("k"), "unknown"), (PermissionError("not a file permission"), "unknown"), (Broken(), "unknown"),
+        (FileNotFoundError("data.csv"), "unknown"), (ModuleNotFoundError("x"), "unknown"), (BrokenPipeError(), "network"),
         (fake("Odd", code="E42")(), "unknown"), (fake("Odd", status_code=True)(), "unknown"),
         # Fences' own refusals
         (ToolBlocked("t", "no"), "blocked"), (AgentQuarantined("a"), "blocked"),
@@ -647,6 +648,7 @@ def check_metadata_mode():
         except PermissionError:
             pass
         log_decision(secrets["decision"], action=secrets["action"])
+        log_decision(None)  # an odd argument must not break the agent
         record_llm_call("openai", "gpt-4o", 0.0, error=fake("RateLimitError", status_code=429)(secrets["model_error"]))
         agentfences.fallback("gpt-4o", "gpt-4o-mini", secrets["label"])
         agentfences.fallback("gpt-4o", "gpt-4o-mini", fake("RateLimitError", status_code=429)(secrets["model_error"]))
@@ -678,7 +680,8 @@ def check_metadata_mode():
         assert sent.of("start")[-1]["context"] == {"environment": "prod", "user_id": ""}
         assert sent.of("decision") == []
         spans = {s["name"]: s for s in sent.of("event")}
-        assert spans["fences.decision"]["attributes"]["fences.decision.length"] == len(secrets["decision"])
+        assert [s["attributes"]["fences.decision.length"] for s in sent.of("event") if s["name"] == "fences.decision"] == [
+            len(secrets["decision"]), 4]
         assert spans["execute_tool lookup"]["attributes"].get("gen_ai.tool.call.arguments") is None
         tool = spans["execute_tool locked"]["attributes"]
         assert (tool["error.type"], tool["fences.error.category"]) == ("PermissionError", "tool_error") and "fences.error.message" not in tool

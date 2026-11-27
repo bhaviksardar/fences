@@ -714,7 +714,7 @@ def log_decision(reasoning: str, action: Optional[str] = None):
 
     client = _client
     if events.capture == "metadata":  # only that a decision was made, and how long it was
-        _span(run, "fences.decision", 0.0, {"fences.decision.length": len(reasoning)})
+        _span(run, "fences.decision", 0.0, {"fences.decision.length": len(str(reasoning))})
         return
     sent = events.redact({"type": "decision", "reasoning": reasoning, "action": action}) if client or _export.active() else None
     if sent and sent.get("reasoning"):

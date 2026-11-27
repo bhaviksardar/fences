@@ -149,7 +149,9 @@ def categorize(exc: BaseException) -> str:
         if status is not None and status >= 400:
             return ("rate_limit" if status == 429 else "overloaded" if status in (503, 529) else "auth" if status in (401, 403)
                     else "timeout" if status in (408, 504) else "bad_request" if status < 500 else "server")
-        names = " ".join(c.__name__ for c in type(exc).__mro__)
+        # Python's own classes only for timeouts and connections: FileNotFoundError is no HTTP 404
+        names = " ".join(c.__name__ for c in type(exc).__mro__
+                         if c.__module__ != "builtins" or issubclass(c, (TimeoutError, ConnectionError)))
         return next((cat for cat, words in _NAMED if any(w in names for w in words)), "unknown")
     except Exception:  # an odd error object (a property that raises) must not break recording it
         return "unknown"

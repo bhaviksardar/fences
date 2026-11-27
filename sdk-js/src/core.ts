@@ -405,7 +405,7 @@ export function logDecision(reasoning: string, action: string | null = null): vo
   run.decisions.push({ timestamp: Date.now() / 1000, iteration: run.iterations, reasoning, action });
   if (run.decisions.length > MAX_EVENTS_PER_RUN) run.decisions.shift();
   if (events.capture === "metadata") {  // only that a decision was made, and how long it was
-    spanOf(run, "fences.decision", 0, { "fences.decision.length": reasoning.length });
+    spanOf(run, "fences.decision", 0, { "fences.decision.length": String(reasoning).length });
     return;
   }
   if (!client && !exporter.active()) return;
