@@ -14,6 +14,7 @@ import uuid
 from typing import Callable, Optional
 
 from . import control, events, outbox
+from . import export as _export
 from .client import GovClient
 from .exceptions import AgentQuarantined, FencesStop
 from .pricing import cost_of, set_custom_prices
@@ -55,6 +56,7 @@ def init(
     allow_http: bool = False,
     capture: str = "full",
     tags: Optional[dict] = None,
+    export: Optional[str] = None,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -118,6 +120,10 @@ never halts.
     and an approval request still send what rules and approvers need (the arguments; the reason).
     It runs before the redact hook, which sees only what it kept. The default, "full", sends everything.
 
+    export="file:///path/to/dir" also writes every event that leaves the process (run starts and ends,
+    spans, decisions; after capture and the redact hook) as JSON lines to {dir}/{agent}/{YYYY-MM-DD}.jsonl
+    (UTC date), in local and cloud mode. Written in the background; a failed write warns once.
+
     on_breach="hold" makes runs wait at a limit instead of ending: when the server says a
     limit is crossed, checkpoint() waits (as if paused) until someone raises it and resumes
     the run, then returns ok and the agent carries on. A model call or guarded tool refused
@@ -133,6 +139,7 @@ never halts.
     spans.tool_arguments = tool_arguments
     set_custom_prices(prices)
     events.configure(environment, release, redact, capture)
+    _export.configure(export)
     if instrument:
         from .instrument import instrument as patch_clients
         patch_clients()
@@ -378,13 +385,12 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
     if not client and budget_usd is None:
         _notice(agent_name, "no_budget", f"{agent_name} has no budget, so its spend isn't capped. "
                                          f"Set one with @governed(budget_usd=...).")
+    # The run must start even if redaction drops its context: limits depend on it
+    context = events.with_tags(run.context, run.tags) if client or _export.active() else None
+    sent = (events.redact({"type": "run_start", "agent_name": agent_name, "context": context}) or {}).get("context") if context else None
     if client:
-        # The run must start even if redaction drops its context: limits depend on it
-        context = events.with_tags(run.context, run.tags)
-        sent = events.redact({"type": "run_start", "agent_name": agent_name, "context": context}) if context else None
         # Limits left out in code go as null: the server fills them from the agent's dashboard settings
-        resp = client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens,
-                                context=(sent or {}).get("context"))
+        resp = client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens, context=sent)
         if resp.get("quarantined"):  # refused before any agent code runs
             raise AgentQuarantined(agent_name, resp.get("detail"))
         # The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
@@ -399,6 +405,9 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
                                              f"Set one on its page in the Fences dashboard.")
         if "network_error" in resp:
             _warn_unreachable(run, resp["network_error"])
+    _export.write(agent_name, run_id, {"type": "run_start", "agent_name": agent_name, "budget_usd": budget_usd,
+                                      "max_iterations": max_iterations, "max_duration_ms": max_duration_ms,
+                                      "max_tokens": max_tokens, **({"context": sent} if sent else {})})
     control.register(run)
     return run
 
@@ -406,11 +415,16 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
 def _end_run(run: RunState, status: str, error: Optional[str] = None):
     control.unregister(run)
     client = _client
+    if not (client or _export.active()):
+        return
+    # The run must end even if redaction drops its error details
+    sent = (events.redact({"type": "run_end", "status": status, "error": error, "exception": run.exception}) or {}) if error else {}
+    breach = run.last_breach if status == "breached" else None
     if client:
-        # The run must end even if redaction drops its error details
-        sent = events.redact({"type": "run_end", "status": status, "error": error, "exception": run.exception}) if error else None
-        client.end_run(run.run_id, status=status, error=(sent or {}).get("error"), exception=(sent or {}).get("exception"),
-                       breach=run.last_breach if status == "breached" else None)
+        client.end_run(run.run_id, status=status, error=sent.get("error"), exception=sent.get("exception"), breach=breach)
+    _export.write(run.agent_name, run.run_id, {"type": "run_end", "status": status, "error": sent.get("error"),
+                                              **({"exception": sent["exception"]} if sent.get("exception") else {}),
+                                              **({"breach": breach} if breach else {})})
 
 
 # ── Checkpoint ────────────────────────────────────────────────────────────────
@@ -608,6 +622,7 @@ def flush(timeout: float = 5.0):
     on_stop/on_quarantine hooks to finish. Runs automatically at exit; call it yourself in serverless handlers."""
     deadline = time.time() + timeout
     outbox.wait(deadline)
+    _export.wait(deadline)
     control.drain(max(0.0, deadline - time.time()))  # containment hooks, and command acknowledgements
 
 
@@ -642,12 +657,15 @@ def _span(run: RunState, name: str, elapsed_s: float, attributes: dict, error: O
     span = {"name": name, "start_ts": end - elapsed_s, "end_ts": end, "status": "error" if error else "ok", "attributes": attrs}
     run.events.append(span)
     client = _client
-    if client is None or not outbox.spans_supported:
+    sending = client is not None and outbox.spans_supported
+    if not (sending or _export.active()):
         return
     sent = events.redact({"type": "span", **span})
     if sent:
+        _export.write(run.agent_name, run.run_id, sent)
         sent.pop("type", None)
-        outbox.put_span(client, run.run_id, sent)
+        if sending:
+            outbox.put_span(client, run.run_id, sent)
 
 
 atexit.register(flush)
@@ -698,10 +716,13 @@ def log_decision(reasoning: str, action: Optional[str] = None):
     if events.capture == "metadata":  # only that a decision was made, and how long it was
         _span(run, "fences.decision", 0.0, {"fences.decision.length": len(reasoning)})
         return
-    sent = events.redact({"type": "decision", "reasoning": reasoning, "action": action}) if client else None
+    sent = events.redact({"type": "decision", "reasoning": reasoning, "action": action}) if client or _export.active() else None
     if sent and sent.get("reasoning"):
-        outbox.put_decision(client, {"run_id": run.run_id, "iteration": run.iterations,
-                                     "reasoning": sent["reasoning"], "action": sent.get("action")})
+        _export.write(run.agent_name, run.run_id, {"type": "decision", "iteration": run.iterations,
+                                                  "reasoning": sent["reasoning"], "action": sent.get("action")})
+        if client:
+            outbox.put_decision(client, {"run_id": run.run_id, "iteration": run.iterations,
+                                         "reasoning": sent["reasoning"], "action": sent.get("action")})
 
 
 # ── Asking Fences about yourself ──────────────────────────────────────────────

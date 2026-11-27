@@ -8,6 +8,7 @@ import os
 import logging
 import math
 import socket
+import time
 from types import SimpleNamespace as NS
 
 import agentfences
@@ -752,6 +753,83 @@ def check_tags():
         assert len([m for m in seen if "more than the 32" in m]) == 1, seen
     finally:
         agentfences.init(local_only=True)
+
+
+def read_export(base, agent):
+    import glob
+    import json
+    files = glob.glob(os.path.join(base, agent, "*.jsonl"))
+    assert len(files) == 1 and os.path.basename(files[0]) == time.strftime("%Y-%m-%d.jsonl", time.gmtime()), files
+    with open(files[0], encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
+
+
+def check_export():
+    import pathlib
+    import tempfile
+    for bad in ("http://example.com/x", "/var/log/fences", "file://otherhost/x", "file:", 7):
+        try:
+            agentfences.init(local_only=True, export=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"export={bad!r} should be refused")
+
+    @agentfences.tool
+    def lookup(q):
+        return q
+
+    @governed(budget_usd=1)
+    def export_agent():
+        lookup("cats")
+        log_decision("looked it up", action="lookup")
+        raise ValueError("no cats")
+
+    def run():
+        with agentfences.context(user_id="u_1"):
+            try:
+                export_agent()
+            except ValueError:
+                pass
+        agentfences.flush()
+
+    with tempfile.TemporaryDirectory() as base:
+        # Local mode: the same events a server would get, one line each, with the run's id
+        agentfences.init(local_only=True, export=pathlib.Path(base).as_uri(), tags={"team": "ops"})
+        run()
+        lines = read_export(base, "export_agent")
+        assert [l["type"] for l in lines] == ["run_start", "span", "decision", "span", "run_end"], lines
+        assert len({l["run_id"] for l in lines}) == 1 and all(isinstance(l["ts"], float) for l in lines)
+        assert lines[0]["context"] == {"user_id": "u_1", "tag.team": "ops"} and lines[0]["budget_usd"] == 1
+        assert lines[1]["name"] == "execute_tool lookup" and lines[2]["reasoning"] == "looked it up"
+        assert lines[3]["name"] == "fences.run.error" and lines[4]["status"] == "error" and lines[4]["error"] == "ValueError: no cats"
+
+    with tempfile.TemporaryDirectory() as base:
+        # Cloud mode: written as well as sent, after capture="metadata" and the redact hook
+        def hook(e):
+            if e["type"] == "span":
+                e = dict(e, attributes={**e["attributes"], "hooked": True})
+            return e
+        sent = cloud(export=pathlib.Path(base).as_uri(), capture="metadata", redact=hook)
+        run()
+        lines = read_export(base, "export_agent")
+        assert [l["type"] for l in lines] == ["run_start", "span", "span", "span", "run_end"], lines  # a decision is a span here
+        assert "cats" not in repr(lines) and "looked it up" not in repr(lines) and "u_1" not in repr(lines)
+        assert all(l["attributes"]["hooked"] for l in lines if l["type"] == "span")
+        spans = [{k: v for k, v in l.items() if k not in ("type", "run_id", "ts")} for l in lines if l["type"] == "span"]
+        assert spans == sent.of("event"), "exactly what was sent"
+        assert lines[-1]["error"] == sent.of("end")[-1]["error"] == "ValueError"
+
+        # A write that fails warns once, and the agent carries on
+        blocker = os.path.join(base, "not_a_dir")
+        open(blocker, "w").close()
+        agentfences.init(local_only=True, export=pathlib.Path(blocker).as_uri())
+        _, seen = warnings_during(lambda: [run(), run()])
+        assert len([m for m in seen if "couldn't write the trace export" in m]) == 1, seen
+
+    assert agentfences.export._file("/x", "../../etc", 0) == os.path.join("/x", ".._.._etc", "1970-01-01.jsonl")
+    assert agentfences.export._file("/x", "..", 0) == os.path.join("/x", "_", "1970-01-01.jsonl")
+    agentfences.init(local_only=True)
 
 
 def check_events_are_sent_batched_and_redacted():
@@ -1547,7 +1625,7 @@ if __name__ == "__main__":
         check_concurrent_runs_are_independent, check_nested_runs, check_outside_a_run,
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
-        check_tool_calls, check_error_categories, check_fallback, check_metadata_mode, check_tags, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
+        check_tool_calls, check_error_categories, check_fallback, check_metadata_mode, check_tags, check_export, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
         check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals,
         check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit,
         check_resent_quarantine_doesnt_flood_heartbeats, check_acks_survive_a_rate_limited_heartbeat, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,

@@ -427,3 +427,81 @@ test("tags: checked at init and governed(), merged (governed's win), sent in the
   assert.deepEqual(Object.keys(sentCtx).filter((k) => k.startsWith("c")), Object.keys(crowd).slice(0, 10));
   assert.equal(warnings.filter((w) => w.includes("more than the 32")).length, 1);
 });
+
+test("export: every outgoing event as a JSON line, in local and cloud mode, after capture and the redact hook", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
+  for (const bad of ["http://example.com/x", "/var/log/fences", "file://otherhost/x"]) {
+    assert.throws(() => init({ localOnly: true, export: bad }), /export/, bad);
+  }
+  const read = (base) => {
+    const dir = path.join(base, "exportAgent");
+    const files = fs.readdirSync(dir);
+    assert.deepEqual(files, [`${new Date().toISOString().slice(0, 10)}.jsonl`]);
+    return fs.readFileSync(path.join(dir, files[0]), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  };
+  const lookup = tool(function lookup(q) { return q; });
+  const exportAgent = governed(async function exportAgent() {
+    lookup("cats");
+    logDecision("looked it up", "lookup");
+    throw new Error("no cats");
+  }, { budgetUsd: 1 });
+  const run = async () => {
+    await context({ user_id: "u_1" }, () => assert.rejects(exportAgent()));
+    await flush();
+  };
+
+  // Local mode: the same events a server would get, one line each, with the run's id
+  let base = fs.mkdtempSync(path.join(os.tmpdir(), "fences-export-"));
+  init({ localOnly: true, export: pathToFileURL(base).href, tags: { team: "ops" } });
+  await run();
+  let lines = read(base);
+  assert.deepEqual(lines.map((l) => l.type), ["run_start", "span", "decision", "span", "run_end"]);
+  assert.equal(new Set(lines.map((l) => l.run_id)).size, 1);
+  assert.ok(lines.every((l) => typeof l.ts === "number"));
+  assert.deepEqual(lines[0].context, { user_id: "u_1", "tag.team": "ops" });
+  assert.equal(lines[0].budget_usd, 1);
+  assert.equal(lines[1].name, "execute_tool lookup");
+  assert.equal(lines[2].reasoning, "looked it up");
+  assert.equal(lines[3].name, "fences.run.error");
+  assert.deepEqual([lines[4].status, lines[4].error], ["error", "Error: no cats"]);
+
+  // Cloud mode: written as well as sent, after capture "metadata" and the redact hook
+  base = fs.mkdtempSync(path.join(os.tmpdir(), "fences-export-"));
+  cloud({ export: pathToFileURL(base).href, capture: "metadata",
+          redact: (e) => (e.type === "span" ? { ...e, attributes: { ...e.attributes, hooked: true } } : e) });
+  await run();
+  lines = read(base);
+  assert.deepEqual(lines.map((l) => l.type), ["run_start", "span", "span", "span", "run_end"], "a decision is a span here");
+  for (const secret of ["cats", "looked it up", "u_1"]) assert.ok(!JSON.stringify(lines).includes(secret), secret);
+  assert.ok(lines.filter((l) => l.type === "span").every((l) => l.attributes.hooked));
+  const strip = ({ type, run_id, ts, ...rest }) => rest;
+  assert.deepEqual(lines.filter((l) => l.type === "span").map(strip), sent("/spans").flatMap((b) => b.body.spans), "exactly what was sent");
+  assert.equal(lines.at(-1).error, sent("/end")[0].body.error);
+
+  // A write that fails warns once, and the agent carries on
+  const blocker = path.join(base, "not_a_dir");
+  fs.writeFileSync(blocker, "");
+  init({ localOnly: true, export: pathToFileURL(blocker).href });
+  warnings.length = 0;
+  await run();
+  await run();
+  assert.equal(warnings.filter((w) => w.includes("couldn't write the trace export")).length, 1);
+  init({ localOnly: true });
+});
+
+test("export: an agent's name can't climb out of the export directory", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "fences-export-"));
+  init({ localOnly: true, export: pathToFileURL(base).href });
+  await governed(async () => 1, { budgetUsd: 1, name: "../../evil" })();
+  await governed(async () => 1, { budgetUsd: 1, name: ".." })();
+  await flush();
+  assert.deepEqual(fs.readdirSync(base).sort(), [".._.._evil", "_"]);
+  init({ localOnly: true });
+});

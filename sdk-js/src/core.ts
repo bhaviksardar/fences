@@ -8,6 +8,7 @@ import { FencesClient, type Reply } from "./client.js";
 import * as control from "./control.js";
 import { AgentQuarantined, FencesStop } from "./errors.js";
 import * as events from "./events.js";
+import * as exporter from "./export.js";
 import * as outbox from "./outbox.js";
 import * as precheck from "./precheck.js";
 import { costOf, setCustomPrices, type CustomPrice } from "./pricing.js";
@@ -90,6 +91,12 @@ export interface InitOptions {
    * which sees only what it kept. The default, "full", sends everything.
    */
   capture?: events.Capture;
+  /**
+   * "file:///path/to/dir" also writes every event that leaves the process (run starts and ends, spans,
+   * decisions; after capture and the redact hook) as JSON lines to {dir}/{agent}/{YYYY-MM-DD}.jsonl (UTC
+   * date), in local and cloud mode. Written in the background with Node's fs; a failed write warns once.
+   */
+  export?: string;
 }
 
 let client: FencesClient | null = null;
@@ -113,6 +120,7 @@ export function init(options: InitOptions = {}): void {
   failClosed = !!options.failClosed;
   defaultOnBreach = checkOnBreach(options.onBreach);
   defaultTags = events.checkTags(options.tags);
+  exporter.configure(options.export);
   outbox.resetSpans();  // a new server gets asked again
   if (localOnly) {
     client = null;
@@ -228,10 +236,8 @@ async function startRun(agentName: string, limits: Limits, tags: Record<string, 
     limits.maxDurationMs ?? DEFAULTS.maxDurationMs, limits.maxTokens ?? DEFAULTS.maxTokens, events.currentContext());
   run.budgetInCode = limits.budgetUsd != null;
   run.tags = { ...defaultTags, ...tags };
-  if (!client) {
-    if (run.budgetUsd === null) noBudget(agentName, "Set one with governed(fn, { budgetUsd: ... }).");
-    return run;
-  }
+  if (!client && run.budgetUsd === null) noBudget(agentName, "Set one with governed(fn, { budgetUsd: ... }).");
+  if (!client && !exporter.active()) return run;
   // The run must start even if redaction drops its context: limits depend on it
   const context = events.withTags(run.context, run.tags);
   const sent = Object.keys(context).length ? events.redact({ type: "run_start", agent_name: agentName, context }) : null;
@@ -239,19 +245,23 @@ async function startRun(agentName: string, limits: Limits, tags: Record<string, 
   const body: Record<string, unknown> = { run_id: run.runId, agent_name: agentName, budget_usd: limits.budgetUsd ?? null,
     max_iterations: limits.maxIterations ?? null, max_duration_ms: limits.maxDurationMs ?? null, max_tokens: limits.maxTokens ?? null };
   if (sent?.context) body.context = sent.context;
-  const resp = await client.startRun(body);
-  if (resp.quarantined) throw new AgentQuarantined(agentName, resp.detail);
-  // The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
-  // A null budget (unlimited) is taken only for a run whose code set none: a reply can't lift a budget from the code
-  const isObject = (v: unknown): v is Record<string, any> => v !== null && typeof v === "object" && !Array.isArray(v);
-  control.adopt(run, isObject(resp.limits) ? resp.limits : {}, control.LIMITS, limits.budgetUsd == null);
-  for (const n of (Array.isArray(resp.notices) ? resp.notices : []).filter(isObject)) {  // a malformed one is skipped
-    events.warnOnce(`${agentName}:${n.code}`, `${n.message ?? ""}${n.url ? ` ${n.url}` : ""}`);
+  if (client) {
+    const resp = await client.startRun(body);
+    if (resp.quarantined) throw new AgentQuarantined(agentName, resp.detail);
+    // The server caps limits at the agent's ceilings: enforce the same numbers if it becomes unreachable later
+    // A null budget (unlimited) is taken only for a run whose code set none: a reply can't lift a budget from the code
+    const isObject = (v: unknown): v is Record<string, any> => v !== null && typeof v === "object" && !Array.isArray(v);
+    control.adopt(run, isObject(resp.limits) ? resp.limits : {}, control.LIMITS, limits.budgetUsd == null);
+    for (const n of (Array.isArray(resp.notices) ? resp.notices : []).filter(isObject)) {  // a malformed one is skipped
+      events.warnOnce(`${agentName}:${n.code}`, `${n.message ?? ""}${n.url ? ` ${n.url}` : ""}`);
+    }
+    if (!("limits" in resp) && run.budgetUsd === null && !resp.network_error) {
+      noBudget(agentName, "Set one on its page in the Fences dashboard.");
+    }
+    if (resp.network_error) warnUnreachable(run, resp.network_error);
   }
-  if (!("limits" in resp) && run.budgetUsd === null && !resp.network_error) {
-    noBudget(agentName, "Set one on its page in the Fences dashboard.");
-  }
-  if (resp.network_error) warnUnreachable(run, resp.network_error);
+  const { run_id: _, ...event } = body;
+  exporter.write(agentName, run.runId, { type: "run_start", ...event });
   return run;
 }
 
@@ -261,13 +271,14 @@ function noBudget(agentName: string, how: string): void {
 
 async function endRun(run: Run, status: string, error: string | null): Promise<void> {
   control.unregister(run);
-  if (!client) return;
+  if (!client && !exporter.active()) return;
   // The run must end even if redaction drops its error details
   const sent = error ? events.redact({ type: "run_end", status, error, exception: run.exception }) : null;
   const body: Record<string, unknown> = { status, error: sent?.error ?? null };
   if (sent?.exception) body.exception = sent.exception;
   if (status === "breached" && run.lastBreach) body.breach = run.lastBreach;  // matters for breaches the SDK decided
-  await client.endRun(run.runId, body);
+  if (client) await client.endRun(run.runId, body);
+  exporter.write(run.agentName, run.runId, { type: "run_end", ...body });
 }
 
 // ── checkpoint ────────────────────────────────────────────────────────────────
@@ -383,6 +394,7 @@ function finalResult(run: Run): CheckpointResult {
 export async function flush(timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   await outbox.wait(timeoutMs);
+  await exporter.wait(Math.max(0, deadline - Date.now()));
   await control.drain(Math.max(0, deadline - Date.now()));
 }
 
@@ -396,11 +408,12 @@ export function logDecision(reasoning: string, action: string | null = null): vo
     spanOf(run, "fences.decision", 0, { "fences.decision.length": reasoning.length });
     return;
   }
-  if (!client) return;
+  if (!client && !exporter.active()) return;
   const sent = events.redact({ type: "decision", reasoning, action });
   if (sent && typeof sent.reasoning === "string" && sent.reasoning) {
-    outbox.enqueue({ kind: "decision", client, runId: run.runId,
-              body: { iteration: run.iterations, reasoning: sent.reasoning, action: sent.action ?? null } });
+    const body = { iteration: run.iterations, reasoning: sent.reasoning, action: sent.action ?? null };
+    exporter.write(run.agentName, run.runId, { type: "decision", ...body });
+    if (client) outbox.enqueue({ kind: "decision", client, runId: run.runId, body });
   }
 }
 
@@ -456,10 +469,12 @@ function spanOf(run: Run, name: string, elapsedMs: number, attributes: Record<st
   const span: Span = { name, start_ts: end - elapsedMs / 1000, end_ts: end, status: error === undefined ? "ok" : "error", attributes: attrs };
   run.events.push(span);
   if (run.events.length > MAX_EVENTS_PER_RUN) run.events.shift();  // a runaway agent can't eat memory
-  if (!client || !outbox.spansSupported) return;
+  const sending = client !== null && outbox.spansSupported;
+  if (!sending && !exporter.active()) return;
   const sent = events.redact({ type: "span", ...span });
   if (sent) {
+    exporter.write(run.agentName, run.runId, sent);
     const { type: _, ...redacted } = sent;  // the type key is for the redact hook only
-    outbox.enqueue({ kind: "span", client, runId: run.runId, span: redacted as unknown as Span });
+    if (sending) outbox.enqueue({ kind: "span", client: client!, runId: run.runId, span: redacted as unknown as Span });
   }
 }
