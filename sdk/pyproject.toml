@@ -9,7 +9,7 @@ description = "Runtime governance for AI agents — budget limits, loop protecti
 readme = "README.md"
 authors = [{ name = "Bhavik Sardar" }]
 license = { text = "MIT" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = ["requests>=2.32.3"]  # 2.32.3: fixes CVE-2023-32681 (proxy credentials on redirect) and CVE-2024-35195
 keywords = ["ai", "agents", "governance", "llm", "budget", "safety"]
 classifiers = [
