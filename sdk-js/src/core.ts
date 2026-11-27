@@ -35,6 +35,12 @@ export interface InitOptions {
   environment?: string;
   /** Tag every run, e.g. "v1.4.2". */
   release?: string;
+  /**
+   * Label every run for filtering and grouping, e.g. { pipeline: "pcr", team: "ops" }: up to 20 keys of
+   * a-z, 0-9, _ . - (40 characters at most), each a string of 100 characters at most. governed(fn, { tags })
+   * adds to them, its values winning. They're metadata: capture "metadata" keeps them.
+   */
+  tags?: Record<string, string>;
   /** Sees every outgoing event and returns it (changed or not), or null to drop it. */
   redact?: events.RedactHook;
   /** Seconds between heartbeats reporting live runs (cloud mode). Default 15. */
@@ -76,7 +82,7 @@ export interface InitOptions {
   allowHttp?: boolean;
   /**
    * "metadata" sends nothing the agent or its users wrote, for regulated data (health, finance): run
-   * context keeps its keys but not their values (environment and release stay); a decision is sent
+   * context keeps its keys but not their values (environment, release and tags stay); a decision is sent
    * only as a fences.decision span with its length; errors keep their type, category and HTTP status but
    * not their message; tool call spans carry no arguments, whatever toolArguments says. Names, models,
    * tokens, cost, timings and statuses are sent as usual. A guarded tool's check and an approval request
@@ -90,6 +96,7 @@ let client: FencesClient | null = null;
 let localOnly = false;
 let failClosed = false;
 let defaultOnBreach: "hold" | null = null;
+let defaultTags: Record<string, string> = {};
 
 function checkOnBreach(value: unknown): "hold" | null {
   if (value === undefined || value === null) return null;
@@ -105,6 +112,7 @@ export function init(options: InitOptions = {}): void {
   localOnly = !!options.localOnly;
   failClosed = !!options.failClosed;
   defaultOnBreach = checkOnBreach(options.onBreach);
+  defaultTags = events.checkTags(options.tags);
   outbox.resetSpans();  // a new server gets asked again
   if (localOnly) {
     client = null;
@@ -172,13 +180,14 @@ function warnUnreachable(run: Run, err: string, ending = false): void {
  */
 export function governed<A extends unknown[], R>(
   fn: (...args: A) => R | Promise<R>,
-  options: Limits & { name?: string; onBreach?: "hold" | null } = {},
+  options: Limits & { name?: string; onBreach?: "hold" | null; tags?: Record<string, string> } = {},
 ): (...args: A) => Promise<Awaited<R>> {
   const name = options.name ?? (fn.name || "agent");
   checkOnBreach(options.onBreach);
+  const tags = events.checkTags(options.tags);
   return async (...args: A): Promise<Awaited<R>> => {
     requireInit();
-    const run = await startRun(name, options);
+    const run = await startRun(name, options, tags);
     run.onBreach = checkOnBreach(options.onBreach) ?? defaultOnBreach;
     // A stop the agent doesn't reach a checkpoint for within stopGraceS halts the call here
     const halted = new Promise<never>((_, reject) => {
@@ -214,17 +223,18 @@ function outcome(run: Run, failed: boolean, error: unknown): [string, string | n
   return ["error", e.message ? `${e.type}: ${e.message}` : e.type];
 }
 
-async function startRun(agentName: string, limits: Limits): Promise<Run> {
+async function startRun(agentName: string, limits: Limits, tags: Record<string, string>): Promise<Run> {
   const run = new Run(agentName, limits.budgetUsd ?? null, limits.maxIterations ?? DEFAULTS.maxIterations,
     limits.maxDurationMs ?? DEFAULTS.maxDurationMs, limits.maxTokens ?? DEFAULTS.maxTokens, events.currentContext());
   run.budgetInCode = limits.budgetUsd != null;
+  run.tags = { ...defaultTags, ...tags };
   if (!client) {
     if (run.budgetUsd === null) noBudget(agentName, "Set one with governed(fn, { budgetUsd: ... }).");
     return run;
   }
   // The run must start even if redaction drops its context: limits depend on it
-  const sent = Object.keys(run.context).length
-    ? events.redact({ type: "run_start", agent_name: agentName, context: { ...run.context } }) : null;
+  const context = events.withTags(run.context, run.tags);
+  const sent = Object.keys(context).length ? events.redact({ type: "run_start", agent_name: agentName, context }) : null;
   // Limits left out in code go as null: the server fills them from the agent's dashboard settings
   const body: Record<string, unknown> = { run_id: run.runId, agent_name: agentName, budget_usd: limits.budgetUsd ?? null,
     max_iterations: limits.maxIterations ?? null, max_duration_ms: limits.maxDurationMs ?? null, max_tokens: limits.maxTokens ?? null };

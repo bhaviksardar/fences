@@ -388,3 +388,42 @@ test("capture metadata: nothing the agent or its users wrote leaves the process,
   assert.deepEqual(acks.filter((a) => a.id === "c1" && a.hook).map((a) => a.detail), ["Error"]);
   assert.throws(() => init({ localOnly: true, capture: "everything" }), /capture/);
 });
+
+test("tags: checked at init and governed(), merged (governed's win), sent in the run start's context as tag.<key>", async () => {
+  const bad = [Object.fromEntries([...Array(21).keys()].map((i) => [`k${i}`, "v"])), { Team: "ops" }, { "team ops": "x" },
+    { ["k".repeat(41)]: "v" }, { "": "v" }, { team: "x".repeat(101) }, { team: 7 }, { team: null }, ["team"], "team=ops"];
+  for (const tags of bad) {
+    assert.throws(() => init({ localOnly: true, tags }), undefined, JSON.stringify(tags));
+    assert.throws(() => governed(async () => 1, { tags }), undefined, JSON.stringify(tags));
+  }
+  init({ localOnly: true, tags: Object.fromEntries([...Array(20).keys()].map((i) => [`k${i}`, "v".repeat(100)])) });  // at the limits: fine
+
+  cloud({ tags: { pipeline: "pcr", team: "ops" }, environment: "prod" });
+  const agent = governed(async () => [{ ...getActiveRun().tags }, { ...getActiveRun().context }],
+                         { budgetUsd: 1, tags: { team: "billing", "stage.v2": "triage" } });
+  const plain = governed(async () => ({ ...getActiveRun().tags }), { budgetUsd: 1 });
+  const [tags, ctx] = await agent();
+  assert.deepEqual(tags, { pipeline: "pcr", team: "billing", "stage.v2": "triage" }, "governed's win");
+  assert.deepEqual(ctx, { environment: "prod" }, "tags aren't context; they're sent with it");
+  assert.deepEqual(await plain(), { pipeline: "pcr", team: "ops" });
+  assert.deepEqual(sent("/api/runs/start").map((r) => r.body.context), [
+    { environment: "prod", "tag.pipeline": "pcr", "tag.team": "billing", "tag.stage.v2": "triage" },
+    { environment: "prod", "tag.pipeline": "pcr", "tag.team": "ops" }]);
+
+  // Tags are metadata: capture "metadata" keeps them, and blanks the context values around them
+  cloud({ tags: { pipeline: "pcr" }, capture: "metadata" });
+  await context({ user_id: "u_1" }, () => plain());
+  assert.deepEqual(sent("/api/runs/start")[0].body.context, { user_id: "", "tag.pipeline": "pcr" });
+
+  // A server takes 32 context keys: past that, environment, release and tags go first, with one warning
+  cloud({ tags: Object.fromEntries([...Array(20).keys()].map((i) => [`t${i}`, "v"])), environment: "prod", release: "v1" });
+  warnings.length = 0;
+  const crowd = Object.fromEntries([...Array(30).keys()].map((i) => [`c${String(i).padStart(2, "0")}`, "x"]));
+  await context(crowd, async () => { await plain(); await plain(); });
+  const sentCtx = sent("/api/runs/start").at(-1).body.context;
+  assert.equal(Object.keys(sentCtx).length, 32);
+  assert.deepEqual([sentCtx.environment, sentCtx.release], ["prod", "v1"]);
+  assert.ok([...Array(20).keys()].every((i) => sentCtx[`tag.t${i}`] === "v"));
+  assert.deepEqual(Object.keys(sentCtx).filter((k) => k.startsWith("c")), Object.keys(crowd).slice(0, 10));
+  assert.equal(warnings.filter((w) => w.includes("more than the 32")).length, 1);
+});

@@ -39,6 +39,7 @@ class RunState:
     last_breach: Optional[str] = None   # breach from the latest checkpoint; cleared once limits are raised
     warned: bool = False
     context: dict = field(default_factory=dict)  # environment, release and agentfences.context() values
+    tags: dict = field(default_factory=dict)     # init(tags=) and @governed(tags=), the decorator's winning
     # Tool and model calls, newest kept. ponytail: capped per run so a runaway agent can't eat memory
     events: deque = field(default_factory=lambda: deque(maxlen=MAX_EVENTS_PER_RUN))
     exception: Optional[dict] = None             # type, message and stack if the run raised

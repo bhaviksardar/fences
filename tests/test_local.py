@@ -703,6 +703,57 @@ def check_metadata_mode():
         agentfences.init(local_only=True)
 
 
+def check_tags():
+    bad = [{f"k{i}": "v" for i in range(21)}, {"Team": "ops"}, {"team ops": "x"}, {"k" * 41: "v"}, {"": "v"},
+           {"team": "x" * 101}, {"team": 7}, {"team": None}, ["team"], "team=ops"]
+    for tags in bad:
+        for make in (lambda: agentfences.init(local_only=True, tags=tags), lambda: governed(tags=tags)):
+            try:
+                make()
+            except (ValueError, TypeError):
+                pass
+            else:
+                raise AssertionError(f"tags {tags!r} should be refused")
+    agentfences.init(local_only=True, tags={f"k{i}": "v" * 100 for i in range(20)})  # at the limits: fine
+
+    sent = cloud(tags={"pipeline": "pcr", "team": "ops"}, environment="prod")
+    try:
+        @governed(budget_usd=1, tags={"team": "billing", "stage.v2": "triage"})
+        def agent():
+            return dict(get_active_run().tags), dict(get_active_run().context)
+
+        @governed(budget_usd=1)
+        def plain():
+            return dict(get_active_run().tags)
+        tags, context = agent()
+        assert tags == {"pipeline": "pcr", "team": "billing", "stage.v2": "triage"}, "the decorator's win"
+        assert context == {"environment": "prod"}, "tags aren't context; they're sent with it"
+        assert plain() == {"pipeline": "pcr", "team": "ops"}
+        assert [p["context"] for p in sent.of("start")] == [
+            {"environment": "prod", "tag.pipeline": "pcr", "tag.team": "billing", "tag.stage.v2": "triage"},
+            {"environment": "prod", "tag.pipeline": "pcr", "tag.team": "ops"}]
+
+        # Tags are metadata: capture="metadata" keeps them, and blanks the context values around them
+        sent = cloud(tags={"pipeline": "pcr"}, capture="metadata")
+        with agentfences.context(user_id="u_1"):
+            plain()
+        assert sent.of("start")[-1]["context"] == {"user_id": "", "tag.pipeline": "pcr"}
+
+        # A server takes 32 context keys: past that, environment, release and tags go first, with one warning
+        sent = cloud(tags={f"t{i}": "v" for i in range(20)}, environment="prod", release="v1")
+        def crowded():
+            with agentfences.context(**{f"c{i:02}": "x" for i in range(30)}):
+                plain()
+                plain()
+        _, seen = warnings_during(crowded)
+        context = sent.of("start")[-1]["context"]
+        assert len(context) == 32 and context["environment"] == "prod" and context["release"] == "v1"
+        assert all(context[f"tag.t{i}"] == "v" for i in range(20)) and [k for k in context if k.startswith("c")] == [f"c{i:02}" for i in range(10)]
+        assert len([m for m in seen if "more than the 32" in m]) == 1, seen
+    finally:
+        agentfences.init(local_only=True)
+
+
 def check_events_are_sent_batched_and_redacted():
     def scrub(e):
         if e["type"] != "span":
@@ -1496,7 +1547,7 @@ if __name__ == "__main__":
         check_concurrent_runs_are_independent, check_nested_runs, check_outside_a_run,
         check_prices_each_response_shape, check_extra_costs_and_old_calls, check_budget_stops_on_real_usage,
         check_unknown_model_warns_and_custom_prices, check_run_context, check_exception_capture, check_redaction,
-        check_tool_calls, check_error_categories, check_fallback, check_metadata_mode, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
+        check_tool_calls, check_error_categories, check_fallback, check_metadata_mode, check_tags, check_events_are_sent_batched_and_redacted, check_old_server_without_events,
         check_heartbeat_stop_and_limits, check_pause_resume_and_timeout, check_approvals,
         check_acks_and_containment_hooks, check_quarantine_blocks_guarded_tools, check_hooks_finish_before_exit,
         check_resent_quarantine_doesnt_flood_heartbeats, check_acks_survive_a_rate_limited_heartbeat, check_server_limits_are_adopted, check_no_budget_runs_but_warns, check_dashboard_owned_limits,

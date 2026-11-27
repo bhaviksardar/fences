@@ -62,6 +62,46 @@ export function currentContext(): Record<string, string> {
   return { ...processContext, ...(contextStore.getStore() ?? {}) };
 }
 
+export const MAX_TAGS = 20;
+export const MAX_TAG_VALUE = 100;
+const TAG_KEY = /^[a-z0-9_.-]{1,40}$/;
+
+/** init({ tags }) and governed(fn, { tags }): up to 20 keys of a-z, 0-9, _ . - (40 at most), string values of 100 at most. */
+export function checkTags(tags: unknown): Record<string, string> {
+  if (tags === undefined || tags === null) return {};
+  if (typeof tags !== "object" || Array.isArray(tags)) throw new TypeError(`tags must be an object, not ${JSON.stringify(tags)}`);
+  const entries = Object.entries(tags);
+  if (entries.length > MAX_TAGS) throw new RangeError(`tags takes at most ${MAX_TAGS} keys, not ${entries.length}`);
+  for (const [k, v] of entries) {
+    if (!TAG_KEY.test(k)) throw new RangeError(`tag key ${JSON.stringify(k)} must be 1 to 40 of a-z, 0-9, _ . -`);
+    if (typeof v !== "string" || v.length > MAX_TAG_VALUE) {
+      throw new RangeError(`tag ${JSON.stringify(k)} must be a string of at most ${MAX_TAG_VALUE} characters, not ${JSON.stringify(v)}`);
+    }
+  }
+  return Object.fromEntries(entries) as Record<string, string>;
+}
+
+/**
+ * The run start's context: its own keys plus each tag as `tag.<key>` (the run start has no field for
+ * tags, and older servers may refuse new ones). Servers take 32 keys at most: past that, environment,
+ * release and the tags are kept first, then as many context() values as fit, with a warning.
+ */
+export function withTags(context: Record<string, string>, tags: Record<string, string>): Record<string, string> {
+  const tagged = Object.fromEntries(Object.entries(tags).map(([k, v]) => [`tag.${k}`, v]));
+  const merged = { ...context, ...tagged };
+  if (Object.keys(merged).length <= MAX_CONTEXT_KEYS) return merged;
+  const kept: Record<string, string> = {};
+  for (const k of ["environment", "release"]) if (k in context) kept[k] = context[k];
+  Object.assign(kept, tagged);
+  for (const [k, v] of Object.entries(context)) {
+    if (Object.keys(kept).length >= MAX_CONTEXT_KEYS) break;
+    if (!(k in kept)) kept[k] = v;
+  }
+  warnOnce("context-trimmed", `a run's context and tags come to ${Object.keys(merged).length} keys, more than the ` +
+    `${MAX_CONTEXT_KEYS} Fences takes; sent ${Object.keys(kept).length}, its tags first`);
+  return kept;
+}
+
 /** `Type: message`, or just the type when there's no message. */
 export function errorText(e: unknown): string {
   const type = errorType(e);
@@ -161,9 +201,9 @@ const CATEGORIES = new Set<unknown>(["rate_limit", "overloaded", "timeout", "aut
  */
 export function metadataOnly(event: Event): Event | null {
   if (event.type === "decision") return null;  // sent as a fences.decision span with its length instead (logDecision)
-  if (event.type === "run_start" && event.context) {  // the keys, not the values; init()'s environment and release stay
+  if (event.type === "run_start" && event.context) {  // the keys, not the values; environment, release and tags stay
     const context = Object.fromEntries(Object.entries(event.context as Record<string, string>)
-      .map(([k, v]) => [k, k === "environment" || k === "release" ? v : ""]));
+      .map(([k, v]) => [k, k === "environment" || k === "release" || k.startsWith("tag.") ? v : ""]));
     return { ...event, context };
   }
   if (event.type === "run_end" && event.exception) {

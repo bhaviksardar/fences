@@ -26,6 +26,7 @@ _client: Optional[GovClient] = None
 _local_only: bool = False
 _fail_closed: bool = False
 _on_breach: Optional[str] = None
+_tags: dict = {}  # init(tags=...)
 
 
 def _check_on_breach(value: Optional[str]) -> Optional[str]:
@@ -53,6 +54,7 @@ def init(
     tool_arguments: str = "names",
     allow_http: bool = False,
     capture: str = "full",
+    tags: Optional[dict] = None,
 ):
     """
     Initialize Fences. Call once at startup before using @governed.
@@ -71,6 +73,10 @@ def init(
         agentfences.init(local_only=True, prices={"my-model": {"input": 1.0, "output": 3.0}})
 
     environment and release tag every run, e.g. environment="prod", release="v1.4.2".
+
+    tags label every run for filtering and grouping, e.g. tags={"pipeline": "pcr", "team": "ops"}: up
+    to 20 keys of a-z, 0-9, _ . - (40 characters at most), each a string of 100 characters at most.
+    @governed(tags=...) adds to them, its values winning. They're metadata: capture="metadata" keeps them.
 
     redact(event) sees every event before it leaves the process (run start context,
     decisions, run errors) and returns it, changed or not, or None to drop it. If it
@@ -105,7 +111,7 @@ never halts.
     the redact hook can change or drop them.
 
     capture="metadata" sends nothing the agent or its users wrote, for regulated data (health, finance):
-    run context keeps its keys but not their values (environment and release stay); a decision
+    run context keeps its keys but not their values (environment, release and tags stay); a decision
     is sent only as a fences.decision span with its length; errors keep their type, category and
     HTTP status but not their message; tool call spans carry no arguments, whatever tool_arguments
     says. Names, models, tokens, cost, timings and statuses are sent as usual. A guarded tool's check
@@ -118,8 +124,9 @@ never halts.
     for budget waits the same way. A stop ends the wait, and after pause_timeout_s the
     breach is returned as usual. Cloud mode only. Override per agent in @governed.
     """
-    global _client, _local_only, _fail_closed, _on_breach
+    global _client, _local_only, _fail_closed, _on_breach, _tags
     _on_breach = _check_on_breach(on_breach)
+    _tags = events.check_tags(tags)
     from . import spans
     if tool_arguments not in spans.TOOL_ARGUMENTS:
         raise ValueError(f"tool_arguments must be one of {spans.TOOL_ARGUMENTS}, not {tool_arguments!r}")
@@ -196,6 +203,7 @@ def governed(
     max_duration_ms: Optional[int] = None,
     max_tokens: Optional[int] = None,
     on_breach: Optional[str] = None,
+    tags: Optional[dict] = None,
 ):
     """
     Decorator that applies governance policy to an agent function.
@@ -207,6 +215,7 @@ def governed(
         max_duration_ms: Maximum wall-clock duration in milliseconds.
         max_tokens: Maximum total tokens (input + output) allowed. 0 = no limit.
         on_breach: "hold" to wait at a limit for someone to raise it (see init); defaults to init's.
+        tags: labels for this agent's runs, added to init's (these win); same limits as init's.
 
     Every limit is optional. In cloud mode a limit left out here comes from the agent's
     page in the Fences dashboard. Limits set nowhere default to 100 steps, 5 minutes and
@@ -229,9 +238,10 @@ def governed(
             return response
     """
     _check_on_breach(on_breach)
+    tags = events.check_tags(tags)
 
     def decorator(func: Callable) -> Callable:
-        start = functools.partial(_start_run, func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens, on_breach)
+        start = functools.partial(_start_run, func.__name__, budget_usd, max_iterations, max_duration_ms, max_tokens, on_breach, tags)
 
         if inspect.isasyncgenfunction(func):
             @functools.wraps(func)
@@ -351,7 +361,7 @@ def _notice(agent_name: str, code: str, message: str):
         log.warning("agentfences: %s", message)
 
 
-def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens, on_breach=None) -> RunState:
+def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens, on_breach=None, tags=None) -> RunState:
     run_id = str(uuid.uuid4())
     in_code = {"max_iterations": max_iterations, "max_duration_ms": max_duration_ms, "max_tokens": max_tokens}
     run = RunState(
@@ -360,6 +370,7 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
         budget_usd=budget_usd,
         **{k: DEFAULT_LIMITS[k] if v is None else v for k, v in in_code.items()},
         context=events.current_context(),
+        tags={**_tags, **(tags or {})},
         on_breach=on_breach or _on_breach,
         budget_in_code=budget_usd is not None,
     )
@@ -369,7 +380,8 @@ def _start_run(agent_name, budget_usd, max_iterations, max_duration_ms, max_toke
                                          f"Set one with @governed(budget_usd=...).")
     if client:
         # The run must start even if redaction drops its context: limits depend on it
-        sent = events.redact({"type": "run_start", "agent_name": agent_name, "context": dict(run.context)}) if run.context else None
+        context = events.with_tags(run.context, run.tags)
+        sent = events.redact({"type": "run_start", "agent_name": agent_name, "context": context}) if context else None
         # Limits left out in code go as null: the server fills them from the agent's dashboard settings
         resp = client.start_run(run_id, agent_name, budget_usd, max_iterations, max_duration_ms, max_tokens,
                                 context=(sent or {}).get("context"))

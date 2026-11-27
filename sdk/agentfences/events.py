@@ -5,6 +5,7 @@ the exception that ended it, and the redaction hook every outgoing event passes 
 import contextlib
 import contextvars
 import logging
+import re
 import traceback
 from typing import Callable, Optional
 
@@ -54,6 +55,53 @@ def context(**values):
 
 def current_context() -> dict:
     return {**_process_context, **_context.get()}
+
+
+MAX_TAGS, MAX_TAG_VALUE = 20, 100
+_TAG_KEY = re.compile(r"[a-z0-9_.-]{1,40}")
+
+
+def check_tags(tags: Optional[dict]) -> dict:
+    """init(tags=) and @governed(tags=): up to 20 keys of a-z, 0-9, _ . - (40 at most), string values of 100 at most."""
+    if tags is None:
+        return {}
+    if not isinstance(tags, dict):
+        raise TypeError(f"tags must be a dict, not {type(tags).__name__}")
+    if len(tags) > MAX_TAGS:
+        raise ValueError(f"tags takes at most {MAX_TAGS} keys, not {len(tags)}")
+    for k, v in tags.items():
+        if not isinstance(k, str) or not _TAG_KEY.fullmatch(k):
+            raise ValueError(f"tag key {k!r} must be 1 to 40 of a-z, 0-9, _ . -")
+        if not isinstance(v, str) or len(v) > MAX_TAG_VALUE:
+            raise ValueError(f"tag {k!r} must be a string of at most {MAX_TAG_VALUE} characters, not {v!r}")
+    return dict(tags)
+
+
+def with_tags(context: dict, tags: dict) -> dict:
+    """
+    The run start's context: its own keys plus each tag as `tag.<key>` (the run start has no field for
+    tags, and older servers may refuse new ones). Servers take 32 keys at most: past that, environment,
+    release and the tags are kept first, then as many context() values as fit, with a warning.
+    """
+    tagged = {f"tag.{k}": v for k, v in tags.items()}
+    merged = {**context, **tagged}
+    if len(merged) <= MAX_CONTEXT_KEYS:
+        return merged
+    kept = {k: context[k] for k in ("environment", "release") if k in context}
+    kept.update(tagged)
+    for k, v in context.items():
+        if len(kept) >= MAX_CONTEXT_KEYS:
+            break
+        kept.setdefault(k, v)
+    global _trim_warned
+    if not _trim_warned:
+        _trim_warned = True
+        log.warning("agentfences: a run's context and tags come to %d keys, more than the %d Fences takes; "
+                    "sent %d, its tags first", len(merged), MAX_CONTEXT_KEYS, len(kept))
+    return kept
+
+
+_trim_warned = False  # once per process
 
 
 def error_text(e: BaseException) -> str:
@@ -130,8 +178,8 @@ def metadata_only(event: dict) -> Optional[dict]:
     kind = event.get("type")
     if kind == "decision":  # sent as a fences.decision span with its length instead (core.log_decision)
         return None
-    if kind == "run_start" and event.get("context"):  # the keys, not the values; init()'s environment and release stay
-        return {**event, "context": {k: v if k in ("environment", "release") else ""
+    if kind == "run_start" and event.get("context"):  # the keys, not the values; environment, release and tags stay
+        return {**event, "context": {k: v if k in ("environment", "release") or k.startswith("tag.") else ""
                                      for k, v in event["context"].items()}}
     if kind == "run_end" and event.get("exception"):
         exc = event["exception"]
