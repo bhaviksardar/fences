@@ -13,16 +13,17 @@
 <script src="site.js" defer></script>
 <style>
   section { border-top: 1px solid var(--line); padding: 96px 0; }
-  h1 { font-size: clamp(46px, 11.6vw, 240px); font-weight: 600; line-height: .96; letter-spacing: -.04em; }
+  h1 { font-size: clamp(40px, 9.6vw, 200px); font-weight: 600; line-height: .96; letter-spacing: -.04em; }
   h2 { font-size: clamp(32px, 4.6vw, 80px); font-weight: 600; line-height: 1.04; letter-spacing: -.04em; }
   h3 { font-size: 16px; font-weight: 500; letter-spacing: -.01em; }
   .lede { font-size: clamp(18px, 1.5vw, 23px); line-height: 1.55; color: var(--fg-2); max-width: 62ch; }
   h2 + .lede { margin-top: 16px; }
 
   /* Hero */
-  .hero { padding: clamp(48px, 7vw, 112px) 0 0; }
-  .hero-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 48px; align-items: end; margin-top: 40px; }
-  .hero-field { width: 100%; height: clamp(240px, 26vw, 420px); }
+  .hero { position: relative; min-height: clamp(560px, calc(100vh - 100px), 960px); display: flex; flex-direction: column; justify-content: center; padding: clamp(72px, 12vh, 140px) 0; border-bottom: 1px solid var(--line); }
+  .hero-field { position: absolute; top: 0; left: calc(-1 * var(--gutter)); width: calc(100% + 2 * var(--gutter)); height: 100%; }
+  .hero-copy { position: relative; background: var(--bg); border: 1px solid var(--line-2); border-radius: 12px; padding: clamp(24px, 4vw, 64px); }
+  .hero .lede { margin-top: 28px; }
   .start { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 36px; }
   .cmd { display: flex; align-items: center; height: 44px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-2); font: 14px var(--mono); }
   .cmd .tabs { display: flex; height: 100%; border-right: 1px solid var(--line-2); }
@@ -32,7 +33,7 @@
   .cmd code { padding: 0 6px 0 14px; color: var(--fg); white-space: nowrap; background: none; border: 0; border-radius: 0; font-size: 14px; }
   .cmd code::before { content: "$ "; color: var(--fg-3); }
   .cmd .copy { margin-right: 8px; }
-  .shot { margin-top: 56px; border: 1px solid var(--line); border-bottom: 0; border-radius: 12px 12px 0 0; overflow: hidden; padding: 0 10px; background: var(--bg-2); }
+  .shot { margin-top: 64px; border: 1px solid var(--line); border-bottom: 0; border-radius: 12px 12px 0 0; overflow: hidden; padding: 0 10px; background: var(--bg-2); }
   .shot img { border-radius: 6px 6px 0 0; }
   .shot .bar { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 6px; font: 12px var(--mono); color: var(--fg-2); }
   .shot .bar span { width: 10px; height: 10px; border-radius: 50%; background: var(--line-2); }
@@ -71,6 +72,19 @@
   .rows code { grid-row: 1; grid-column: 2; align-self: start; font-size: 12px; color: var(--fg-2); }
 
   /* Works with */
+  .products { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 48px; }
+  .products article { display: flex; flex-direction: column; gap: 14px; padding: 28px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-2); }
+  .products .ph { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .products h3 { font-size: 22px; font-weight: 600; letter-spacing: -.02em; }
+  .products .ph span { font: 500 12px var(--mono); color: var(--fg-3); white-space: nowrap; }
+  .products .pw { color: var(--fg); font-weight: 500; }
+  .products p { color: var(--fg-2); font-size: 15px; }
+  .products ul { list-style: none; padding: 0; display: grid; gap: 8px; font-size: 14px; color: var(--fg-2); border-top: 1px solid var(--line); padding-top: 16px; }
+  .products li { padding-left: 18px; position: relative; }
+  .products li::before { content: ""; position: absolute; left: 0; top: .7em; width: 8px; height: 1px; background: var(--fg-3); }
+  .products code { margin-top: auto; align-self: start; font-size: 12px; }
+  h3.with { margin-top: 64px; font-size: 15px; font-weight: 500; color: var(--fg-2); }
+  h3.with + .stack { margin-top: 16px; }
   .stack { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 40px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
   .stack div { padding: 22px 20px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); margin: 0 -1px -1px 0; }
   .stack b { display: block; font-weight: 500; }
@@ -103,12 +117,12 @@
   .close .start { margin-top: 28px; }
 
   @media (max-width: 920px) {
-    .hero-row { grid-template-columns: 1fr; gap: 24px; }
-    .hero-field { height: 220px; }
-    .shot { margin-top: 24px; }
+    .hero { min-height: 640px; padding: 96px 0; }
+    .shot { margin-top: 40px; }
     .split, .enforce, .code-split { grid-template-columns: 1fr; gap: 40px; }
     .enforce .intro { position: static; }
     .stack { grid-template-columns: repeat(2, 1fr); }
+    .products { grid-template-columns: 1fr; }
     section { padding: 72px 0; }
   }
   @media (max-width: 760px) {
@@ -117,6 +131,7 @@
   }
   @media (max-width: 520px) {
     .hero { padding-top: 56px; }
+    .hero-copy { padding: 22px 18px; }
     .term li { grid-template-columns: 64px 1fr 76px; }
     .term li .st { display: none; }
     .term li.breach .st { display: block; grid-column: 2 / -1; text-align: left; }
@@ -137,7 +152,7 @@
 <nav class="top" aria-label="Main">
   <div class="wrap">
     <a class="logo" href="./"><svg class="mark" viewBox="17 5 66 90" aria-hidden="true"><path d="M22 33v57M78 10v57M22 38h56M22 62h56" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round"/></svg>fences</a>
-    <div class="navlinks"><a href="#control">Why Fences</a><a href="#enforce">What it enforces</a><a href="#code">Code</a><a href="#faq">FAQ</a><a href="docs/">Docs</a></div>
+    <div class="navlinks"><a href="#control">Why Fences</a><a href="#enforce">What it enforces</a><a href="#stack">SDK, Gateway, Edge</a><a href="#code">Code</a><a href="#faq">FAQ</a><a href="docs/">Docs</a></div>
     <div class="navend">
       <a class="btn" href="https://github.com/bhaviksardar/fences"><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>GitHub</a>
       <a class="btn primary" href="docs/#quickstart">Get started</a>
@@ -147,9 +162,9 @@
 
 <main class="wrap">
   <header class="hero">
-    <h1>The control plane for AI agents.</h1>
-    <div class="hero-row">
-      <div>
+    <canvas class="hero-field" data-dither="fence" data-slope="0.5" data-rail="0.16" data-fade="none" data-animate aria-hidden="true"></canvas>
+    <div class="hero-copy">
+      <h1>The control plane for AI agents.</h1>
       <p class="lede">Fences gives organizations visibility and control over every AI agent interacting with their systems, regardless of where it runs or who built it.</p>
       <div class="start">
         <div class="cmd" data-cmd>
@@ -159,14 +174,12 @@
         </div>
         <a class="btn lg" href="docs/#quickstart">Read the quickstart</a>
       </div>
-      </div>
-      <canvas class="hero-field" data-dither="fence" data-slope="0.5" data-animate aria-hidden="true"></canvas>
     </div>
+  </header>
     <div class="shot">
       <div class="bar"><span></span><span></span><span></span><b>Fences dashboard · Cloud preview</b></div>
       <img src="demo.png" alt="The Fences dashboard listing six runs with their spend, iterations and tokens against each limit; one run, web-scraper, has breached its budget." width="1080" height="560">
     </div>
-  </header>
 
   <section id="control">
     <div class="split">
@@ -216,7 +229,43 @@
   <section id="stack">
     <div>
       <h2>Wherever it runs. Whoever built it.</h2>
-      <p class="lede">Add the SDK to agents in Python or TypeScript. Popular frameworks need no extra code, and anything else can use the REST API.</p>
+      <p class="lede">Three ways to put an agent behind a fence. Each enforces the same rules and reports to the same dashboard, so one agent can use all three.</p>
+      <div class="products">
+        <article>
+          <div class="ph"><h3>SDK</h3><span>Available now</span></div>
+          <p class="pw">Inside the agents you build.</p>
+          <p>Python and TypeScript libraries that run in your agent's process. Wrap the agent function, checkpoint each step, and guard the tools that matter.</p>
+          <ul>
+            <li>Spend, step, time and token limits per run</li>
+            <li>Guarded tools that ask before they act</li>
+            <li>Local mode with no account and no network</li>
+          </ul>
+          <code>pip install agentfences</code>
+        </article>
+        <article>
+          <div class="ph"><h3>Gateway</h3><span>Open source · v0.1.0</span></div>
+          <p class="pw">In front of the systems agents touch.</p>
+          <p>A Go service between agents and your MCP servers, HTTP APIs and Kubernetes clusters. It governs agents you didn't write, with no change to their code. It enrolls with Fences Cloud, coming soon.</p>
+          <ul>
+            <li>MCP: tools an agent may never call are hidden</li>
+            <li>HTTP APIs: method, path and body decided before forwarding</li>
+            <li>Kubernetes: writes admitted or refused, access pulled on quarantine</li>
+            <li>Claude Code: every built-in tool call checked by a hook</li>
+          </ul>
+          <code>ghcr.io/bhaviksardar/fences-gateway</code>
+        </article>
+        <article>
+          <div class="ph"><h3>Edge</h3><span>Coming soon</span></div>
+          <p class="pw">On the device the agent runs on.</p>
+          <p>The gateway's policy engine, enrolled on a single machine. It enforces the same signed rules where the agent lives, with no shared gateway to route through.</p>
+          <ul>
+            <li>Decides locally from a signed policy bundle</li>
+            <li>Keeps enforcing when the platform can't be reached</li>
+            <li>Queues every decision and sends it when it can</li>
+          </ul>
+        </article>
+      </div>
+      <h3 class="with">What the SDK works with</h3>
       <div class="stack">
         <div><b>Python</b><span>3.9+ · PyPI</span></div>
         <div><b>TypeScript</b><span>Node 18+ · npm</span></div>
@@ -297,6 +346,7 @@ init({ localOnly: <span class="n">true</span> });
         <details><summary>Does Fences call my LLM or see my prompts?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><p>No. Your agent reports cost, tokens, the model's name, an optional reasoning note, and which tools it called, with their argument names. Prompts, completions and argument values stay in your infrastructure by default. A guarded tool's check sends its arguments so rules can apply, and a <code>redact</code> hook sees everything before it's sent, so you can change or drop any of it.</p></details>
         <details><summary>What happens when a limit is crossed?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><p>The checkpoint returns <code>breached</code> with the reason: a run limit (<code>budget_exceeded</code>, <code>iteration_limit</code>, <code>time_limit</code>, <code>token_limit</code>), the agent's daily or monthly cap, or <code>stopped_by_user</code>. The agent gets a ready-made message to wrap up with, and further checkpoints are refused until you raise the limit. With <code>on_breach="hold"</code> the run waits instead, and carries on once someone raises the limit.</p></details>
         <details><summary>Which frameworks does it work with?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><p>Anything with a loop, in Python or TypeScript. Raw OpenAI and Anthropic calls are recorded and checked against the budget before they're sent. LangChain, LangGraph and the OpenAI Agents SDK need no decorators, and MCP tool calls are recorded and can be guarded. Otherwise you call <code>checkpoint()</code> where a step ends, and agents in any other language can use the REST API.</p></details>
+        <details><summary>Can Fences govern agents I didn't build?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><p>Yes, with the gateway. Point the agent at the gateway instead of its MCP servers or APIs, or run its Kubernetes service account through the gateway's admission webhook, and every call is decided against your rules before it reaches the system. Claude Code's built-in tools are covered by a <code>PreToolUse</code> hook. The gateway decides locally from a signed policy bundle, so the platform is never on the hot path. It enrolls with Fences Cloud, which is coming soon.</p></details>
         <details><summary>Can I try it without an account?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><p>Yes. <code>agentfences.init(local_only=True)</code> enforces limits in-process with no key. Fences Cloud, with the dashboard and stored audit trail, is coming soon.</p></details>
         <details><summary>How do I sign in to Fences Cloud?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><p>Google, GitHub, Microsoft, Apple, email and password, or your company's SAML or OIDC single sign-on.</p></details>
       </div>

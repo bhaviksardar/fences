@@ -10,8 +10,6 @@ const BAYER = [
 ].map(n => (n + 0.5) / 64);
 
 const CELL = 3;
-const RAIL = 0.34;   // the limit: spend lines flatten here
-const RAIL2 = 0.56;
 const RUNS = [
   { base: 0.05, k: 1.5 }, { base: 0.38, k: 2.4 }, { base: 0.66, k: 1.1 },
   { base: 0.92, k: 1.9 }, { base: 1.2, k: 1.3 }, { base: 1.42, k: 2.8 },
@@ -29,6 +27,7 @@ const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a
 const fields = {
   fence(u, v, t, aspect, el) {
     const px = 1 / el.rows;
+    const RAIL = +el.dataset.rail || 0.34, RAIL2 = RAIL + 0.22;  // the limit: spend lines flatten at RAIL
     let i = 0, tone = 0;
     // Two rails and the posts: the fence mark, drawn as a field
     for (const r of [RAIL, RAIL2]) { const d = Math.abs(v - r); if (d < px * 1.2) i = Math.max(i, 0.5); }
@@ -64,7 +63,7 @@ const fields = {
 function setup(canvas) {
   const field = fields[canvas.dataset.dither];
   const ctx = canvas.getContext('2d');
-  let img, colors, t = 7, raf = 0, last = 0, visible = false;
+  let img, colors, quiet = [], t = 7, raf = 0, last = 0, visible = false;
 
   function size() {
     const r = canvas.getBoundingClientRect();
@@ -72,14 +71,28 @@ function setup(canvas) {
     canvas.height = Math.max(1, Math.round(r.height / CELL));
     canvas.rows = canvas.height;
     img = ctx.createImageData(canvas.width, canvas.height);
+    measure();
   }
+  // Text laid over the field gets a clear margin: one box per rendered line
+  function measure() {
+    quiet = [];
+    if (!canvas.dataset.quiet) return;
+    const c = canvas.getBoundingClientRect(), pad = 3;
+    const sx = canvas.width / c.width, sy = canvas.height / c.height;
+    document.querySelectorAll(canvas.dataset.quiet).forEach(el => {
+      let rects = [el.getBoundingClientRect()];
+      if (/^(H\d|P)$/.test(el.tagName)) { const r = document.createRange(); r.selectNodeContents(el); rects = [...r.getClientRects()]; }
+      for (const b of rects) quiet.push([(b.left - c.left) * sx - pad, (b.top - c.top) * sy - pad, (b.right - c.left) * sx + pad, (b.bottom - c.top) * sy + pad]);
+    });
+  }
+  const clear = (x, y) => quiet.some(q => x >= q[0] && x <= q[2] && y >= q[1] && y <= q[3]);
   function theme() { colors = [rgb('--fg-3'), rgb('--fg'), rgb('--breach'), rgb('--line-2')]; }
   function draw() {
     const { width: w, height: h } = canvas, d = img.data, aspect = w / h;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const [i, tone] = field(x / w, y / h, t, aspect, canvas);
       const o = (y * w + x) * 4;
-      if (i > BAYER[(y & 7) * 8 + (x & 7)]) { const c = colors[tone]; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255; }
+      if (i > BAYER[(y & 7) * 8 + (x & 7)] && !clear(x, y)) { const c = colors[tone]; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255; }
       else d[o + 3] = 0;
     }
     ctx.putImageData(img, 0, 0);
@@ -97,6 +110,7 @@ function setup(canvas) {
     if (animated && visible && !still.matches) raf = requestAnimationFrame(loop); else draw();
   }
   size(); theme(); draw();
+  document.fonts?.ready.then(() => { measure(); draw(); });
   new ResizeObserver(() => { size(); draw(); }).observe(canvas);
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { theme(); draw(); });
   still.addEventListener('change', run);

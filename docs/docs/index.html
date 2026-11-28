@@ -68,6 +68,8 @@
   .steps > li:last-child::after { display: none; }
   .steps h3 { margin-top: 0; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0; }
+  .card a { display: inline-block; margin-top: 6px; }
   .card { border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; font-size: 14px; color: var(--fg-2); }
   .card b { display: block; color: var(--fg); font-weight: 500; font-size: 15px; margin-bottom: 4px; }
   .method { font: 500 11px var(--mono); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--line-2); color: var(--fg); }
@@ -81,7 +83,7 @@
     .toc.open { display: block; }
     .navtoggle { display: inline-flex; }
     article { padding-top: 28px; }
-    .grid2 { grid-template-columns: 1fr; }
+    .grid2, .grid3 { grid-template-columns: 1fr; }
     .navend .btn:not(.navtoggle):not(.primary) { display: none; }
   }
 </style>
@@ -119,6 +121,11 @@
     <a href="#typescript">TypeScript</a>
     <a href="#live">Live control</a>
     <a href="#reliability">Reliability</a>
+    <b>Gateway and Edge</b>
+    <a href="#gateway">Gateway</a>
+    <a href="#gateway-surfaces">What it governs</a>
+    <a href="#gateway-run">Run a gateway</a>
+    <a href="#edge">Edge</a>
     <b>Reference</b>
     <a href="#sdk">Python SDK</a>
     <a href="#rest">REST API</a>
@@ -132,10 +139,12 @@
     <div id="overview">
       <h1>Put fences around your agents.</h1>
       <p class="lead">Fences is the control plane for AI agents. It gives organizations visibility and control over every AI agent interacting with their systems, regardless of where it runs or who built it. It shows every run live, records what the agent decided and why, lets you stop any run in one click, and enforces limits on spend, steps, time and tokens that the agent can't raise itself.</p>
-      <div class="grid2">
-        <div class="card"><b>The SDK</b><code>agentfences</code> on PyPI and npm, for Python and TypeScript. One decorator on your agent function, one <code>checkpoint()</code> call after each model call, and guards on the tools that matter.</div>
-        <div class="card"><b>The dashboard</b>Live runs, the decision trail behind each one, and limits you can raise mid-run to let a stopped agent continue.</div>
+      <div class="grid3">
+        <div class="card"><b>The SDK</b>In the agents you build. <code>agentfences</code> on PyPI and npm, for Python and TypeScript: one decorator on your agent function, one <code>checkpoint()</code> after each model call, and guards on the tools that matter. <a href="#quickstart">Quickstart</a></div>
+        <div class="card"><b>The gateway</b>In front of the systems agents touch. A service between agents and your MCP servers, HTTP APIs and Kubernetes clusters, for agents you didn't write, Claude Code included. <a href="#gateway">Gateway</a></div>
+        <div class="card"><b>Edge</b>On the device the agent runs on. The gateway's policy engine enrolled on a single machine, enforcing the same rules there. Coming soon. <a href="#edge">Edge</a></div>
       </div>
+      <p>All three enforce the same rules and report to the same <strong>dashboard</strong>: live runs, the decision trail behind each one, approvals, quarantine, and limits you can raise mid-run to let a stopped agent continue.</p>
       <p>You can run the SDK entirely on its own (<strong>local mode</strong>: no account, nothing leaves your process) or connect it to Fences Cloud (<strong>cloud mode</strong>, coming soon) with an API key. Your agent code is the same either way; only <code>init()</code> changes.</p>
     </div>
 
@@ -523,6 +532,71 @@ agentfences.init(api_key=..., endpoint=..., on_stop=revoke, on_quarantine=revoke
       <p>In async agents, backend calls run in a worker thread so they never block the event loop. Decisions and tool and model call records are sent in the background and flushed at exit; call <code>agentfences.flush()</code> before a serverless handler returns.</p>
       <h3>Guarantees</h3>
       <p>What Fences guarantees at each level (budgets and checkpoints, live control, guarded tools), and what it can't, each with the test that proves it: <a href="https://github.com/bhaviksardar/fences/blob/main/ENFORCEMENT.md">ENFORCEMENT.md</a>.</p>
+    </section>
+
+    <!-- Gateway -->
+    <section id="gateway">
+      <h2>Gateway</h2>
+      <p>The SDK governs agents you can change. Fences Gateway governs the ones you can't: agents from a vendor, an open-source project or another team, and coding agents like Claude Code. It sits between the agent and the systems it calls, and decides every call before it's forwarded. The agent's code doesn't change; it gets a Fences key and talks to the gateway instead.</p>
+      <div class="note">The gateway is open source (<a href="https://github.com/bhaviksardar/fences-gateway">fences-gateway</a>, v0.1.0) and enrolls with Fences Cloud, which is coming soon.</div>
+      <h3>How it decides</h3>
+      <ul>
+        <li><strong>Locally.</strong> The gateway pulls a signed policy bundle from the platform and decides every call from it. The platform is never on the hot path. In a load test at 1,000 requests a second, the policy engine added 0.024 ms at p99 (<a href="https://github.com/bhaviksardar/fences-gateway/blob/main/docs/load-test.md">load-test.md</a>).</li>
+        <li><strong>Fail closed.</strong> With no valid bundle, everything is denied. When the platform can't be reached, the last good bundle keeps deciding, and calls that need an approval are denied. A rule can opt in to <code>on_unavailable: allow</code> for reads you know are safe.</li>
+        <li><strong>The same controls as the SDK.</strong> Rate and amount limits per agent, approvals in Slack or on the dashboard, and quarantine, which reaches the gateway within about 2 seconds. Every decision is queued on disk and sent to the dashboard in batches.</li>
+        <li><strong>Identity is a credential.</strong> An agent is the Fences key or Kubernetes service account it presents, never what it says about itself. Upstream credentials stay in the gateway's config, so the agent never holds them.</li>
+      </ul>
+    </section>
+
+    <section id="gateway-surfaces">
+      <h2>What it governs</h2>
+      <div class="table"><table>
+        <thead><tr><th>Surface</th><th>How</th><th>Guide</th></tr></thead>
+        <tbody>
+          <tr><td>MCP servers</td><td>One remote MCP server per upstream at <code>/mcp/&lbrace;upstream&rbrace;</code>. <code>tools/list</code> hides tools the agent may never call, and each <code>tools/call</code> is decided before it's forwarded. A denied call returns an MCP error with the reason.</td><td><a href="https://github.com/bhaviksardar/fences-gateway/blob/main/spec/rules/README.md">Rules</a></td></tr>
+          <tr><td>HTTP APIs</td><td>A reverse proxy per API at <code>/http/&lbrace;api&rbrace;/...</code>. Each request is decided on its method, path, query and JSON body. Amounts are reserved before forwarding, so two requests can't both take the last of a cap.</td><td><a href="https://github.com/bhaviksardar/fences-gateway/blob/main/docs/http-proxy.md">http-proxy.md</a></td></tr>
+          <tr><td>Kubernetes</td><td>A validating admission webhook decides every write an agent's service account makes. On quarantine the gateway removes the account from its labeled write bindings, and restores it on release. Reads can be recorded from the audit log.</td><td><a href="https://github.com/bhaviksardar/fences-gateway/blob/main/docs/kubernetes.md">kubernetes.md</a></td></tr>
+          <tr><td>Claude Code</td><td><code>fences-hook</code> runs as a <code>PreToolUse</code> hook. Before Claude runs a command, writes a file or uses any tool, the hook asks the gateway, and a refused call is blocked with the reason. It fails closed.</td><td><a href="https://github.com/bhaviksardar/fences-gateway/blob/main/docs/claude-code.md">claude-code.md</a></td></tr>
+        </tbody>
+      </table></div>
+      <p>A refund API, for example, capped at $500 an hour per agent, with refunds over $100 held for a person:</p>
+<div class="code"><pre><code>{<span class="s">"default"</span>: <span class="s">"deny"</span>, <span class="s">"rules"</span>: [
+  {<span class="s">"id"</span>: <span class="s">"refund-cap"</span>, <span class="s">"on"</span>: <span class="s">"http"</span>, <span class="s">"effect"</span>: <span class="s">"allow"</span>,
+   <span class="s">"where"</span>: [{<span class="s">"field"</span>: <span class="s">"method"</span>, <span class="s">"op"</span>: <span class="s">"is"</span>, <span class="s">"value"</span>: <span class="s">"POST"</span>},
+             {<span class="s">"field"</span>: <span class="s">"path"</span>, <span class="s">"op"</span>: <span class="s">"is"</span>, <span class="s">"value"</span>: <span class="s">"/refunds"</span>}],
+   <span class="s">"limit"</span>: {<span class="s">"window_s"</span>: <span class="n">3600</span>, <span class="s">"max"</span>: <span class="n">500</span>, <span class="s">"sum"</span>: <span class="s">"body.amount"</span>}},
+  {<span class="s">"id"</span>: <span class="s">"big-refunds"</span>, <span class="s">"on"</span>: <span class="s">"http"</span>, <span class="s">"effect"</span>: <span class="s">"approve"</span>,
+   <span class="s">"where"</span>: [{<span class="s">"field"</span>: <span class="s">"path"</span>, <span class="s">"op"</span>: <span class="s">"is"</span>, <span class="s">"value"</span>: <span class="s">"/refunds"</span>},
+             {<span class="s">"field"</span>: <span class="s">"body.amount"</span>, <span class="s">"op"</span>: <span class="s">"gt"</span>, <span class="s">"value"</span>: <span class="n">100</span>}]}
+]}</code></pre></div>
+      <p>The full rule language, with conditions, time windows and the decision order, is in the <a href="https://github.com/bhaviksardar/fences-gateway/blob/main/spec/rules/README.md">rules spec</a>.</p>
+    </section>
+
+    <section id="gateway-run">
+      <h2>Run a gateway</h2>
+      <p>In the dashboard, add each agent as a <strong>Third-party agent (Fences Gateway)</strong> and give it rules. In <strong>Settings → Gateways</strong>, make an enrollment token and assign the agent its upstreams. Then write a config:</p>
+<div class="code"><pre><code>{<span class="s">"platform"</span>: <span class="s">"https://fences.example.com"</span>, <span class="s">"name"</span>: <span class="s">"prod-gw-1"</span>,
+ <span class="s">"data_dir"</span>: <span class="s">"fences-data"</span>, <span class="s">"listen"</span>: <span class="s">"0.0.0.0:8080"</span>,
+ <span class="s">"upstreams"</span>: {<span class="s">"crm"</span>: {<span class="s">"url"</span>: <span class="s">"https://crm.internal/mcp"</span>, <span class="s">"headers"</span>: {<span class="s">"Authorization"</span>: <span class="s">"Bearer ${CRM_TOKEN}"</span>}}},
+ <span class="s">"apis"</span>: {<span class="s">"refunds"</span>: {<span class="s">"url"</span>: <span class="s">"https://refunds.internal/api"</span>, <span class="s">"headers"</span>: {<span class="s">"X-Api-Key"</span>: <span class="s">"${REFUNDS_KEY}"</span>}}}}</code></pre></div>
+      <p>Start it once with the token. It creates its own Ed25519 key, enrolls, and keeps its identity, last good bundle and event queue in <code>data_dir</code>:</p>
+<div class="code"><pre><code>FENCES_ENROLL_TOKEN=fge_… fences-gateway -config gateway.json</code></pre></div>
+      <p>It ships as a signed multi-arch image, <code>ghcr.io/bhaviksardar/fences-gateway</code>, and a Helm chart at <code>oci://ghcr.io/bhaviksardar/charts</code>. The chart runs a StatefulSet on a read-only root filesystem; several replicas share limit counts through a Redis-protocol store (<a href="https://github.com/bhaviksardar/fences-gateway/blob/main/docs/replicas.md">replicas.md</a>). <code>/healthz</code> and <code>/readyz</code> are served, and <code>/readyz</code> returns <code>503</code> until there's a bundle.</p>
+      <p>The agent then calls the gateway with its Fences key as <code>Authorization: Bearer &lt;key&gt;</code>: <code>https://&lt;gateway&gt;/mcp/crm</code> for the MCP server, <code>https://&lt;gateway&gt;/http/refunds/...</code> for the API.</p>
+    </section>
+
+    <!-- Edge -->
+    <section id="edge">
+      <h2>Edge</h2>
+      <div class="note">Fences Edge is coming soon. This describes what it's built to do.</div>
+      <p>Fences Edge governs an agent on the device it runs on, a laptop, a workstation or a single server, without a shared gateway to route through. It's built on the gateway's public packages: the same rules engine, signed bundles, event queue and sync, so a rule behaves the same wherever it's enforced.</p>
+      <ul>
+        <li>It enrolls with the platform as a <code>device</code>, using the same protocol as a gateway.</li>
+        <li>It decides locally from the last signed bundle, so it keeps enforcing when the device is offline.</li>
+        <li>Every decision is queued on the device and sent once the platform can be reached.</li>
+        <li>An Edge agent has the same page, owner, incidents and quarantine on the dashboard as an SDK or gateway agent.</li>
+      </ul>
+      <p>The protocol Edge and the gateway share is in <a href="https://github.com/bhaviksardar/fences-gateway/blob/main/spec/PROTOCOL-GATEWAY.md">PROTOCOL-GATEWAY.md</a>.</p>
     </section>
 
     <!-- SDK reference -->

@@ -61,7 +61,8 @@ em, i { font-style: normal; }
 input, textarea { caret-color: var(--accent); }
 @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
 
-.wrap { padding: 0 clamp(20px, 4vw, 64px); }
+:root { --gutter: clamp(20px, 4vw, 64px); }
+.wrap { padding: 0 var(--gutter); }
 .mark { width: .74em; height: 1em; flex: none; }
 
 /* Ribbon and nav */
